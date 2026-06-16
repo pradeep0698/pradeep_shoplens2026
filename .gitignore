@@ -1,0 +1,105 @@
+# Environment files
+.env
+.env.local
+.env.*.local
+# .env.local.example is intentionally tracked (it's a template)
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Backend Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Frontend Node
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env.local
+frontend/.env.*.local
+frontend/dist/
+!frontend/src/lib/
+frontend/.eslintrc.json
+
+# Credentials & secrets — block all JSON, then allow known-safe files
+*.json
+!services/*/catalog.json
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/tsconfig.json
+!frontend/firebase.json
+google-cloud-key.json
+service-account.json
+credentials.json
+infra/*.json
+
+# GCP & Cloud resources
+.firebase/
+.firebaserc  # Contains project IDs that may vary per deployment
+firebase-debug.log
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Internal / not for public repo
+plan/
+PUSH_CHECKLIST.md
+frontend_old/
+
+# Flutter mobile app
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/build/
+mobile/.env
+mobile/android/local.properties
+mobile/android/.gradle/
+mobile/android/captures/
+mobile/android/generatedConfigs/
+mobile/android/app/google-services.json
+!mobile/firebase.json
+!mobile/lib/firebase_options.dart
+!mobile/lib/**/*.freezed.dart
+!mobile/lib/**/*.g.dart
+!mobile/lib/
+!mobile/lib/**
+!mobile/gradlew
+!mobile/gradlew.bat
+!mobile/android/gradle/wrapper/gradle-wrapper.jar
+!mobile/android/gradle/wrapper/gradle-wrapper.properties

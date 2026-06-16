@@ -1,0 +1,50 @@
+Here is a detailed, structured prompt tailored for an AI assistant or a modern code-generation tool (like GitHub Copilot, Cursor, or an LLM) to seamlessly integrate this feature into your existing Flutter application.
+
+Copy and paste the markdown block below directly into your AI assistant.
+
+---
+
+```markdown
+# Context & Objective
+I have an existing Flutter app using the official `camera` plugin. I need to implement a feature where a user can tap or long-press on a live camera preview feed to select a specific physical object currently visible in the frame. 
+
+To achieve this cleanly and with low latency, I want to use Google's local machine learning package: `google_mlkit_object_detection`.
+
+# Architectural Pattern Required
+Instead of analyzing an image *after* a user taps (which introduces lag), the app must continuously stream frames from the camera in the background using `startImageStream`, let ML Kit track bounding boxes on every frame, and store them. When the user taps or long-presses, the application will intercept the touch coordinates via a `GestureDetector` and check if that point falls within one of the active bounding boxes.
+
+Please write a highly clean, self-contained Flutter widget or a set of classes that satisfies the following implementation requirements:
+
+## Detailed Technical Requirements:
+
+1. **State Management & Flags:**
+   - Keep track of a list of active `DetectedObject` instances.
+   - Implement a boolean flag (`_isProcessing`) to skip new incoming camera frames if the ML Kit engine is still processing the previous frame.
+
+2. **ML Kit Engine Initialization:**
+   - Initialize an `ObjectDetector` using `ObjectDetectorOptions`.
+   - Explicitly configure it to use `DetectionMode.stream` (crucial for video feeds) with tracking enabled so objects maintain a unique ID across sequential frames. Enable object classification.
+
+3. **Camera Frame Pipeline (`CameraImage` to `InputImage`):**
+   - Write a helper method that intercept frames via `cameraController.startImageStream`.
+   - Convert the native `CameraImage` (including managing planes, bytes, raw format, and device/sensor rotation configurations) into an `InputImage` type expected by `processImage()`. Handle both Android (YUV420) and iOS (BGRA8888) format structures correctly.
+
+4. **UI Layout Layer (Stack Setup):**
+   - Provide a Widget `build` method using a `Stack`.
+   - Wrap the `CameraPreview` inside a `GestureDetector`. 
+   - Intercept both `onTapUp` and `onLongPressStart`. Extract the local touch position offset `Offset(x, y)`.
+
+5. **Coordinate Translation & Mapping (Crucial):**
+   - Because the camera stream aspect ratio/resolution (e.g., 1280x720) rarely matches the device screen UI dimensions perfectly, implement a coordinate translator helper function.
+   - This helper must scale and shift the native bounding box coordinates (`object.boundingBox`) calculated by ML Kit so they map perfectly over the pixel space of the Flutter layout. Account for device orientation/rotation.
+
+6. **Intersection Logic:**
+   - Write an explicit `_handleSelection(Offset tapPosition)` method. 
+   - Loop through the scaled object bounds. If a bounding box contains the tap coordinates (`rect.contains(tapPosition)`), trigger a callback method `_onObjectSelected(DetectedObject object)`.
+
+7. **Lifecycle & Memory Management:**
+   - Ensure `objectDetector.close()` is properly invoked inside the widget's `dispose()` lifecycle method to prevent memory leaks.
+
+Please provide production-grade, well-commented Dart code following clean architectural patterns.
+
+```

@@ -1,0 +1,1009 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CookShop AI — Infrastructure Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --blue:#1a73e8;--blue-d:#1557b0;--blue-l:#e8f0fe;
+  --green:#0f9d58;--green-l:#e6f4ea;
+  --orange:#f29900;--orange-l:#fef3e2;
+  --purple:#7c4dff;--purple-l:#ede7f6;
+  --red:#d93025;--red-l:#fce8e6;
+  --teal:#00897b;--teal-l:#e0f2f1;
+  --dark:#0f0f23;--dark2:#1a1a3e;
+  --gray1:#f8f9fa;--gray2:#e8eaed;--gray3:#9aa0a6;
+  --text:#202124;--textl:#5f6368;--white:#fff;
+  --shadow:0 1px 4px rgba(0,0,0,.12),0 2px 8px rgba(0,0,0,.06);
+  --shadow-lg:0 8px 30px rgba(0,0,0,.14);
+}
+html,body{height:100%;font-family:'Inter',system-ui,sans-serif;background:var(--dark);color:var(--text);overflow:hidden}
+
+/* ── NAV ── */
+.topnav{position:fixed;top:0;left:0;right:0;z-index:200;display:flex;align-items:center;justify-content:space-between;padding:10px 24px;background:rgba(15,15,35,.92);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,.08)}
+.nav-brand{color:#fff;font-size:13px;font-weight:700;letter-spacing:.3px;display:flex;align-items:center;gap:8px}
+.nav-brand-dot{width:8px;height:8px;border-radius:50%;background:linear-gradient(135deg,var(--blue),var(--green))}
+.nav-dots{display:flex;gap:5px}
+.dot{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.25);cursor:pointer;transition:all .2s}
+.dot.on{background:var(--blue);transform:scale(1.4)}
+.nav-btns{display:flex;align-items:center;gap:8px}
+.nbtn{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.85);padding:5px 14px;border-radius:20px;cursor:pointer;font-size:12px;font-family:inherit;transition:all .2s}
+.nbtn:hover{background:rgba(255,255,255,.18)}
+.counter{color:rgba(255,255,255,.4);font-size:11px;font-family:'JetBrains Mono',monospace}
+
+/* ── PROGRESS ── */
+.progress{position:fixed;bottom:0;left:0;height:3px;background:linear-gradient(90deg,var(--blue),var(--green));transition:width .4s ease;z-index:200}
+
+/* ── SLIDES ── */
+.deck{width:100%;height:100vh;position:relative;overflow:hidden}
+.slide{position:absolute;inset:0;opacity:0;transform:translateX(100%);transition:transform .45s cubic-bezier(.4,0,.2,1),opacity .45s;overflow-y:auto;padding-top:52px}
+.slide.on{opacity:1;transform:translateX(0)}
+.slide.out{opacity:0;transform:translateX(-100%)}
+
+/* ── SLIDE TYPES ── */
+.s-hero{background:linear-gradient(145deg,#0f0f23 0%,#131a3a 60%,#0d1f3c 100%);display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:60px 40px;position:relative;overflow:hidden}
+.s-hero::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 25% 50%,rgba(26,115,232,.12) 0%,transparent 55%),radial-gradient(ellipse at 75% 30%,rgba(15,157,88,.09) 0%,transparent 55%);pointer-events:none}
+.s-white{background:var(--gray1)}
+.s-dark{background:#0d1117}
+
+/* ── INNER CONTENT ── */
+.inner{max-width:1160px;margin:0 auto;width:100%;padding:28px 48px 36px}
+@media(max-width:700px){.inner{padding:20px 20px 28px}}
+
+/* ── HERO ELEMENTS ── */
+.h-badge{display:inline-block;background:rgba(26,115,232,.18);border:1px solid rgba(26,115,232,.35);color:#93c4ff;padding:6px 16px;border-radius:20px;font-size:12px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:24px}
+.h-logo{width:76px;height:76px;background:linear-gradient(135deg,var(--blue),var(--green));border-radius:20px;display:flex;align-items:center;justify-content:center;margin:0 auto 28px;font-size:34px;box-shadow:0 20px 60px rgba(26,115,232,.4)}
+.h-title{font-size:clamp(38px,6vw,72px);font-weight:800;color:#fff;line-height:1.08;margin-bottom:18px}
+.h-title em{font-style:normal;background:linear-gradient(135deg,#4ca3ff,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.h-sub{font-size:clamp(15px,2.2vw,20px);color:rgba(255,255,255,.55);max-width:580px;line-height:1.65;margin-bottom:36px}
+.h-tags{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.h-tag{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:rgba(255,255,255,.75);padding:7px 16px;border-radius:20px;font-size:12px;font-weight:500}
+
+/* ── SLIDE HEADER ── */
+.sh{margin-bottom:28px}
+.sh-eye{font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--blue);margin-bottom:6px}
+.sh-title{font-size:clamp(24px,3.5vw,40px);font-weight:800;color:var(--dark);line-height:1.15}
+.sh-desc{font-size:15px;color:var(--textl);margin-top:10px;max-width:720px;line-height:1.6}
+
+/* dark slide header */
+.sh-white .sh-title{color:#fff}
+.sh-white .sh-desc{color:rgba(255,255,255,.55)}
+.sh-white .sh-eye{color:#64b5f6}
+
+/* ── CARD ── */
+.card{background:#fff;border-radius:16px;padding:22px;box-shadow:var(--shadow);border:1px solid var(--gray2);transition:box-shadow .2s,transform .2s}
+.card:hover{box-shadow:var(--shadow-lg);transform:translateY(-2px)}
+.c-icon{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:14px;flex-shrink:0}
+.c-title{font-size:15px;font-weight:700;color:var(--dark);margin-bottom:6px}
+.c-desc{font-size:13px;color:var(--textl);line-height:1.6}
+.c-mono{font-family:'JetBrains Mono',monospace;font-size:11px;background:var(--gray1);padding:2px 7px;border-radius:6px;color:#c7254e;display:inline-block;margin-top:8px}
+
+/* ── GRIDS ── */
+.g2{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+@media(max-width:900px){.g4{grid-template-columns:repeat(2,1fr)}.g3{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:580px){.g2,.g3,.g4{grid-template-columns:1fr}}
+
+/* ── COLOR UTILS ── */
+.bg-blue-l{background:var(--blue-l)}.bg-green-l{background:var(--green-l)}.bg-orange-l{background:var(--orange-l)}.bg-purple-l{background:var(--purple-l)}.bg-teal-l{background:var(--teal-l)}.bg-red-l{background:var(--red-l)}
+.t-blue{color:var(--blue)}.t-green{color:var(--green)}.t-orange{color:var(--orange)}.t-purple{color:var(--purple)}.t-teal{color:var(--teal)}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:11px;font-weight:600}
+.badge-blue{background:var(--blue-l);color:var(--blue)}
+.badge-green{background:var(--green-l);color:var(--green)}
+.badge-orange{background:var(--orange-l);color:#b06000}
+.badge-purple{background:var(--purple-l);color:var(--purple)}
+.badge-teal{background:var(--teal-l);color:var(--teal)}
+
+/* ── HL BOX ── */
+.hl{border-radius:12px;padding:14px 18px;display:flex;gap:12px;align-items:flex-start;margin-bottom:12px}
+.hl-b{background:var(--blue-l);border-left:3px solid var(--blue)}
+.hl-g{background:var(--green-l);border-left:3px solid var(--green)}
+.hl-o{background:var(--orange-l);border-left:3px solid var(--orange)}
+.hl-p{background:var(--purple-l);border-left:3px solid var(--purple)}
+.hl-t{background:var(--teal-l);border-left:3px solid var(--teal)}
+.hl-title{font-size:13px;font-weight:700;margin-bottom:3px}
+.hl-desc{font-size:12px;color:var(--textl);line-height:1.55}
+
+/* ── RESOURCE TABLE ── */
+.rtable{width:100%;border-collapse:collapse;font-size:13px;background:#fff;border-radius:14px;overflow:hidden;box-shadow:var(--shadow)}
+.rtable th{text-align:left;padding:10px 16px;background:var(--gray1);color:var(--textl);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;border-bottom:1px solid var(--gray2)}
+.rtable td{padding:11px 16px;border-bottom:1px solid var(--gray2);vertical-align:middle}
+.rtable tr:last-child td{border-bottom:none}
+.rtable tr:hover td{background:var(--gray1)}
+.rtable code{background:var(--gray1);padding:2px 8px;border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#c7254e;white-space:nowrap}
+.done{color:var(--green);font-weight:700;font-size:12px}
+.pend{color:var(--orange);font-weight:700;font-size:12px}
+
+/* ── ARCHITECTURE DIAGRAM ── */
+.arch-wrap{background:#fff;border-radius:20px;padding:28px 24px;box-shadow:var(--shadow);border:1px solid var(--gray2)}
+.arch-layer{border-radius:14px;padding:12px 16px;margin-bottom:4px}
+.arch-layer-head{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;opacity:.7}
+.arch-nodes{display:flex;align-items:center;gap:0;flex-wrap:wrap;justify-content:center}
+.anode{border-radius:10px;padding:9px 14px;font-size:12px;font-weight:600;text-align:center;line-height:1.35;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.1)}
+.anode small{display:block;font-size:10px;font-weight:400;opacity:.75;margin-top:2px}
+.aarrow{display:flex;flex-direction:column;align-items:center;padding:0 6px;min-width:44px}
+.aarrow-line{height:2px;width:32px;background:var(--gray3)}
+.aarrow-label{font-size:9px;color:var(--gray3);white-space:nowrap;margin-top:2px}
+.aconn{display:flex;flex-direction:column;align-items:center;margin:2px 0}
+.aconn-line{width:2px;height:28px;background:var(--gray2)}
+.aconn-label{font-size:10px;color:var(--textl);margin:2px 0;font-weight:500}
+
+.al-blue{background:#e8f0fe}
+.al-purple{background:#ede7f6}
+.al-green{background:#e6f4ea}
+.al-teal{background:#e0f2f1}
+.al-orange{background:#fef3e2}
+
+.an-blue{background:var(--blue);color:#fff}
+.an-purple{background:var(--purple);color:#fff}
+.an-green{background:var(--green);color:#fff}
+.an-teal{background:var(--teal);color:#fff}
+.an-orange{background:var(--orange);color:#fff}
+.an-gray{background:#fff;border:1.5px solid var(--gray2);color:var(--dark)}
+
+/* ── IAM ── */
+.iam-row{background:#fff;border-radius:12px;padding:14px 18px;margin-bottom:10px;box-shadow:var(--shadow);display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.iam-icon{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+.iam-name{font-size:13px;font-weight:700;color:var(--dark);font-family:'JetBrains Mono',monospace}
+.iam-desc{font-size:11px;color:var(--textl);margin-top:1px}
+.iam-roles{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.role{background:var(--blue-l);color:var(--blue);padding:3px 9px;border-radius:12px;font-size:10px;font-weight:600}
+
+/* ── PIPELINE STEP ── */
+.pstep{display:flex;gap:16px;align-items:flex-start;margin-bottom:18px}
+.pnum{width:32px;height:32px;border-radius:50%;background:var(--blue);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0}
+.pnum-green{background:var(--green)}
+.pnum-purple{background:var(--purple)}
+.pnum-orange{background:var(--orange)}
+.pbody{flex:1}
+.ptitle{font-size:14px;font-weight:700;color:var(--dark);margin-bottom:4px}
+.pdesc{font-size:13px;color:var(--textl);line-height:1.55}
+
+/* ── TWO COL ── */
+.two{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:start}
+@media(max-width:760px){.two{grid-template-columns:1fr}}
+
+/* ── NEXT STEPS ── */
+.nstep{display:flex;align-items:flex-start;gap:14px;background:#fff;border-radius:12px;padding:16px 18px;margin-bottom:10px;box-shadow:var(--shadow);border-left:3px solid var(--gray2)}
+.nstep.ready{border-left-color:var(--green)}
+.nstep.next{border-left-color:var(--blue)}
+.nstep-num{width:28px;height:28px;border-radius:50%;background:var(--gray2);color:var(--textl);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;flex-shrink:0}
+.nstep.ready .nstep-num{background:var(--green-l);color:var(--green)}
+.nstep.next .nstep-num{background:var(--blue-l);color:var(--blue)}
+
+/* ── API LIST ── */
+.api-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+@media(max-width:700px){.api-grid{grid-template-columns:repeat(2,1fr)}}
+.api-chip{background:#fff;border-radius:8px;padding:8px 12px;font-size:11px;font-weight:600;color:var(--dark);box-shadow:var(--shadow);display:flex;align-items:center;gap:6px;border:1px solid var(--gray2)}
+.api-dot{width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0}
+
+/* ── DIVIDER ── */
+.div{height:1px;background:var(--gray2);margin:18px 0}
+
+/* ── DARK CARD ── */
+.dcard{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:20px}
+.dcard-title{color:#fff;font-size:15px;font-weight:700;margin-bottom:8px}
+.dcard-desc{color:rgba(255,255,255,.55);font-size:13px;line-height:1.6}
+
+/* ── FLOW PILL ── */
+.flow-row{display:flex;align-items:center;flex-wrap:wrap;gap:0;margin-bottom:14px}
+.fpill{background:#fff;border:1.5px solid var(--gray2);border-radius:8px;padding:6px 12px;font-size:12px;font-weight:600;color:var(--dark)}
+.farrow{padding:0 8px;color:var(--gray3);font-size:14px;font-weight:700}
+.farrow-label{font-size:10px;color:var(--textl)}
+
+/* ── MISC ── */
+.mono{font-family:'JetBrains Mono',monospace;font-size:12px}
+.sep{margin:20px 0;height:1px;background:linear-gradient(90deg,transparent,var(--gray2),transparent)}
+.tag-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav class="topnav">
+  <div class="nav-brand">
+    <div class="nav-brand-dot"></div>
+    CookShop AI — Infrastructure
+  </div>
+  <div class="nav-dots" id="dots"></div>
+  <div class="nav-btns">
+    <button class="nbtn" onclick="prev()">← Prev</button>
+    <span class="counter" id="counter">1 / 13</span>
+    <button class="nbtn" onclick="next()">Next →</button>
+  </div>
+</nav>
+
+<div class="progress" id="bar"></div>
+
+<div class="deck" id="deck">
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 1 — HERO
+════════════════════════════════════════════ -->
+<section class="slide s-hero on">
+  <div class="h-logo">🛒</div>
+  <div class="h-badge">Infrastructure Architecture · May 2026</div>
+  <h1 class="h-title">CookShop <em>AI</em></h1>
+  <p class="h-sub">A Google Cloud-native, event-driven platform that turns a live cooking stream into a real-time shoppable experience — powered by Gemini 2.5 Flash.</p>
+  <div class="h-tags">
+    <span class="h-tag">☁️ Google Cloud</span>
+    <span class="h-tag">🔥 Firebase</span>
+    <span class="h-tag">🧠 Gemini 2.5 Flash</span>
+    <span class="h-tag">⚡ Cloud Run</span>
+    <span class="h-tag">📨 Pub/Sub</span>
+    <span class="h-tag">🗄️ Firestore</span>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 2 — WHAT IS COOKSHOP
+════════════════════════════════════════════ -->
+<section class="slide s-white">
+<div class="inner">
+  <div class="sh">
+    <div class="sh-eye">The Product</div>
+    <h2 class="sh-title">What CookShop Does</h2>
+    <p class="sh-desc">A live shopping experience embedded into a cooking video stream. AI watches the video and automatically surfaces the products the chef is using — before the viewer even thinks to search.</p>
+  </div>
+
+  <div class="g3" style="margin-bottom:24px">
+    <div class="card">
+      <div class="c-icon bg-blue-l">🎬</div>
+      <div class="c-title">Chef goes live</div>
+      <div class="c-desc">A streamer broadcasts via OBS or any RTMP encoder. No special setup required.</div>
+    </div>
+    <div class="card">
+      <div class="c-icon bg-purple-l">🧠</div>
+      <div class="c-title">AI watches in real-time</div>
+      <div class="c-desc">Every 2-second HLS segment is analysed by Gemini 2.5 Flash, detecting every ingredient and utensil on screen.</div>
+    </div>
+    <div class="card">
+      <div class="c-icon bg-green-l">🛍️</div>
+      <div class="c-title">Shopping list appears</div>
+      <div class="c-desc">Matched products pop up in the viewer's browser instantly — no page refresh, no manual curation.</div>
+    </div>
+  </div>
+
+  <div class="hl hl-b">
+    <span style="font-size:20px">⏱️</span>
+    <div>
+      <div class="hl-title t-blue">Target latency: &lt; 5 seconds end-to-end</div>
+      <div class="hl-desc">From the moment a new HLS segment lands in Cloud Storage to the moment the product appears in the browser.</div>
+    </div>
+  </div>
+
+  <div style="margin-top:20px">
+    <div class="flow-row">
+      <div class="fpill">📹 Camera</div><div class="farrow">→<div class="farrow-label">RTMP</div></div>
+      <div class="fpill">🎬 Live Stream</div><div class="farrow">→<div class="farrow-label">HLS</div></div>
+      <div class="fpill">🪣 Cloud Storage</div><div class="farrow">→<div class="farrow-label">event</div></div>
+      <div class="fpill">🧠 Gemini AI</div><div class="farrow">→<div class="farrow-label">products</div></div>
+      <div class="fpill">🌐 Browser</div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 3 — ARCHITECTURE OVERVIEW
+════════════════════════════════════════════ -->
+<section class="slide s-white">
+<div class="inner">
+  <div class="sh">
+    <div class="sh-eye">System Design</div>
+    <h2 class="sh-title">Full Architecture</h2>
+    <p class="sh-desc">Five layers, all serverless, all managed. Each component does exactly one job.</p>
+  </div>
+
+  <div class="arch-wrap">
+
+    <!-- Layer 1 -->
+    <div class="arch-layer al-blue">
+      <div class="arch-layer-head t-blue">① Video Ingestion</div>
+      <div class="arch-nodes">
+        <div class="anode an-gray">📹 Camera / OBS</div>
+        <div class="aarrow"><div class="aarrow-line"></div><div class="aarrow-label">RTMP</div></div>
+        <div class="anode an-blue">🎬 Cloud Live Stream API<small>cookshop-channel</small></div>
+        <div class="aarrow"><div class="aarrow-line"></div><div class="aarrow-label">HLS 2s segs</div></div>
+        <div class="anode an-blue">🪣 Cloud Storage<small>cookshop-poc-prj-hls-segments</small></div>
+      </div>
+    </div>
+
+    <div class="aconn">
+      <div class="aconn-line"></div>
+      <div class="aconn-label">📣 GCS OBJECT_FINALIZE notification</div>
+      <div class="aconn-line"></div>
+    </div>
+
+    <!-- Layer 2 -->
+    <div class="arch-layer al-purple">
+      <div class="arch-layer-head t-purple">② Event Pipeline</div>
+      <div class="arch-nodes">
+        <div class="anode an-purple">📨 Pub/Sub Topic<small>video-segments-topic</small></div>
+        <div class="aarrow"><div class="aarrow-line"></div><div class="aarrow-label">push sub</div></div>
+        <div class="anode an-purple">⚙️ pubsub-worker<small>Cloud Run orchestrator</small></div>
+      </div>
+    </div>
+
+    <div class="aconn">
+      <div class="aconn-line"></div>
+      <div class="aconn-label">🔗 HTTP calls (sequential)</div>
+      <div class="aconn-line"></div>
+    </div>
+
+    <!-- Layer 3 -->
+    <div class="arch-layer al-green">
+      <div class="arch-layer-head t-green">③ AI Processing</div>
+      <div class="arch-nodes">
+        <div class="anode an-green">🧠 ai-analyzer<small>Gemini 2.5 Flash</small></div>
+        <div class="aarrow"><div class="aarrow-line"></div><div class="aarrow-label">items[ ]</div></div>
+        <div class="anode an-green">🔍 product-matcher<small>rapidfuzz catalog</small></div>
+        <div class="aarrow"><div class="aarrow-line"></div><div class="aarrow-label">matched[ ]</div></div>
+        <div class="anode an-green">💾 state-manager<small>Firestore writer</small></div>
+      </div>
+    </div>
+
+    <div class="aconn">
+      <div class="aconn-line"></div>
+      <div class="aconn-label">✏️ Document write</div>
+      <div class="aconn-line"></div>
+    </div>
+
+    <!-- Layer 4 -->
+    <div class="arch-layer al-teal">
+      <div class="arch-layer-head t-teal">④ Data Store</div>
+      <div class="arch-nodes">
+        <div class="anode an-teal">🗄️ Cloud Firestore<small>LiveShoppingSessions / {session_id}</small></div>
+      </div>
+    </div>
+
+    <div class="aconn">
+      <div class="aconn-line"></div>
+      <div class="aconn-label">⚡ onSnapshot (WebSocket, real-time)</div>
+      <div class="aconn-line"></div>
+    </div>
+
+    <!-- Layer 5 -->
+    <div class="arch-layer al-orange">
+      <div class="arch-layer-head t-orange">⑤ Frontend</div>
+      <div class="arch-nodes">
+        <div class="anode an-orange">🌐 Firebase Hosting<small>Next.js 14 · HLS.js · Firestore SDK</small></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 4 — GCP PROJECT FOUNDATION
+════════════════════════════════════════════ -->
+<section class="slide s-white">
+<div class="inner">
+  <div class="sh">
+    <div class="sh-eye">Foundation</div>
+    <h2 class="sh-title">GCP Project Foundation</h2>
+    <p class="sh-desc">Everything runs inside a single GCP project with 14 APIs enabled across us-central1.</p>
+  </div>
+
+  <div class="two" style="margin-bottom:24px">
+    <div>
+      <div class="g2" style="margin-bottom:16px">
+        <div class="card">
+          <div class="c-icon bg-blue-l">🏗️</div>
+          <div class="c-title">Project ID</div>
+          <div class="c-mono">cookshop-poc-prj</div>
+        </div>
+        <div class="card">
+          <div class="c-icon bg-blue-l">#</div>
+          <div class="c-title">Project Number</div>
+          <div class="c-mono">645158438988</div>
+        </div>
+        <div class="card">
+          <div class="c-icon bg-green-l">📍</div>
+          <div class="c-title">Region</div>
+          <div class="c-mono">us-central1</div>
+        </div>
+        <div class="card">
+          <div class="c-icon bg-orange-l">☁️</div>
+          <div class="c-title">Platform</div>
+          <div class="c-desc" style="font-size:13px">Fully managed serverless (no VMs)</div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div style="font-size:12px;font-weight:700;color:var(--textl);letter-spacing:.5px;text-transform:uppercase;margin-bottom:10px">✅ APIs Enabled</div>
+      <div class="api-grid">
+        <div class="api-chip"><div class="api-dot"></div>Cloud Run</div>
+        <div class="api-chip"><div class="api-dot"></div>Pub/Sub</div>
+        <div class="api-chip"><div class="api-dot"></div>Cloud Storage</div>
+        <div class="api-chip"><div class="api-dot"></div>Firestore</div>
+        <div class="api-chip"><div class="api-dot"></div>Firebase</div>
+        <div class="api-chip"><div class="api-dot"></div>Vertex AI</div>
+        <div class="api-chip"><div class="api-dot"></div>Generative AI</div>
+        <div class="api-chip"><div class="api-dot"></div>Live Stream</div>
+        <div class="api-chip"><div class="api-dot"></div>Artifact Registry</div>
+        <div class="api-chip"><div class="api-dot"></div>Cloud Build</div>
+        <div class="api-chip"><div class="api-dot"></div>Secret Manager</div>
+        <div class="api-chip"><div class="api-dot"></div>IAM</div>
+        <div class="api-chip"><div class="api-dot"></div>Firebase Hosting</div>
+        <div class="api-chip"><div class="api-dot"></div>Resource Manager</div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 5 — VIDEO INGESTION
+════════════════════════════════════════════ -->
+<section class="slide s-white">
+<div class="inner">
+  <div class="sh">
+    <div class="sh-eye">Layer 1</div>
+    <h2 class="sh-title">Video Ingestion</h2>
+    <p class="sh-desc">RTMP video from any encoder is transcoded to HLS and stored in Cloud Storage — this triggers the entire pipeline.</p>
+  </div>
+
+  <div class="two">
+    <div>
+      <div class="pstep">
+        <div class="pnum">1</div>
+        <div class="pbody">
+          <div class="ptitle">RTMP Input Endpoint</div>
+          <div class="pdesc">OBS or any encoder pushes a live RTMP stream to the <strong>cookshop-input</strong> endpoint created by Cloud Live Stream API. The stream key authenticates the connection.</div>
+        </div>
+      </div>
+      <div class="pstep">
+        <div class="pnum pnum-green">2</div>
+        <div class="pbody">
+          <div class="ptitle">HLS Transcoding</div>
+          <div class="pdesc"><strong>cookshop-channel</strong> continuously transcodes the RTMP stream and writes HLS segments (2-second chunks) to Cloud Storage. One segment = one AI analysis cycle.</div>
+        </div>
+      </div>
+      <div class="pstep">
+        <div class="pnum pnum-purple">3</div>
+        <div class="pbody">
+          <div class="ptitle">Cloud Storage Bucket</div>
+          <div class="pdesc">All HLS segments land in <strong>cookshop-poc-prj-hls-segments</strong>. Uniform bucket-level access, no public read — Cloud Run reads via service account.</div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="c-title">☁️ Cloud Live Stream Resources</div>
+        <div class="div"></div>
+        <table style="width:100%;font-size:13px">
+          <tr><td style="color:var(--textl);padding:4px 0">Input</td><td style="font-weight:600;font-family:'JetBrains Mono',monospace;font-size:11px">cookshop-input (RTMP_PUSH)</td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Channel</td><td style="font-weight:600;font-family:'JetBrains Mono',monospace;font-size:11px">cookshop-channel</td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Segment</td><td style="font-weight:600">2 seconds</td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Output</td><td style="font-weight:600;font-family:'JetBrains Mono',monospace;font-size:11px">gs://…/live/playlist.m3u8</td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Region</td><td style="font-weight:600">us-central1</td></tr>
+        </table>
+      </div>
+      <div class="hl hl-g">
+        <span style="font-size:18px">🪣</span>
+        <div>
+          <div class="hl-title t-green">GCS Bucket</div>
+          <div class="hl-desc mono">cookshop-poc-prj-hls-segments</div>
+          <div class="hl-desc" style="margin-top:4px">Standard storage · us-central1 · uniform access · public prevention on</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 6 — EVENT PIPELINE
+════════════════════════════════════════════ -->
+<section class="slide s-white">
+<div class="inner">
+  <div class="sh">
+    <div class="sh-eye">Layer 2</div>
+    <h2 class="sh-title">Event-Driven Pipeline</h2>
+    <p class="sh-desc">Cloud Storage notifies Pub/Sub the instant a new HLS segment is written. Pub/Sub pushes it to the orchestrator service.</p>
+  </div>
+
+  <div class="two">
+    <div>
+      <div class="hl hl-p" style="margin-bottom:14px">
+        <span style="font-size:20px">📣</span>
+        <div>
+          <div class="hl-title t-purple">GCS → Pub/Sub Notification</div>
+          <div class="hl-desc">Every time a new object is written to the bucket, GCS fires an <strong>OBJECT_FINALIZE</strong> event to the Pub/Sub topic. This is the trigger for the entire AI pipeline.</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <div class="c-title">📨 Pub/Sub Configuration</div>
+        <div class="div"></div>
+        <table style="width:100%;font-size:13px">
+          <tr><td style="color:var(--textl);padding:4px 0">Topic</td><td><span class="mono">video-segments-topic</span></td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Subscription</td><td><span class="mono">video-segments-sub</span></td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Type</td><td style="font-weight:600">Push (not pull)</td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Ack deadline</td><td style="font-weight:600">60 seconds</td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Retry</td><td style="font-weight:600">Exponential backoff</td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Push endpoint</td><td><span class="mono" style="font-size:10px">…/pubsub-worker/pubsub</span></td></tr>
+        </table>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="c-icon bg-purple-l">⚙️</div>
+        <div class="c-title">pubsub-worker — Orchestrator</div>
+        <div class="c-desc">The only Cloud Run service exposed to Pub/Sub. It receives the push message, decodes the GCS event, and sequentially calls the three AI/data services.</div>
+        <div class="div"></div>
+        <div style="font-size:12px;color:var(--textl)">Filters:</div>
+        <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+          <span class="badge badge-purple">Only .m3u8 / .ts files</span>
+          <span class="badge badge-green">Skips non-HLS objects</span>
+        </div>
+        <div class="div"></div>
+        <div style="font-size:12px;color:var(--textl);margin-bottom:6px">Pipeline:</div>
+        <div class="pstep" style="margin-bottom:10px">
+          <div class="pnum" style="width:24px;height:24px;font-size:11px">1</div>
+          <div class="pdesc" style="font-size:12px">POST /analyze → ai-analyzer</div>
+        </div>
+        <div class="pstep" style="margin-bottom:10px">
+          <div class="pnum pnum-green" style="width:24px;height:24px;font-size:11px">2</div>
+          <div class="pdesc" style="font-size:12px">POST /match → product-matcher</div>
+        </div>
+        <div class="pstep" style="margin-bottom:0">
+          <div class="pnum pnum-purple" style="width:24px;height:24px;font-size:11px">3</div>
+          <div class="pdesc" style="font-size:12px">POST /session/{id}/products → state-manager</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 7 — AI ANALYSIS
+════════════════════════════════════════════ -->
+<section class="slide s-white">
+<div class="inner">
+  <div class="sh">
+    <div class="sh-eye">Layer 3 · Service 1 of 3</div>
+    <h2 class="sh-title">AI Analysis — Gemini 2.5 Flash</h2>
+    <p class="sh-desc">The ai-analyzer service passes each video segment directly to Gemini and gets back a JSON array of detected items.</p>
+  </div>
+
+  <div class="two">
+    <div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="c-icon bg-purple-l">🧠</div>
+        <div class="c-title">How it works</div>
+        <div class="c-desc">
+          <ol style="padding-left:18px;line-height:2">
+            <li>Receives <span class="mono">gs://…/segment.ts</span> from pubsub-worker</li>
+            <li>Downloads segment bytes from GCS via storage client</li>
+            <li>Sends <strong>video bytes + prompt</strong> to Gemini 2.5 Flash (multimodal)</li>
+            <li>Parses the JSON array response</li>
+            <li>Returns <span class="mono">{"items": ["Tomato", "Chef's Knife", …]}</span></li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="hl hl-p">
+        <span style="font-size:20px">💬</span>
+        <div>
+          <div class="hl-title t-purple">Prompt strategy</div>
+          <div class="hl-desc">System prompt instructs Gemini to return <strong>only a valid JSON array</strong> — no markdown, no explanation. Items are concise, capitalised names: <em>"Roma Tomatoes"</em>, <em>"Cast Iron Skillet"</em>.</div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="c-title">⚡ Service Configuration</div>
+        <div class="div"></div>
+        <table style="width:100%;font-size:13px">
+          <tr><td style="color:var(--textl);padding:4px 0">Model</td><td style="font-weight:700;color:var(--purple)">gemini-2.5-flash</td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Runtime</td><td>Cloud Run · Python 3.11 · FastAPI</td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Memory</td><td>512 Mi</td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">API Key</td><td><span class="badge badge-green">Secret Manager</span></td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Input</td><td>GCS URI or image URL</td></tr>
+          <tr><td style="color:var(--textl);padding:4px 0">Output</td><td><span class="mono">{"items": string[]}</span></td></tr>
+        </table>
+      </div>
+
+      <div class="hl hl-b">
+        <span style="font-size:18px">🔒</span>
+        <div>
+          <div class="hl-title t-blue">GEMINI_API_KEY in Secret Manager</div>
+          <div class="hl-desc">Never in code or environment variables in plain text. Cloud Run reads it via <strong>--set-secrets</strong> at deploy time, injected into the container as an env var.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 8 — PRODUCT MATCHING & STATE
+════════════════════════════════════════════ -->
+<section class="slide s-white">
+<div class="inner">
+  <div class="sh">
+    <div class="sh-eye">Layer 3 · Services 2 &amp; 3 of 3</div>
+    <h2 class="sh-title">Product Matching &amp; State</h2>
+    <p class="sh-desc">Detected item names are fuzzy-matched to a product catalog, then written to Firestore for real-time browser delivery.</p>
+  </div>
+
+  <div class="two">
+    <div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="c-icon bg-green-l">🔍</div>
+        <div class="c-title">product-matcher</div>
+        <div class="c-desc">Uses <strong>rapidfuzz WRatio</strong> algorithm to fuzzy-match Gemini's item names against a static product catalog. Returns only matches above a 70-point confidence threshold.</div>
+        <div class="div"></div>
+        <div style="font-size:12px;color:var(--textl)">Example match:</div>
+        <div style="font-size:12px;margin-top:6px;font-family:'JetBrains Mono',monospace;background:var(--gray1);padding:10px;border-radius:8px;line-height:1.8">
+          "roma tomato" → <strong>Roma Tomatoes</strong> ($2.99)<br>
+          "cast iron" → <strong>Cast Iron Skillet</strong> ($39.99)
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="c-icon bg-teal-l">💾</div>
+        <div class="c-title">state-manager → Firestore</div>
+        <div class="c-desc">Writes matched products to a Firestore document. Each session has a single document that gets <strong>overwritten</strong> every pipeline cycle — no accumulation logic needed.</div>
+        <div class="div"></div>
+        <div style="font-size:12px;color:var(--textl);margin-bottom:6px">Firestore document path:</div>
+        <div class="mono" style="background:var(--gray1);padding:8px 12px;border-radius:8px;font-size:11px">
+          LiveShoppingSessions / live-session-001
+        </div>
+        <div style="margin-top:10px;font-size:12px;color:var(--textl)">Fields: <span class="badge badge-teal">products[]</span> <span class="badge badge-teal">last_updated</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hl hl-t">
+    <span style="font-size:20px">🗄️</span>
+    <div>
+      <div class="hl-title t-teal">Firestore — Native Mode · us-central1</div>
+      <div class="hl-desc">Native mode enables Firestore's real-time listener APIs (onSnapshot). The frontend holds an open WebSocket connection — any document write instantly pushes to all connected browsers with no polling.</div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 9 — FRONTEND
+════════════════════════════════════════════ -->
+<section class="slide s-white">
+<div class="inner">
+  <div class="sh">
+    <div class="sh-eye">Layer 5</div>
+    <h2 class="sh-title">Frontend — What Viewers See</h2>
+    <p class="sh-desc">A Next.js static site hosted on Firebase CDN. Two panels: live video on the left, real-time shopping list on the right.</p>
+  </div>
+
+  <div class="g3" style="margin-bottom:20px">
+    <div class="card">
+      <div class="c-icon bg-orange-l">🎥</div>
+      <div class="c-title">HLS.js Video Player</div>
+      <div class="c-desc">Plays the HLS stream from Cloud Storage directly in the browser. Low-latency mode enabled, native Safari HLS fallback included.</div>
+      <div class="tag-row"><span class="badge badge-orange">HLS.js 1.5</span><span class="badge badge-orange">Low latency</span></div>
+    </div>
+    <div class="card">
+      <div class="c-icon bg-teal-l">🛍️</div>
+      <div class="c-title">Live Shopping List</div>
+      <div class="c-desc">Subscribes to Firestore via <strong>onSnapshot</strong>. Product cards appear and update instantly when Firestore is written. Zero polling, zero manual refresh.</div>
+      <div class="tag-row"><span class="badge badge-teal">onSnapshot</span><span class="badge badge-teal">WebSocket</span></div>
+    </div>
+    <div class="card">
+      <div class="c-icon bg-blue-l">🌐</div>
+      <div class="c-title">Firebase Hosting</div>
+      <div class="c-desc">Next.js static export (<code>output: 'export'</code>) deployed to Firebase's global CDN. SSL, custom domain, cache headers all handled automatically.</div>
+      <div class="tag-row"><span class="badge badge-blue">Next.js 14</span><span class="badge badge-blue">CDN</span></div>
+    </div>
+  </div>
+
+  <div class="hl hl-o">
+    <span style="font-size:20px">🔑</span>
+    <div>
+      <div class="hl-title" style="color:#b06000">Firebase Project: cookshop-poc-prj</div>
+      <div class="hl-desc">Firebase was added to the existing GCP project — same Firestore database, same credentials, no separate Firebase project billing. Auth domain: <span class="mono">cookshop-poc-prj.firebaseapp.com</span></div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 10 — SECURITY MODEL
+════════════════════════════════════════════ -->
+<section class="slide s-white">
+<div class="inner">
+  <div class="sh">
+    <div class="sh-eye">Security</div>
+    <h2 class="sh-title">Security Model</h2>
+    <p class="sh-desc">Zero long-lived credentials. Two service accounts with least-privilege roles. Secrets in Secret Manager, not environment files.</p>
+  </div>
+
+  <div class="iam-row">
+    <div class="iam-icon bg-blue-l">🏃</div>
+    <div>
+      <div class="iam-name">cookshop-runner</div>
+      <div class="iam-desc">Cloud Run runtime identity — used by all 4 deployed services</div>
+    </div>
+    <div class="iam-roles">
+      <span class="role">datastore.user</span>
+      <span class="role">storage.objectViewer</span>
+      <span class="role">pubsub.subscriber</span>
+      <span class="role">aiplatform.user</span>
+      <span class="role">secretmanager.secretAccessor</span>
+      <span class="role">run.invoker</span>
+    </div>
+  </div>
+
+  <div class="iam-row">
+    <div class="iam-icon bg-green-l">🔧</div>
+    <div>
+      <div class="iam-name">cookshop-cicd</div>
+      <div class="iam-desc">CI/CD identity — used only by GitHub Actions via Workload Identity Federation</div>
+    </div>
+    <div class="iam-roles">
+      <span class="role" style="background:var(--green-l);color:var(--green)">run.admin</span>
+      <span class="role" style="background:var(--green-l);color:var(--green)">artifactregistry.writer</span>
+      <span class="role" style="background:var(--green-l);color:var(--green)">iam.serviceAccountUser</span>
+    </div>
+  </div>
+
+  <div class="sep"></div>
+
+  <div class="g3">
+    <div class="hl hl-b" style="flex-direction:column">
+      <div style="font-size:20px;margin-bottom:8px">🔐</div>
+      <div class="hl-title t-blue">No Service Account Keys</div>
+      <div class="hl-desc">Org policy <span class="mono" style="font-size:10px">iam.disableServiceAccountKeyCreation</span> is enforced. No JSON key files anywhere in the repo or CI.</div>
+    </div>
+    <div class="hl hl-g" style="flex-direction:column">
+      <div style="font-size:20px;margin-bottom:8px">🪪</div>
+      <div class="hl-title t-green">Workload Identity Federation</div>
+      <div class="hl-desc">GitHub Actions authenticates to GCP using short-lived OIDC tokens. Pool: <span class="mono" style="font-size:10px">github-pool</span>, Provider: <span class="mono" style="font-size:10px">github-provider</span>.</div>
+    </div>
+    <div class="hl hl-p" style="flex-direction:column">
+      <div style="font-size:20px;margin-bottom:8px">🔒</div>
+      <div class="hl-title t-purple">Secret Manager</div>
+      <div class="hl-desc">GEMINI_API_KEY and FIREBASE_SERVICE_ACCOUNT_JSON stored as versioned secrets. Cloud Run reads them at runtime via <span class="mono" style="font-size:10px">--set-secrets</span>.</div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 11 — CI/CD
+════════════════════════════════════════════ -->
+<section class="slide s-white">
+<div class="inner">
+  <div class="sh">
+    <div class="sh-eye">Delivery</div>
+    <h2 class="sh-title">CI/CD Pipeline</h2>
+    <p class="sh-desc">Two GitHub Actions workflows triggered on every push to <strong>main</strong>. No manual build or deploy steps needed after initial setup.</p>
+  </div>
+
+  <div class="two">
+    <div>
+      <div class="card">
+        <div class="c-icon bg-blue-l">⚡</div>
+        <div class="c-title">deploy-cloudrun.yml</div>
+        <div class="c-desc" style="margin-bottom:14px">Builds and deploys all 4 Cloud Run services in dependency order.</div>
+        <div class="div"></div>
+        <div class="pstep" style="margin-bottom:10px">
+          <div class="pnum" style="width:24px;height:24px;font-size:11px">1</div>
+          <div class="pdesc" style="font-size:12px">Auth via Workload Identity Federation (no keys)</div>
+        </div>
+        <div class="pstep" style="margin-bottom:10px">
+          <div class="pnum pnum-green" style="width:24px;height:24px;font-size:11px">2</div>
+          <div class="pdesc" style="font-size:12px">Build &amp; push 4 Docker images → Artifact Registry</div>
+        </div>
+        <div class="pstep" style="margin-bottom:10px">
+          <div class="pnum pnum-purple" style="width:24px;height:24px;font-size:11px">3</div>
+          <div class="pdesc" style="font-size:12px">Deploy: state-manager → product-matcher → ai-analyzer</div>
+        </div>
+        <div class="pstep" style="margin-bottom:10px">
+          <div class="pnum pnum-orange" style="width:24px;height:24px;font-size:11px">4</div>
+          <div class="pdesc" style="font-size:12px">Collect service URLs → deploy pubsub-worker with wired URLs</div>
+        </div>
+        <div class="pstep" style="margin-bottom:0">
+          <div class="pnum" style="width:24px;height:24px;font-size:11px;background:#0f9d58">5</div>
+          <div class="pdesc" style="font-size:12px">Auto-update Pub/Sub push endpoint to new pubsub-worker URL</div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="c-icon bg-orange-l">🔥</div>
+        <div class="c-title">deploy-firebase.yml</div>
+        <div class="c-desc" style="margin-bottom:14px">Builds and deploys the Next.js frontend to Firebase Hosting.</div>
+        <div class="div"></div>
+        <div class="pstep" style="margin-bottom:10px">
+          <div class="pnum" style="width:24px;height:24px;font-size:11px">1</div>
+          <div class="pdesc" style="font-size:12px">Auth via WIF · install Node 20 dependencies</div>
+        </div>
+        <div class="pstep" style="margin-bottom:10px">
+          <div class="pnum pnum-green" style="width:24px;height:24px;font-size:11px">2</div>
+          <div class="pdesc" style="font-size:12px">Inject Firebase config &amp; Cloud Run URLs from GitHub Secrets</div>
+        </div>
+        <div class="pstep" style="margin-bottom:0">
+          <div class="pnum pnum-orange" style="width:24px;height:24px;font-size:11px">3</div>
+          <div class="pdesc" style="font-size:12px"><span class="mono">npm run build</span> → <span class="mono">firebase deploy --only hosting</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="c-title">🗄️ Artifact Registry</div>
+        <div class="c-desc" style="font-size:12px;margin-top:6px">Docker repository: <span class="mono" style="font-size:10px">us-central1-docker.pkg.dev/cookshop-poc-prj/cookshop/</span></div>
+        <div class="tag-row" style="margin-top:10px">
+          <span class="badge badge-blue">pubsub-worker</span>
+          <span class="badge badge-green">ai-analyzer</span>
+          <span class="badge badge-purple">product-matcher</span>
+          <span class="badge badge-teal">state-manager</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 12 — RESOURCES PROVISIONED TODAY
+════════════════════════════════════════════ -->
+<section class="slide s-white">
+<div class="inner">
+  <div class="sh">
+    <div class="sh-eye">Today's Status</div>
+    <h2 class="sh-title">Resources Provisioned</h2>
+    <p class="sh-desc">Everything below was created from scratch in <strong>cookshop-poc-prj</strong> on 10 May 2026.</p>
+  </div>
+
+  <table class="rtable">
+    <thead>
+      <tr>
+        <th>Service</th>
+        <th>Resource / Name</th>
+        <th>Purpose</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><span class="badge badge-blue">IAM</span></td><td><code>cookshop-runner</code></td><td>Cloud Run runtime identity · 6 roles</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-blue">IAM</span></td><td><code>cookshop-cicd</code></td><td>CI/CD identity · 3 roles</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-green">Artifact Registry</span></td><td><code>cookshop</code></td><td>Docker image repository · us-central1</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-green">Cloud Storage</span></td><td><code>cookshop-poc-prj-hls-segments</code></td><td>HLS segment storage · pipeline trigger source</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-purple">Pub/Sub</span></td><td><code>video-segments-topic</code></td><td>Receives GCS OBJECT_FINALIZE events</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-purple">Pub/Sub</span></td><td><code>video-segments-sub</code></td><td>Push subscription → pubsub-worker</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-teal">Firestore</span></td><td>Default database</td><td>Native mode · us-central1 · real-time sessions</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-orange">Secret Manager</span></td><td><code>GEMINI_API_KEY</code></td><td>Gemini API credential · injected at runtime</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-orange">Secret Manager</span></td><td><code>FIREBASE_SERVICE_ACCOUNT_JSON</code></td><td>Firebase admin credential</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-blue">Firebase</span></td><td><code>cookshop-poc-prj</code></td><td>Firebase added to GCP project · Hosting + Firestore</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-green">Live Stream</span></td><td><code>cookshop-input</code></td><td>RTMP_PUSH input endpoint</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-green">Live Stream</span></td><td><code>cookshop-channel</code></td><td>HLS transcoding channel · started</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-blue">WIF</span></td><td><code>github-pool / github-provider</code></td><td>GitHub Actions keyless auth to GCP</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-purple">GitHub Actions</span></td><td><code>deploy-cloudrun.yml</code></td><td>Build + deploy all 4 Cloud Run services</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-orange">GitHub Actions</span></td><td><code>deploy-firebase.yml</code></td><td>Build + deploy Next.js frontend</td><td><span class="done">✅ Done</span></td></tr>
+      <tr><td><span class="badge badge-green">GCS Notification</span></td><td>GCS → Pub/Sub binding</td><td>Triggers pipeline on new HLS segment</td><td><span class="pend">⏳ Pending</span></td></tr>
+      <tr><td><span class="badge badge-blue">Cloud Run</span></td><td>4 services</td><td>pubsub-worker · ai-analyzer · product-matcher · state-manager</td><td><span class="pend">⏳ First deploy</span></td></tr>
+    </tbody>
+  </table>
+</div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 13 — NEXT STEPS
+════════════════════════════════════════════ -->
+<section class="slide s-white">
+<div class="inner">
+  <div class="sh">
+    <div class="sh-eye">What's Next</div>
+    <h2 class="sh-title">Remaining Steps to Go Live</h2>
+    <p class="sh-desc">Infrastructure is provisioned. Three steps to a working end-to-end demo.</p>
+  </div>
+
+  <div class="nstep next">
+    <div class="nstep-num">1</div>
+    <div>
+      <div class="ptitle">Set GitHub Actions Secrets</div>
+      <div class="pdesc" style="font-size:13px">Add <strong>WIF_PROVIDER</strong>, <strong>WIF_SERVICE_ACCOUNT</strong>, Firebase config values, and Gemini API key to the GitHub repository secrets. This unblocks the first deployment.</div>
+      <div class="tag-row"><span class="badge badge-blue">GitHub → Settings → Secrets</span></div>
+    </div>
+  </div>
+
+  <div class="nstep next">
+    <div class="nstep-num">2</div>
+    <div>
+      <div class="ptitle">Push to main — First Automated Deploy</div>
+      <div class="pdesc" style="font-size:13px">Pushing to <strong>main</strong> triggers both workflows. GitHub Actions builds Docker images, deploys all 4 Cloud Run services, updates the Pub/Sub push endpoint automatically, and deploys the frontend to Firebase Hosting.</div>
+      <div class="tag-row"><span class="badge badge-green">Fully automated</span></div>
+    </div>
+  </div>
+
+  <div class="nstep next">
+    <div class="nstep-num">3</div>
+    <div>
+      <div class="ptitle">Wire GCS → Pub/Sub Notification</div>
+      <div class="pdesc" style="font-size:13px">Run one <strong>gsutil notification create</strong> command to connect the HLS bucket to the Pub/Sub topic. This is the final link that completes the event-driven pipeline.</div>
+      <div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:11px;background:var(--gray1);padding:10px 14px;border-radius:8px;color:var(--text)">
+        gsutil notification create -t …/video-segments-topic \<br>
+        &nbsp;&nbsp;-f json -e OBJECT_FINALIZE \<br>
+        &nbsp;&nbsp;gs://cookshop-poc-prj-hls-segments
+      </div>
+    </div>
+  </div>
+
+  <div class="nstep ready" style="margin-top:20px">
+    <div class="nstep-num">🎬</div>
+    <div>
+      <div class="ptitle" style="color:var(--green)">Point OBS at the RTMP endpoint and go live</div>
+      <div class="pdesc" style="font-size:13px">Stream from OBS → cookshop-channel → HLS to GCS → Pub/Sub → Gemini → product list appears in browser within ~5 seconds. End-to-end demo ready.</div>
+    </div>
+  </div>
+</div>
+</section>
+
+</div><!-- /deck -->
+
+<script>
+const slides = document.querySelectorAll('.slide');
+const dotsEl = document.getElementById('dots');
+const bar = document.getElementById('bar');
+const counter = document.getElementById('counter');
+const N = slides.length;
+let cur = 0;
+
+// Build dots
+slides.forEach((_,i)=>{
+  const d = document.createElement('div');
+  d.className = 'dot'+(i===0?' on':'');
+  d.onclick = ()=>go(i);
+  dotsEl.appendChild(d);
+});
+
+function go(n){
+  if(n<0||n>=N) return;
+  slides[cur].classList.remove('on');
+  slides[cur].classList.add('out');
+  setTimeout(()=>slides[cur].classList.remove('out'), 460);
+  cur=n;
+  slides[cur].classList.add('on');
+  slides[cur].scrollTop=0;
+  document.querySelectorAll('.dot').forEach((d,i)=>d.classList.toggle('on',i===cur));
+  bar.style.width=((cur+1)/N*100)+'%';
+  counter.textContent=(cur+1)+' / '+N;
+}
+
+function next(){go(cur+1)}
+function prev(){go(cur-1)}
+
+document.addEventListener('keydown',e=>{
+  if(e.key==='ArrowRight'||e.key==='ArrowDown'||e.key===' ') next();
+  if(e.key==='ArrowLeft'||e.key==='ArrowUp') prev();
+});
+
+// Initialize progress bar
+bar.style.width=(1/N*100)+'%';
+
+// Touch swipe
+let tx=0;
+document.addEventListener('touchstart',e=>tx=e.touches[0].clientX,{passive:true});
+document.addEventListener('touchend',e=>{
+  const dx=e.changedTouches[0].clientX-tx;
+  if(Math.abs(dx)>50){dx<0?next():prev()}
+},{passive:true});
+</script>
+</body>
+</html>

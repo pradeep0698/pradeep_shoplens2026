@@ -1,0 +1,37 @@
+workflows:
+  ios-unsigned:
+    name: iOS Unsigned IPA
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      groups:
+        - firebase
+      vars:
+        FLUTTER_XCODE_CODE_SIGNING_ALLOWED: "NO"
+        FLUTTER_XCODE_CODE_SIGNING_REQUIRED: "NO"
+    working_directory: mobile
+    scripts:
+      - name: Inject secrets
+        script: |
+          echo $GOOGLE_SERVICE_INFO_PLIST | base64 --decode > ios/Runner/GoogleService-Info.plist
+          printf "ANALYZER_API_URL=%s\nMATCHER_API_URL=%s\nSTATE_API_URL=%s\n" \
+            "$ANALYZER_API_URL" "$MATCHER_API_URL" "$STATE_API_URL" > .env
+      - name: Flutter pub get
+        script: flutter pub get
+      - name: Install CocoaPods
+        script: cd ios && pod install
+      - name: Patch Xcode signing
+        script: |
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' \
+            ios/Runner.xcodeproj/project.pbxproj
+      - name: Build iOS app (no codesign)
+        script: flutter build ios --release --no-codesign
+      - name: Package IPA
+        script: |
+          mkdir -p build/ios/iphoneos/Payload
+          cp -r build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/
+          cd build/ios/iphoneos && zip -r ShopLens.ipa Payload
+    artifacts:
+      - build/ios/iphoneos/ShopLens.ipa

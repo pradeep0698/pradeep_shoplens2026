@@ -1,0 +1,6 @@
+{
+  "projects": {
+    "default": "shoplens-dev-prj",
+    "dev": "shoplens-dev-prj"
+  }
+}

@@ -1,0 +1,60 @@
+Last verified: 2026-05-04
+
+================================================================================
+CLOUD RUN SERVICES — All 4 Running
+================================================================================
+
+Service           Status    URL
+----------------  --------  ----------------------------------------------------
+state-manager     Running   https://state-manager-1017419148960.us-central1.run.app
+product-matcher   Running   https://product-matcher-1017419148960.us-central1.run.app
+ai-analyzer       Running   https://ai-analyzer-1017419148960.us-central1.run.app
+pubsub-worker     Running   https://pubsub-worker-1017419148960.us-central1.run.app
+
+All services: us-central1, allow-unauthenticated, service account shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com
+Deployed by: aistreamscan@gmail.com
+
+================================================================================
+FIRESTORE DATABASE
+================================================================================
+
+Database ID:  (default)
+Mode:         Firestore Native (Standard Edition)
+Location:     us-central1 (Iowa)
+Created:      2026-05-04
+
+================================================================================
+CLOUD STORAGE
+================================================================================
+
+Bucket:       shoplens-dev-hls-segments
+Region:       us-central1
+Access:       Uniform bucket-level access, allUsers Storage Object Viewer (public HLS)
+
+================================================================================
+PUB/SUB
+================================================================================
+
+Topic:        video-segments-topic
+Subscription: video-segments-sub (Push)
+Push endpoint: https://pubsub-worker-1017419148960.us-central1.run.app/pubsub  ✅ updated 2026-05-04
+
+================================================================================
+APIs — 33 Enabled (all required APIs confirmed active)
+================================================================================
+
+Key APIs: Cloud Run, Cloud Build, Artifact Registry, Firestore, Pub/Sub, IAM,
+          Cloud Storage, Live Stream, Vertex AI, Firebase Rules, Eventarc,
+          Secret Manager, Speech-to-Text, Vision
+
+================================================================================
+REMAINING STEPS
+================================================================================
+
+Step 7  — Run services/live-ingest/setup_live_stream.py
+            → Get RTMP ingest URI (for OBS) and HLS manifest URL (for frontend)
+
+Step 8  — Fill frontend/.env.local with Firebase config + HLS URL
+            → npm run build && firebase deploy --only hosting
+
+Step 11 — End-to-end smoke test (see guide Steps 11a-f)

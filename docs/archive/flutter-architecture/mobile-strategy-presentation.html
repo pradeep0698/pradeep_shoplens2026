@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CookShop — Mobile Strategy</title>
+  <style>
+    :root {
+      --bg:      #0f172a;
+      --surface: #1e293b;
+      --surf2:   #334155;
+      --border:  rgba(255,255,255,0.07);
+      --text:    #f1f5f9;
+      --muted:   #94a3b8;
+      --orange:  #f97316;
+      --green:   #4ade80;
+      --red:     #f87171;
+      --yellow:  #fbbf24;
+      --blue:    #60a5fa;
+      --purple:  #a78bfa;
+      --cyan:    #22d3ee;
+      --lime:    #a3e635;
+      --sky:     #38bdf8;
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      height: 100vh;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    /* ── Slide system ── */
+    .slide {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      padding: 36px 56px 96px;
+      transform: translateX(100%);
+      transition: transform 0.42s cubic-bezier(0.4,0,0.2,1);
+      overflow: hidden;
+    }
+    .slide.active { transform: translateX(0); }
+    .slide.prev   { transform: translateX(-100%); }
+
+    /* ── Navigation bar ── */
+    .nav {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      background: rgba(15,23,42,0.88);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 10px 22px;
+      z-index: 999;
+    }
+    .nav-btn {
+      background: none; border: none;
+      color: var(--muted); cursor: pointer;
+      font-size: 20px; line-height: 1;
+      padding: 2px 6px;
+      transition: color .2s;
+    }
+    .nav-btn:hover { color: var(--text); }
+    .dots { display: flex; gap: 7px; align-items: center; }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 99px;
+      background: var(--surf2);
+      cursor: pointer;
+      transition: all .25s;
+    }
+    .dot.active { width: 22px; background: var(--orange); }
+    .slide-num { color: var(--muted); font-size: 12px; min-width: 42px; text-align: center; }
+    .key-hint {
+      position: fixed; bottom: 28px; right: 44px;
+      color: var(--muted); font-size: 11px;
+      display: flex; align-items: center; gap: 5px;
+    }
+    .key {
+      background: var(--surface);
+      border: 1px solid var(--surf2);
+      border-radius: 4px;
+      padding: 2px 7px; font-size: 11px;
+    }
+
+    /* ── COVER ── */
+    .cover {
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      background: radial-gradient(ellipse at 50% 38%, rgba(249,115,22,0.08) 0%, transparent 65%);
+    }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 10px;
+      color: var(--orange); font-size: 11px; font-weight: 700;
+      letter-spacing: 2.5px; text-transform: uppercase;
+      margin-bottom: 22px;
+    }
+    .eyebrow::before,.eyebrow::after {
+      content:''; display:block; width:36px; height:1px;
+      background: rgba(249,115,22,0.35);
+    }
+    .cover-h1 {
+      font-size: clamp(38px,5.2vw,68px);
+      font-weight: 800; line-height: 1.06; letter-spacing: -1.5px;
+      margin-bottom: 14px;
+    }
+    .cover-h1 em { color: var(--orange); font-style: normal; }
+    .cover-sub {
+      color: var(--muted); font-size: 17px;
+      margin-bottom: 46px; max-width: 540px;
+    }
+    .chips { display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-bottom:52px; }
+    .chip {
+      padding: 7px 18px; border-radius: 8px;
+      font-size: 13px; font-weight: 600; border: 1px solid;
+    }
+    .c-blue   { color:var(--blue);   border-color:rgba(96,165,250,.3);   background:rgba(96,165,250,.07); }
+    .c-purple { color:var(--purple); border-color:rgba(167,139,250,.3);  background:rgba(167,139,250,.07); }
+    .c-cyan   { color:var(--cyan);   border-color:rgba(34,211,238,.3);   background:rgba(34,211,238,.07); }
+    .c-lime   { color:var(--lime);   border-color:rgba(163,230,53,.3);   background:rgba(163,230,53,.07); }
+    .c-sky    { color:var(--sky);    border-color:rgba(56,189,248,.3);   background:rgba(56,189,248,.07); }
+    .cover-meta { color:var(--muted); font-size:13px; }
+
+    /* ── Option slide shared ── */
+    .opt-header {
+      display:flex; align-items:flex-start; gap:18px;
+      margin-bottom: 20px;
+    }
+    .opt-badge {
+      flex-shrink:0; width:58px; height:58px;
+      border-radius:15px; display:flex; flex-direction:column;
+      align-items:center; justify-content:center; font-weight:700;
+    }
+    .opt-badge .n  { font-size:23px; line-height:1; }
+    .opt-badge .lb { font-size:9px; letter-spacing:1px; opacity:.75; }
+    .opt-title-group { flex:1; }
+    .opt-type { font-size:10px; font-weight:700; letter-spacing:2px; text-transform:uppercase; margin-bottom:3px; opacity:.7; }
+    .opt-name { font-size:clamp(20px,2.4vw,32px); font-weight:800; letter-spacing:-.5px; }
+    .opt-tag  { color:var(--muted); font-size:13.5px; margin-top:3px; }
+    .metrics  { display:flex; gap:7px; margin-left:auto; align-self:center; }
+    .met {
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:10px; padding:8px 13px; text-align:center; min-width:86px;
+    }
+    .met-k { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:3px; }
+    .met-v { font-size:12px; font-weight:700; }
+
+    /* 3-column body */
+    .opt-body {
+      display:grid; grid-template-columns:1fr 1.05fr 1.05fr;
+      gap:14px; flex:1; min-height:0;
+    }
+    .col {
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:15px; padding:18px 20px;
+      display:flex; flex-direction:column; overflow:hidden;
+    }
+    .col-hd {
+      font-size:10px; font-weight:700; letter-spacing:1.5px;
+      text-transform:uppercase; margin-bottom:13px;
+      display:flex; align-items:center; gap:7px;
+    }
+    .dot8 { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+
+    /* description col */
+    .desc { color:var(--muted); font-size:13px; line-height:1.65; margin-bottom:14px; }
+    .how-item {
+      display:flex; align-items:flex-start; gap:9px;
+      margin-bottom:9px; font-size:12.5px; line-height:1.4;
+    }
+    .how-n {
+      flex-shrink:0; width:19px; height:19px; border-radius:50%;
+      background:var(--surf2); font-size:10px; font-weight:700;
+      display:flex; align-items:center; justify-content:center;
+      color:var(--muted); margin-top:1px;
+    }
+    .best {
+      margin-top:auto; padding-top:13px;
+      border-top:1px solid var(--border);
+    }
+    .best-lbl { font-size:10px; text-transform:uppercase; letter-spacing:1px; color:var(--muted); margin-bottom:4px; }
+    .best-val { font-size:12.5px; font-weight:500; }
+
+    /* pros/cons list */
+    .p-item,.c-item {
+      display:flex; align-items:flex-start; gap:9px;
+      padding:6px 0; border-bottom:1px solid var(--border);
+      font-size:12.5px; line-height:1.4;
+    }
+    .p-item:last-child,.c-item:last-child { border-bottom:none; }
+    .pi { color:var(--green); flex-shrink:0; font-size:13px; margin-top:1px; }
+    .ci { color:var(--red);   flex-shrink:0; font-size:13px; margin-top:1px; }
+    .p-item .t,.c-item .t { color:#cbd5e1; }
+    .p-item strong,.c-item strong { color:var(--text); font-weight:600; }
+
+    /* ── COMPARISON SLIDE ── */
+    .comp-hd { margin-bottom:16px; }
+    .comp-hd h2 { font-size:26px; font-weight:800; margin-bottom:4px; }
+    .comp-hd p  { color:var(--muted); font-size:13px; }
+    table { width:100%; border-collapse:collapse; font-size:11.5px; }
+    thead th {
+      padding:8px 8px; text-align:center;
+      font-size:10.5px; font-weight:700; letter-spacing:.3px;
+      color:var(--muted); border-bottom:2px solid var(--border);
+    }
+    thead th:first-child { text-align:left; }
+    tbody td {
+      padding:7px 8px; border-bottom:1px solid var(--border);
+      text-align:center; vertical-align:middle;
+    }
+    tbody td:first-child { text-align:left; color:var(--muted); font-size:11.5px; font-weight:500; }
+    tbody tr:last-child td { border-bottom:none; }
+    tbody tr:hover td { background:rgba(255,255,255,0.02); }
+    .th-chip {
+      display:inline-block; padding:2px 8px;
+      border-radius:99px; font-size:10.5px; font-weight:700;
+    }
+    .g  { color:var(--green);  font-weight:600; }
+    .y  { color:var(--yellow); font-weight:600; }
+    .r  { color:var(--red);    font-weight:600; }
+    .b  { color:var(--blue);   font-weight:600; }
+    .m  { color:var(--muted);  font-weight:500; font-size:11px; }
+
+    /* ── RECOMMENDATION SLIDE ── */
+    .rec-hd { margin-bottom:18px; }
+    .rec-hd h2 { font-size:26px; font-weight:800; margin-bottom:4px; }
+    .rec-hd p  { color:var(--muted); font-size:13px; }
+    .rec-body {
+      display:grid; grid-template-columns:1.2fr 1fr 1fr;
+      gap:14px; flex:1; min-height:0;
+    }
+    .rec-card {
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:15px; padding:18px 20px;
+      display:flex; flex-direction:column;
+    }
+    .rec-card.hl {
+      border-color:rgba(249,115,22,.45);
+      background:rgba(249,115,22,.05);
+    }
+    .rec-sect {
+      font-size:10px; font-weight:700; letter-spacing:2px;
+      text-transform:uppercase; margin-bottom:10px;
+    }
+    .rec-opt-name { font-size:18px; font-weight:800; margin-bottom:10px; line-height:1.3; }
+    .rec-reason { color:var(--muted); font-size:12.5px; line-height:1.65; margin-bottom:14px; }
+    .rec-list { display:flex; flex-direction:column; gap:7px; }
+    .rec-li {
+      display:flex; align-items:flex-start;
+      gap:9px; font-size:12.5px; line-height:1.4;
+    }
+    .rec-li .ico { font-size:13px; margin-top:1px; flex-shrink:0; }
+    .rec-li .t { color:#cbd5e1; }
+    .rec-li strong { color:var(--text); font-weight:600; }
+    .decision-list { display:flex; flex-direction:column; gap:8px; margin-top:4px; }
+    .dq {
+      background:var(--surf2); border-radius:10px;
+      padding:9px 13px;
+    }
+    .dq-q { font-size:11px; color:var(--muted); margin-bottom:3px; }
+    .dq-a { font-size:12px; font-weight:600; }
+    .steps { display:flex; flex-direction:column; gap:8px; margin-top:4px; }
+    .step { display:flex; align-items:flex-start; gap:10px; font-size:12.5px; }
+    .snum {
+      flex-shrink:0; width:22px; height:22px; border-radius:50%;
+      background:var(--orange); color:var(--bg);
+      font-size:10px; font-weight:700;
+      display:flex; align-items:center; justify-content:center;
+      margin-top:1px;
+    }
+    .step .t { color:#cbd5e1; line-height:1.4; }
+    .step strong { color:var(--text); }
+    code {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 11px; background: rgba(255,255,255,0.07);
+      padding: 1px 5px; border-radius: 4px;
+    }
+
+    /* flutter unique callout */
+    .flutter-callout {
+      background: rgba(56,189,248,0.08);
+      border: 1px solid rgba(56,189,248,0.25);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: var(--sky);
+      margin-top: auto;
+      font-weight: 500;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 0 — COVER
+════════════════════════════════════════════ -->
+<div class="slide cover active" id="s0">
+  <div class="eyebrow">CookShop MVP &nbsp;—&nbsp; Engineering Standup</div>
+  <h1 class="cover-h1">Android Mobile<br><em>Strategy Options</em></h1>
+  <p class="cover-sub">Five approaches to bring CookShop to Android — evaluated against our stack, team skills, and timeline.</p>
+  <div class="chips">
+    <span class="chip c-blue">  ① PWA</span>
+    <span class="chip c-purple">② Capacitor</span>
+    <span class="chip c-cyan">  ③ React Native</span>
+    <span class="chip c-lime">  ④ Native Kotlin</span>
+    <span class="chip c-sky">   ⑤ Flutter</span>
+  </div>
+  <p class="cover-meta">May 18, 2026 &nbsp;·&nbsp; Use ← → arrow keys to navigate</p>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 1 — PWA
+════════════════════════════════════════════ -->
+<div class="slide" id="s1">
+  <div class="opt-header">
+    <div class="opt-badge" style="background:rgba(96,165,250,.13); color:var(--blue);">
+      <span class="n">①</span><span class="lb">OPTION</span>
+    </div>
+    <div class="opt-title-group">
+      <div class="opt-type" style="color:var(--blue)">Minimal Change</div>
+      <div class="opt-name">Progressive Web App <span style="color:var(--blue)">(PWA)</span></div>
+      <div class="opt-tag">Add <code>manifest.json</code> + service worker to the existing Next.js app — zero new codebase</div>
+    </div>
+    <div class="metrics">
+      <div class="met"><div class="met-k">Effort</div><div class="met-v" style="color:var(--green)">Very Low</div></div>
+      <div class="met"><div class="met-k">Time to Ship</div><div class="met-v" style="color:var(--green)">Same Day</div></div>
+      <div class="met"><div class="met-k">Code Reuse</div><div class="met-v" style="color:var(--green)">100%</div></div>
+      <div class="met"><div class="met-k">UX Quality</div><div class="met-v" style="color:var(--yellow)">Medium</div></div>
+      <div class="met"><div class="met-k">Play Store</div><div class="met-v" style="color:var(--red)">No</div></div>
+    </div>
+  </div>
+  <div class="opt-body">
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--blue)"></div>What It Is</div>
+      <p class="desc">Extend the existing Next.js app with two files. Android Chrome detects them and offers an "Add to Home Screen" prompt. The app launches full-screen with no browser chrome — indistinguishable from a native app to casual users.</p>
+      <div class="how-item"><div class="how-n">1</div><span>Add <code>manifest.json</code> — name, icon, <code>display:standalone</code>, theme color</span></div>
+      <div class="how-item"><div class="how-n">2</div><span>Add <code>sw.js</code> — service worker pre-caches app shell for offline &amp; instant load</span></div>
+      <div class="how-item"><div class="how-n">3</div><span>User visits in Chrome → install banner → icon on Android home screen</span></div>
+      <div class="how-item"><div class="how-n">4</div><span>All features work identically — Firebase Auth, Firestore real-time sync, REST APIs, camera via <code>capture="environment"</code></span></div>
+      <div class="best">
+        <div class="best-lbl">Best for</div>
+        <div class="best-val">MVP validation — prove mobile demand before committing to a native app build</div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--green)"></div><span style="color:var(--green)">Advantages</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Ships today</strong> — 2–4 hours implementation, no app store approval</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Zero backend changes</strong> — Cloud Run services, Firebase, Firestore all untouched</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>100% code reuse</strong> — single codebase serves web and mobile</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Zero extra infrastructure cost</strong> — same Firebase Hosting, no new accounts</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Auto-updates</strong> — no app store release cycle; changes deploy instantly</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Camera access works</strong> — Android Chrome supports native camera capture</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Offline capable</strong> — service worker caches app shell for no-network use</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>One codebase</strong> — no parallel maintenance burden on the team</span></div>
+    </div>
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--red)"></div><span style="color:var(--red)">Disadvantages</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>No Play Store listing</strong> — zero organic app discovery; can't appear in store search</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Perceived as a website</strong> — tech-savvy users know it's not a "real" app</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Chrome required</strong> — no standalone APK; can't be shared as a file or sideloaded</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Install prompt not guaranteed</strong> — Chrome decides when to show it; criteria can change</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Web-first UI</strong> — no bottom tab bar, no native swipe gestures, no haptic feedback</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Push notifications unreliable</strong> — lower delivery rate vs native FCM on Android</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Limited device APIs</strong> — no NFC, Bluetooth, or background processing</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Not a ceiling</strong> — if Play Store is needed later, we build a native app anyway</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 2 — CAPACITOR
+════════════════════════════════════════════ -->
+<div class="slide" id="s2">
+  <div class="opt-header">
+    <div class="opt-badge" style="background:rgba(167,139,250,.13); color:var(--purple);">
+      <span class="n">②</span><span class="lb">OPTION</span>
+    </div>
+    <div class="opt-title-group">
+      <div class="opt-type" style="color:var(--purple)">Hybrid Shell</div>
+      <div class="opt-name">Capacitor <span style="color:var(--purple)">(Wrap Next.js in Native Shell)</span></div>
+      <div class="opt-tag">Package the existing Next.js app inside an Android WebView — distributed via Play Store as a real APK</div>
+    </div>
+    <div class="metrics">
+      <div class="met"><div class="met-k">Effort</div><div class="met-v" style="color:var(--yellow)">Low</div></div>
+      <div class="met"><div class="met-k">Time to Ship</div><div class="met-v" style="color:var(--yellow)">1–2 Weeks</div></div>
+      <div class="met"><div class="met-k">Code Reuse</div><div class="met-v" style="color:var(--green)">100%</div></div>
+      <div class="met"><div class="met-k">UX Quality</div><div class="met-v" style="color:var(--red)">Low</div></div>
+      <div class="met"><div class="met-k">Play Store</div><div class="met-v" style="color:var(--green)">Yes</div></div>
+    </div>
+  </div>
+  <div class="opt-body">
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--purple)"></div>What It Is</div>
+      <p class="desc">Capacitor wraps the Next.js static build inside a native Android shell. The web assets are bundled into the APK and loaded in a Chromium WebView. Capacitor plugins provide a JavaScript bridge to native Android APIs.</p>
+      <div class="how-item"><div class="how-n">1</div><span><code>npm run build</code> → Next.js static export → <code>/out/</code></span></div>
+      <div class="how-item"><div class="how-n">2</div><span><code>npx cap sync android</code> → copies <code>/out/</code> into Android project assets</span></div>
+      <div class="how-item"><div class="how-n">3</div><span>Gradle builds APK/AAB — app loads from <code>file://android_asset/</code> not a remote URL</span></div>
+      <div class="how-item"><div class="how-n">4</div><span>Capacitor plugins extend to native camera, FCM push notifications, filesystem</span></div>
+      <div class="how-item"><div class="how-n">5</div><span>Publish APK/AAB to Google Play Store</span></div>
+      <div class="best">
+        <div class="best-lbl">Best for</div>
+        <div class="best-val">Teams that need a Play Store listing quickly but can't afford any UI rewrite</div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--green)"></div><span style="color:var(--green)">Advantages</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>100% codebase reuse</strong> — zero UI rewrites; existing React/TypeScript unchanged</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Real Play Store APK</strong> — full app store presence and discoverability</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Native camera plugin</strong> — better quality than browser <code>&lt;input capture&gt;</code></span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Native push notifications</strong> — FCM via Capacitor plugin, reliable delivery</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>No new language</strong> — team stays entirely in TypeScript and React</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Extensible</strong> — more Capacitor plugins available as app grows</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Fast to ship</strong> — 1–2 weeks to a Play Store listing</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Live reload in dev</strong> — fast iteration cycle during development</span></div>
+    </div>
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--red)"></div><span style="color:var(--red)">Disadvantages</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>WebView rendering</strong> — discerning users notice it feels like a browser wrapper</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Performance limited</strong> — WebView is slower than native rendering; animations stutter</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>UI still web-first</strong> — no native mobile patterns; mobile UX gap not fixed</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Play Store review delay</strong> — every UI change needs rebuild + re-submission (days)</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Two deploy pipelines</strong> — Firebase Hosting (web) + Google Play (Android) to manage</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>WebView fragmentation</strong> — different Android versions have different WebView behavior</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Larger APK</strong> — bundles Chromium overhead compared to a truly native app</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Worst of both worlds</strong> — Play Store complexity without native UX payoff</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 3 — REACT NATIVE
+════════════════════════════════════════════ -->
+<div class="slide" id="s3">
+  <div class="opt-header">
+    <div class="opt-badge" style="background:rgba(34,211,238,.13); color:var(--cyan);">
+      <span class="n">③</span><span class="lb">OPTION</span>
+    </div>
+    <div class="opt-title-group">
+      <div class="opt-type" style="color:var(--cyan)">Shared Logic</div>
+      <div class="opt-name">React Native <span style="color:var(--cyan)">(Shared Business Logic)</span></div>
+      <div class="opt-tag">Monorepo — share hooks, API calls, Firebase logic &amp; types; rewrite UI in React Native primitives</div>
+    </div>
+    <div class="metrics">
+      <div class="met"><div class="met-k">Effort</div><div class="met-v" style="color:var(--yellow)">Medium</div></div>
+      <div class="met"><div class="met-k">Time to Ship</div><div class="met-v" style="color:var(--yellow)">4–8 Weeks</div></div>
+      <div class="met"><div class="met-k">Code Reuse</div><div class="met-v" style="color:var(--yellow)">60–70%</div></div>
+      <div class="met"><div class="met-k">UX Quality</div><div class="met-v" style="color:var(--green)">High</div></div>
+      <div class="met"><div class="met-k">Play Store</div><div class="met-v" style="color:var(--green)">Yes</div></div>
+    </div>
+  </div>
+  <div class="opt-body">
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--cyan)"></div>What It Is</div>
+      <p class="desc">A Turborepo monorepo splits the codebase into a shared <code>/packages/core</code> (API hooks, Firebase logic, TypeScript types) and two platform apps. No WebView — Fabric renderer outputs real native Android components.</p>
+      <div class="how-item"><div class="how-n">1</div><span><strong>Shared:</strong> <code>useAuth</code>, <code>useShoppingList</code>, <code>useImagePipeline</code>, all API calls, TypeScript types</span></div>
+      <div class="how-item"><div class="how-n">2</div><span><strong>Web UI:</strong> existing React + Tailwind unchanged (<code>div</code>, <code>p</code>, <code>img</code>)</span></div>
+      <div class="how-item"><div class="how-n">3</div><span><strong>RN UI:</strong> rewritten in <code>View</code>, <code>Text</code>, <code>FlatList</code> — Fabric renderer → real native Android Views</span></div>
+      <div class="how-item"><div class="how-n">4</div><span>Metro bundles the RN app; Gradle builds APK; published to Play Store</span></div>
+      <div class="best">
+        <div class="best-lbl">Best for</div>
+        <div class="best-val">Teams wanting native UX + maximum code reuse from web; iOS later without full rewrite</div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--green)"></div><span style="color:var(--green)">Advantages</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Truly native UI</strong> — Fabric outputs real Android Views, not HTML in a WebView</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>60–70% code reuse</strong> — all API orchestration, Firebase, types shared between platforms</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Same language</strong> — TypeScript + React paradigm; team's existing skills transfer directly</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>iOS path included</strong> — same RN codebase targets iOS with minimal extra effort</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Play Store presence</strong> — real APK, full app store listing</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Native camera + push</strong> — <code>react-native-image-picker</code> and FCM messaging</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Bug fixed once</strong> — shared logic bug fixed in core package applies to both platforms</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Strong ecosystem</strong> — Expo, React Navigation, RN Firebase are mature and well-supported</span></div>
+    </div>
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--red)"></div><span style="color:var(--red)">Disadvantages</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>UI must be rewritten</strong> — <code>div</code>→<code>View</code>, <code>ul</code>→<code>FlatList</code>; Tailwind CSS does not work in RN</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Two UI codebases</strong> — web components and RN components maintained in parallel</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Monorepo complexity</strong> — Turborepo setup, workspace linking, Metro config adds build overhead</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>React ≠ React Native</strong> — subtle behavioral differences trip developers; separate debugging tools</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>4–8 weeks investment</strong> — meaningful timeline before anything ships to Play Store</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>RN upgrade pain</strong> — major version bumps can introduce breaking changes across the repo</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Feature parity burden</strong> — new features must be built in both web UI and RN UI</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Metro vs webpack</strong> — different bundler, different hot reload, different error messages</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 4 — NATIVE KOTLIN
+════════════════════════════════════════════ -->
+<div class="slide" id="s4">
+  <div class="opt-header">
+    <div class="opt-badge" style="background:rgba(163,230,53,.12); color:var(--lime);">
+      <span class="n">④</span><span class="lb">OPTION</span>
+    </div>
+    <div class="opt-title-group">
+      <div class="opt-type" style="color:var(--lime)">Full Native Android</div>
+      <div class="opt-name">Native Android <span style="color:var(--lime)">(Kotlin / Jetpack Compose)</span></div>
+      <div class="opt-tag">Completely independent Android codebase — same backend APIs and Firebase project, zero shared code with web</div>
+    </div>
+    <div class="metrics">
+      <div class="met"><div class="met-k">Effort</div><div class="met-v" style="color:var(--red)">Very High</div></div>
+      <div class="met"><div class="met-k">Time to Ship</div><div class="met-v" style="color:var(--red)">8–16 Weeks</div></div>
+      <div class="met"><div class="met-k">Code Reuse</div><div class="met-v" style="color:var(--red)">0%</div></div>
+      <div class="met"><div class="met-k">UX Quality</div><div class="met-v" style="color:var(--green)">Best</div></div>
+      <div class="met"><div class="met-k">Play Store</div><div class="met-v" style="color:var(--green)">Yes</div></div>
+    </div>
+  </div>
+  <div class="opt-body">
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--lime)"></div>What It Is</div>
+      <p class="desc">A completely independent Android app written in Kotlin with Jetpack Compose — Google's modern, recommended native Android stack. MVVM + Hilt DI. Consumes the same REST APIs via Retrofit and the same Firebase project via the native Android SDK.</p>
+      <div class="how-item"><div class="how-n">1</div><span><strong>UI:</strong> Jetpack Compose screens — <code>LazyColumn</code> shopping list, <code>TextField</code>, Material Design</span></div>
+      <div class="how-item"><div class="how-n">2</div><span><strong>HTTP:</strong> Retrofit + OkHttp calling the same <code>/analyze</code>, <code>/match</code>, <code>/session</code> endpoints</span></div>
+      <div class="how-item"><div class="how-n">3</div><span><strong>Firebase:</strong> Android SDK — <code>addSnapshotListener</code> mirrors web's <code>onSnapshot</code></span></div>
+      <div class="how-item"><div class="how-n">4</div><span><strong>Camera:</strong> CameraX — full preview, resolution control, HDR; image to Base64 via Android SDK</span></div>
+      <div class="best">
+        <div class="best-lbl">Best for</div>
+        <div class="best-val">When the Android app is a primary product — not a companion to the web app</div>
+      </div>
+    </div>
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--green)"></div><span style="color:var(--green)">Advantages</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Best Android UX possible</strong> — indistinguishable from Google or Samsung's own apps</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Best performance</strong> — compiled Kotlin bytecode, no JS or Dart runtime overhead</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Full Android API access</strong> — CameraX, NFC, Bluetooth, background tasks, sensors</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Clean architecture enforced</strong> — Hilt DI, ViewModels, Kotlin Coroutines + Flow by design</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>No runtime abstraction</strong> — zero dependency on JS engine, Dart VM, or WebView</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Best camera access</strong> — CameraX with full preview, flash, HDR, and resolution control</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Zero backend changes</strong> — same REST APIs consumed via Retrofit; same Firebase project</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Future-proof</strong> — Jetpack Compose is Google's official, long-term Android UI framework</span></div>
+    </div>
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--red)"></div><span style="color:var(--red)">Disadvantages</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Zero code sharing</strong> — full UI and all business logic rewritten from scratch in Kotlin</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>New language for team</strong> — Kotlin is different from TypeScript; React concepts don't map to Compose 1:1</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Longest timeline</strong> — 8–16 weeks minimum for feature parity with the web app</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Every bug fixed twice</strong> — web and Android are independently maintained forever</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Every feature built twice</strong> — new feature on web must be re-implemented in Kotlin</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Highest maintenance cost</strong> — two fully independent apps, two CI/CD pipelines, two signing setups</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Feature divergence risk</strong> — web and app gradually drift apart over time without discipline</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>iOS = another full rewrite</strong> — Swift/SwiftUI is a third completely independent codebase</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 5 — FLUTTER
+════════════════════════════════════════════ -->
+<div class="slide" id="s5">
+  <div class="opt-header">
+    <div class="opt-badge" style="background:rgba(56,189,248,.13); color:var(--sky);">
+      <span class="n">⑤</span><span class="lb">OPTION</span>
+    </div>
+    <div class="opt-title-group">
+      <div class="opt-type" style="color:var(--sky)">Cross-Platform Native</div>
+      <div class="opt-name">Flutter <span style="color:var(--sky)">(Dart / Own Rendering Engine)</span></div>
+      <div class="opt-tag">Single Dart codebase → Android + iOS; Google's own Impeller engine draws every pixel — no WebView, no native widgets</div>
+    </div>
+    <div class="metrics">
+      <div class="met"><div class="met-k">Effort</div><div class="met-v" style="color:var(--red)">High</div></div>
+      <div class="met"><div class="met-k">Time to Ship</div><div class="met-v" style="color:var(--red)">6–12 Weeks</div></div>
+      <div class="met"><div class="met-k">Code Reuse</div><div class="met-v" style="color:var(--red)">0%</div></div>
+      <div class="met"><div class="met-k">UX Quality</div><div class="met-v" style="color:var(--green)">High</div></div>
+      <div class="met"><div class="met-k">Play Store</div><div class="met-v" style="color:var(--green)">Yes</div></div>
+    </div>
+  </div>
+  <div class="opt-body">
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--sky)"></div>What It Is</div>
+      <p class="desc">Flutter is Google's open-source UI framework using the Dart language. Unlike React Native or Capacitor, Flutter bypasses the native widget system entirely — the Impeller rendering engine draws every pixel directly to the GPU canvas. One codebase ships to Android and iOS.</p>
+      <div class="how-item"><div class="how-n">1</div><span>Write UI in Dart using Flutter widgets (<code>Column</code>, <code>ListView</code>, <code>TextField</code>, <code>ElevatedButton</code>)</span></div>
+      <div class="how-item"><div class="how-n">2</div><span>Impeller engine renders directly to GPU — no native widget system involved</span></div>
+      <div class="how-item"><div class="how-n">3</div><span>Camera via <code>image_picker</code>, Firebase via <code>firebase_flutter</code> SDK, REST via <code>dio</code> — same endpoints unchanged</span></div>
+      <div class="how-item"><div class="how-n">4</div><span><code>flutter build apk</code> → Play Store; <code>flutter build ios</code> → App Store — same Dart code</span></div>
+      <div class="flutter-callout">
+        ★ Flutter's unique edge: Android + iOS ship from a single codebase — the strongest cross-platform story of all five options
+      </div>
+    </div>
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--green)"></div><span style="color:var(--green)">Advantages</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Android + iOS in one codebase</strong> — best cross-platform ROI; same Dart code targets both stores</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Own rendering engine (Impeller)</strong> — pixel-perfect, consistent UI across all Android device brands</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Compiled to ARM native code</strong> — excellent performance; no JS runtime or WebView overhead</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Hot reload</strong> — fastest dev iteration of all five options; changes appear in under a second</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Google-backed, long-term</strong> — Material Design built-in; strong official support and roadmap</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Zero backend changes</strong> — same REST APIs, same Firebase project; <code>dio</code> calls identical endpoints</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Dart is learnable</strong> — statically typed, similar syntax to TypeScript; JS devs ramp up quickly</span></div>
+      <div class="p-item"><span class="pi">✓</span><span class="t"><strong>Consistent UI everywhere</strong> — same pixel-perfect look on Samsung, Pixel, OnePlus without tweaking</span></div>
+    </div>
+    <div class="col">
+      <div class="col-hd"><div class="dot8" style="background:var(--red)"></div><span style="color:var(--red)">Disadvantages</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>New language</strong> — Dart; TypeScript syntax helps but it's a completely different ecosystem</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Zero code sharing with web</strong> — complete rewrite of all UI and business logic; no shared hooks or types</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Not native widgets</strong> — Flutter draws its own; platform-specific interactions need MethodChannels (verbose)</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Larger APK size</strong> — Flutter Impeller engine adds ~8 MB overhead to every build</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>6–12 weeks investment</strong> — Dart learning curve plus full app rewrite; comparable to React Native</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Every bug fixed twice</strong> — Flutter app and web app are fully independent forever</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Smaller JS ecosystem</strong> — fewer third-party packages than npm; some Dart packages less mature</span></div>
+      <div class="c-item"><span class="ci">✗</span><span class="t"><strong>Different mental model</strong> — Dart widget tree differs from React components; team needs re-orientation</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 6 — COMPARISON
+════════════════════════════════════════════ -->
+<div class="slide" id="s6">
+  <div class="comp-hd">
+    <h2>Side-by-Side Comparison</h2>
+    <p>All five options across the criteria that matter most — zero backend changes required for every option</p>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:17%">Criteria</th>
+        <th><span class="th-chip" style="color:var(--blue);background:rgba(96,165,250,.1)">① PWA</span></th>
+        <th><span class="th-chip" style="color:var(--purple);background:rgba(167,139,250,.1)">② Capacitor</span></th>
+        <th><span class="th-chip" style="color:var(--cyan);background:rgba(34,211,238,.1)">③ React Native</span></th>
+        <th><span class="th-chip" style="color:var(--lime);background:rgba(163,230,53,.1)">④ Native Kotlin</span></th>
+        <th><span class="th-chip" style="color:var(--sky);background:rgba(56,189,248,.1)">⑤ Flutter</span></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Time to ship</td>
+        <td class="g">Same day</td>
+        <td class="y">1–2 weeks</td>
+        <td class="y">4–8 weeks</td>
+        <td class="r">8–16 weeks</td>
+        <td class="r">6–12 weeks</td>
+      </tr>
+      <tr>
+        <td>Implementation effort</td>
+        <td class="g">Very Low</td>
+        <td class="g">Low</td>
+        <td class="y">Medium</td>
+        <td class="r">Very High</td>
+        <td class="r">High</td>
+      </tr>
+      <tr>
+        <td>Code reuse from web</td>
+        <td class="g">100%</td>
+        <td class="g">100%</td>
+        <td class="y">60–70%</td>
+        <td class="r">0%</td>
+        <td class="r">0%</td>
+      </tr>
+      <tr>
+        <td>Native UX quality</td>
+        <td class="y">Medium (browser)</td>
+        <td class="r">Low (WebView)</td>
+        <td class="g">High (native Views)</td>
+        <td class="g">Best (compiled)</td>
+        <td class="g">High (own engine)</td>
+      </tr>
+      <tr>
+        <td>UI consistency across devices</td>
+        <td class="m">Browser-dependent</td>
+        <td class="m">WebView-dependent</td>
+        <td class="y">Mostly consistent</td>
+        <td class="y">OS-dependent</td>
+        <td class="g">Pixel-perfect always</td>
+      </tr>
+      <tr>
+        <td>Google Play Store</td>
+        <td class="r">No</td>
+        <td class="g">Yes</td>
+        <td class="g">Yes</td>
+        <td class="g">Yes</td>
+        <td class="g">Yes</td>
+      </tr>
+      <tr>
+        <td>Team skill match</td>
+        <td class="g">Exact — React/TS</td>
+        <td class="g">Exact — React/TS</td>
+        <td class="g">Mostly — React/TS</td>
+        <td class="r">New — Kotlin</td>
+        <td class="y">New — Dart</td>
+      </tr>
+      <tr>
+        <td>Camera access</td>
+        <td class="y">Basic (Chrome)</td>
+        <td class="g">Native plugin</td>
+        <td class="g">Native module</td>
+        <td class="g">Best (CameraX)</td>
+        <td class="g">Native (image_picker)</td>
+      </tr>
+      <tr>
+        <td>Push notifications</td>
+        <td class="y">Unreliable</td>
+        <td class="g">Full FCM</td>
+        <td class="g">Full FCM</td>
+        <td class="g">Full FCM</td>
+        <td class="g">Full FCM</td>
+      </tr>
+      <tr>
+        <td>iOS path later</td>
+        <td class="g">Same PWA</td>
+        <td class="g">Same build</td>
+        <td class="g">Same RN codebase</td>
+        <td class="r">Full Swift rewrite</td>
+        <td class="g">Same Dart codebase ★</td>
+      </tr>
+      <tr>
+        <td>Auto-updates (no store)</td>
+        <td class="g">Instant</td>
+        <td class="r">Store review</td>
+        <td class="r">Store review</td>
+        <td class="r">Store review</td>
+        <td class="r">Store review</td>
+      </tr>
+      <tr>
+        <td>Long-term maintenance</td>
+        <td class="g">Lowest (1 codebase)</td>
+        <td class="y">Medium (2 pipelines)</td>
+        <td class="y">Medium (2 UIs)</td>
+        <td class="r">Highest (2 full apps)</td>
+        <td class="r">High (2 full apps)</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     SLIDE 7 — RECOMMENDATION
+════════════════════════════════════════════ -->
+<div class="slide" id="s7">
+  <div class="rec-hd">
+    <h2>Recommendation &amp; Next Steps</h2>
+    <p>Based on current team size, timeline, and product stage — zero backend changes required for all five options</p>
+  </div>
+  <div class="rec-body">
+
+    <!-- Primary recommendation -->
+    <div class="rec-card hl">
+      <div class="rec-sect" style="color:var(--orange)">Our Recommendation — Two-Phase Approach</div>
+      <div class="rec-opt-name">① PWA now &nbsp;→&nbsp; ③ React Native or ⑤ Flutter next</div>
+      <p class="rec-reason">Ship PWA today to validate mobile demand with zero risk. If analytics confirm users want a native app, choose between React Native (if maximising web code reuse matters) or Flutter (if iOS is on the 12-month roadmap and the team is willing to learn Dart).</p>
+      <div class="rec-list">
+        <div class="rec-li"><span class="ico">🚀</span><span class="t"><strong>Phase 1 — today:</strong> PWA to prove mobile demand; 2-4 hrs, zero cost</span></div>
+        <div class="rec-li"><span class="ico">📊</span><span class="t"><strong>Measure:</strong> mobile session rate, image-analysis conversion, 7-day retention</span></div>
+        <div class="rec-li"><span class="ico">🔀</span><span class="t"><strong>Phase 2a — iOS not planned:</strong> React Native — reuse 60-70% of web logic in TypeScript</span></div>
+        <div class="rec-li"><span class="ico">🔀</span><span class="t"><strong>Phase 2b — iOS on roadmap:</strong> Flutter — single Dart codebase ships to both stores</span></div>
+        <div class="rec-li"><span class="ico">🚫</span><span class="t"><strong>Skip Capacitor</strong> — WebView UX gap is real; Play Store complexity without native payoff</span></div>
+        <div class="rec-li"><span class="ico">⏳</span><span class="t"><strong>Native Kotlin — only if</strong> Android becomes the primary product, not a web companion</span></div>
+      </div>
+    </div>
+
+    <!-- Decision criteria -->
+    <div class="rec-card">
+      <div class="rec-sect" style="color:var(--muted)">Decision Criteria</div>
+      <div class="decision-list">
+        <div class="dq">
+          <div class="dq-q">Do we need Play Store discoverability right now?</div>
+          <div class="dq-a" style="color:var(--blue)">No → PWA &nbsp;·&nbsp; Yes → React Native, Flutter, or Capacitor</div>
+        </div>
+        <div class="dq">
+          <div class="dq-q">Is native UX quality a hard requirement?</div>
+          <div class="dq-a" style="color:var(--cyan)">No → PWA or Capacitor &nbsp;·&nbsp; Yes → React Native, Flutter, or Kotlin</div>
+        </div>
+        <div class="dq">
+          <div class="dq-q">Do we need iOS within 12 months?</div>
+          <div class="dq-a" style="color:var(--sky)">Yes → Flutter (same codebase) or React Native (same codebase)</div>
+        </div>
+        <div class="dq">
+          <div class="dq-q">Does maximising web code reuse matter?</div>
+          <div class="dq-a" style="color:var(--cyan)">Yes → React Native (60-70% reuse, TypeScript stays)</div>
+        </div>
+        <div class="dq">
+          <div class="dq-q">Is Android the primary product (not web companion)?</div>
+          <div class="dq-a" style="color:var(--lime)">Yes + team learns Kotlin → Native Kotlin/Compose</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Next steps -->
+    <div class="rec-card">
+      <div class="rec-sect" style="color:var(--muted)">Immediate Next Steps</div>
+      <div class="steps">
+        <div class="step">
+          <div class="snum">1</div>
+          <span class="t"><strong>Today:</strong> Add <code>manifest.json</code> + register service worker in <code>layout.tsx</code> — 2 hrs</span>
+        </div>
+        <div class="step">
+          <div class="snum">2</div>
+          <span class="t"><strong>Today:</strong> Add 192×512 px icons to <code>/public/</code> and add <code>capture="environment"</code> to image input</span>
+        </div>
+        <div class="step">
+          <div class="snum">3</div>
+          <span class="t"><strong>This week:</strong> Share with 10 Android users — measure engagement vs web baseline</span>
+        </div>
+        <div class="step">
+          <div class="snum">4</div>
+          <span class="t"><strong>Sprint 2:</strong> Review mobile analytics — if retention holds, decide: React Native or Flutter?</span>
+        </div>
+        <div class="step">
+          <div class="snum">5</div>
+          <span class="t"><strong>Decision gate A:</strong> iOS not needed → React Native monorepo; preserve TypeScript + shared hooks</span>
+        </div>
+        <div class="step">
+          <div class="snum">6</div>
+          <span class="t"><strong>Decision gate B:</strong> iOS needed in 12 months → Flutter; team ramps Dart, ships both stores together</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── Navigation ── -->
+<nav class="nav">
+  <button class="nav-btn" onclick="go(-1)">&#8592;</button>
+  <div class="dots" id="dots"></div>
+  <button class="nav-btn" onclick="go(1)">&#8594;</button>
+  <span class="slide-num" id="num"></span>
+</nav>
+<div class="key-hint">
+  <span class="key">←</span><span class="key">→</span> navigate
+</div>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  const dotsEl = document.getElementById('dots');
+  const numEl  = document.getElementById('num');
+  let cur = 0, animating = false;
+
+  slides.forEach((_, i) => {
+    const d = document.createElement('div');
+    d.className = 'dot' + (i === 0 ? ' active' : '');
+    d.onclick = () => goTo(i);
+    dotsEl.appendChild(d);
+  });
+
+  function updateDots() {
+    document.querySelectorAll('.dot').forEach((d,i) => d.classList.toggle('active', i === cur));
+    numEl.textContent = (cur + 1) + ' / ' + slides.length;
+  }
+
+  function goTo(n) {
+    if (n === cur || n < 0 || n >= slides.length || animating) return;
+    animating = true;
+    const dir = n > cur ? 1 : -1;
+    const prev = cur;
+    cur = n;
+
+    slides[prev].classList.remove('active');
+    slides[prev].style.transform = dir > 0 ? 'translateX(-100%)' : 'translateX(100%)';
+
+    slides[cur].style.transition = 'none';
+    slides[cur].style.transform  = dir > 0 ? 'translateX(100%)' : 'translateX(-100%)';
+    slides[cur].getBoundingClientRect(); // force reflow
+    slides[cur].style.transition = '';
+    slides[cur].style.transform  = 'translateX(0)';
+    slides[cur].classList.add('active');
+
+    updateDots();
+    setTimeout(() => {
+      slides[prev].style.transform = '';
+      animating = false;
+    }, 440);
+  }
+
+  function go(dir) { goTo(cur + dir); }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') go(1);
+    if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')   go(-1);
+  });
+
+  updateDots();
+</script>
+</body>
+</html>

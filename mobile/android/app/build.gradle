@@ -1,0 +1,58 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+    id "dev.flutter.flutter-gradle-plugin"
+    id "com.google.gms.google-services"
+}
+
+android {
+    ndkVersion = "28.2.13676358"
+    namespace "com.shoplens.app"
+    compileSdk flutter.compileSdkVersion
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+
+    sourceSets {
+        main.java.srcDirs += "src/main/kotlin"
+    }
+
+    defaultConfig {
+        applicationId "com.shoplens.app"
+        minSdkVersion flutter.minSdkVersion
+        targetSdk flutter.targetSdkVersion
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.debug
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+// firebase-iid was folded into firebase-messaging; exclude the stale standalone artifact
+// to prevent duplicate class errors when both appear in the transitive dependency tree.
+configurations.configureEach {
+    exclude group: 'com.google.firebase', module: 'firebase-iid'
+}
+
+flutter {
+    source "../.."
+}
+
+// google_mlkit_object_detection 0.15.x requires Android 6+ (API 23).
+// afterEvaluate runs after all build configuration (including Flutter's migration
+// which rewrites any literal "minSdkVersion <number>" in the file), so this
+// setMinSdkVersion call cannot be undone by the migrator.
+afterEvaluate {
+    android.defaultConfig.setMinSdkVersion(23)
+}

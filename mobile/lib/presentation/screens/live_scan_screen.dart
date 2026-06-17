@@ -12,6 +12,7 @@ import '../../core/services/mlkit_detector_service.dart';
 import '../../core/utils/image_utils.dart';
 import '../../core/utils/tap_crop_utils.dart';
 import '../providers/pipeline_provider.dart';
+import '../widgets/info_tooltip_icon.dart';
 import '../widgets/object_glow_overlay.dart';
 
 class LiveScanScreen extends ConsumerStatefulWidget {
@@ -148,7 +149,7 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
         }
       }
 
-      await ref.read(pipelineProvider.notifier).setImage(imageBytes, mime);
+      await ref.read(pipelineProvider.notifier).setImage(imageBytes, mime, fromLiveScan: true);
       if (mounted) context.go('/main');
       // Auto-start analysis so the user doesn't need to press Scan Image
       ref.read(pipelineProvider.notifier).analyzeLoaded();
@@ -291,23 +292,33 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
             child: SafeArea(
               child: Padding(
                 padding: const EdgeInsets.only(bottom: 32),
-                child: ElevatedButton.icon(
-                  onPressed: () => _freezeAndIdentify(),
-                  icon: const Icon(Icons.center_focus_strong, size: 20),
-                  label: const Text(
-                    'Identify',
-                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-                  ),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF34D399),
-                    foregroundColor: const Color(0xFF0F172A),
-                    padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(32),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: () => _freezeAndIdentify(),
+                      icon: const Icon(Icons.center_focus_strong, size: 20),
+                      label: const Text(
+                        'Scan All',
+                        style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF34D399),
+                        foregroundColor: const Color(0xFF0F172A),
+                        padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(32),
+                        ),
+                        elevation: 6,
+                        shadowColor: const Color(0xFF34D399).withValues(alpha: 0.4),
+                      ),
                     ),
-                    elevation: 6,
-                    shadowColor: const Color(0xFF34D399).withValues(alpha: 0.4),
-                  ),
+                    const SizedBox(width: 8),
+                    const InfoTooltipIcon(
+                      message: 'Scan All identifies all objects marked with dots.',
+                      color: Colors.white70,
+                    ),
+                  ],
                 ),
               ),
             ),

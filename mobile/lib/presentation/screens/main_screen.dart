@@ -19,6 +19,7 @@ import '../providers/pipeline_provider.dart';
 import '../providers/profile_provider.dart';
 import '../providers/shopping_list_provider.dart';
 import '../providers/video_provider.dart';
+import '../widgets/info_tooltip_icon.dart';
 import '../widgets/pipeline_status_bar.dart';
 import '../widgets/product_card.dart';
 import '../widgets/sync_indicator.dart';
@@ -68,6 +69,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     final profile            = ref.watch(profileProvider).value;
     final shoppingCategories = profile?.shoppingCategories ?? const [];
     final isAdmin            = ref.watch(isAdminProvider).value ?? false;
+    final hasSelection       = _tapKey.currentState?.hasSelection ?? false;
 
     final isBusy = pipeline.status == PipelineStatus.analyzing ||
                    pipeline.status == PipelineStatus.matching   ||
@@ -185,23 +187,39 @@ class _MainScreenState extends ConsumerState<MainScreen> {
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
                 child: Center(
-                  child: ElevatedButton.icon(
-                    onPressed: () async {
-                      final tap = _tapKey.currentState;
-                      if (tap != null && tap.hasSelection) {
-                        await tap.analyzeSelection();
-                      } else {
-                        ref.read(pipelineProvider.notifier).analyzeLoaded();
-                      }
-                    },
-                    icon: const Icon(Icons.auto_awesome, size: 18),
-                    label: const Text('Scan Image', style: TextStyle(fontWeight: FontWeight.w700)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF34D399),
-                      foregroundColor: const Color(0xFF0F172A),
-                      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-                    ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: (pipeline.fromLiveScan && !hasSelection)
+                            ? null
+                            : () async {
+                                final tap = _tapKey.currentState;
+                                if (tap != null && tap.hasSelection) {
+                                  await tap.analyzeSelection();
+                                } else if (!pipeline.fromLiveScan) {
+                                  ref.read(pipelineProvider.notifier).analyzeLoaded();
+                                }
+                              },
+                        icon: const Icon(Icons.auto_awesome, size: 18),
+                        label: Text(
+                          pipeline.fromLiveScan ? 'Crop Image' : 'Scan Image',
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF34D399),
+                          foregroundColor: const Color(0xFF0F172A),
+                          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      InfoTooltipIcon(
+                        message: pipeline.fromLiveScan
+                            ? 'Tap an object first. Crop Image identifies only the selected object.'
+                            : 'Scan Image identifies everything in the image. To identify a specific item, tap it first.',
+                      ),
+                    ],
                   ),
                 ),
               ),

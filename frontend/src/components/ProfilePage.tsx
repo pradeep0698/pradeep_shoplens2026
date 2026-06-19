@@ -1,7 +1,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { joinTermInput, splitTermInput, type UserProfileDocument } from '@/lib/demoProfiles';
+import {
+  clampMaxSearches,
+  joinTermInput,
+  MAX_SEARCHES_PER_RUN,
+  splitTermInput,
+  type UserProfileDocument,
+} from '@/lib/demoProfiles';
 
 const GENDER_OPTIONS = ['Woman', 'Man', 'Non-binary', 'Prefer not to say'];
 const CATEGORY_OPTIONS = [
@@ -23,6 +29,7 @@ type FormState = {
   shoppingCategories: Set<string>;
   ignoreTermsText: string;
   preferenceTermsText: string;
+  maxSearches: number;
 };
 
 type Props = {
@@ -45,6 +52,7 @@ function buildFormState(profile: UserProfileDocument | null): FormState {
     shoppingCategories: new Set(profile?.shopping_categories ?? []),
     ignoreTermsText: joinTermInput(profile?.ignore_terms),
     preferenceTermsText: joinTermInput(profile?.preference_terms),
+    maxSearches: clampMaxSearches(profile?.max_searches_per_run),
   };
 }
 
@@ -99,6 +107,7 @@ export default function ProfilePage({
       shopping_categories: Array.from(form.shoppingCategories),
       ignore_terms: splitTermInput(form.ignoreTermsText),
       preference_terms: splitTermInput(form.preferenceTermsText),
+      max_searches_per_run: clampMaxSearches(form.maxSearches),
     });
   }
 

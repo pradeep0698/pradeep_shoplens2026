@@ -62,6 +62,7 @@ google-cloud-key.json
 service-account.json
 credentials.json
 infra/*.json
+github-secrets-dev
 
 # GCP & Cloud resources
 .firebase/

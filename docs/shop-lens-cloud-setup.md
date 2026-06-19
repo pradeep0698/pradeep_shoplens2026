@@ -1,6 +1,6 @@
 # ShopLens — GCP + Firebase Dev Platform Setup
 
-Single dev environment: GCP project `shoplens-dev-prj`, one GitHub Environment `dev`.
+Single dev environment: GCP project `shoplens-dev-499700`, one GitHub Environment `dev`.
 
 ---
 
@@ -10,7 +10,7 @@ Run in Cloud Shell or locally with `gcloud` authenticated.
 
 ```bash
 # ── 1. Create the GCP project ──────────────────────────────────────────────
-export PROJECT_ID=shoplens-dev-prj
+export PROJECT_ID=shoplens-dev-499700
 export REGION=us-central1
 export BILLING_ACCOUNT=$(gcloud billing accounts list --format="value(name)" --limit=1)
 
@@ -112,7 +112,7 @@ gcloud pubsub topics create video-segments-topic --project=$PROJECT_ID
 
 # ── 9. Set up Workload Identity Federation for GitHub Actions ──────────────
 export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
-export GITHUB_ORG=suryaraor
+export GITHUB_ORG=shoplensai-coder
 export GITHUB_REPO=shoplens
 
 gcloud iam workload-identity-pools create github-pool \
@@ -146,7 +146,7 @@ echo "SA_EMAIL: ${SA_EMAIL}"
 ## Part 2 — Firebase Console (manual, ~10 minutes)
 
 1. Go to [console.firebase.google.com](https://console.firebase.google.com)
-2. **Add project** → select existing GCP project `shoplens-dev-prj` → Continue
+2. **Add project** → select existing GCP project `shoplens-dev-499700` → Continue
 3. **Build → Authentication** → Get started → enable **Email/Password**
 4. **Build → Hosting** → Get started → follow the wizard
 5. **Project Settings → Your apps → Add app → Web (`</>`)**
@@ -171,8 +171,8 @@ Go to **github.com/suryaraor/shoplens → Settings → Environments → New envi
 | Name | Value |
 |---|---|
 | `WIF_PROVIDER` | Output from Part 1 step 9 |
-| `WIF_SERVICE_ACCOUNT` | `shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com` |
-| `SA_EMAIL` | `shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com` |
+| `WIF_SERVICE_ACCOUNT` | `shoplens-runner@shoplens-dev-499700.iam.gserviceaccount.com` |
+| `SA_EMAIL` | `shoplens-runner@shoplens-dev-499700.iam.gserviceaccount.com` |
 | `NEXT_PUBLIC_FIREBASE_API_KEY` | Firebase Console → Project Settings → Web app → `apiKey` |
 | `SERPAPI_KEY` | Your key from serpapi.com |
 | `GOOGLE_SERVICES_JSON` | base64 of `mobile/android/app/google-services.json` (see below) |
@@ -183,11 +183,11 @@ Go to **github.com/suryaraor/shoplens → Settings → Environments → New envi
 
 | Name | Value |
 |---|---|
-| `PROJECT_ID` | `shoplens-dev-prj` |
-| `FIREBASE_PROJECT_ID` | `shoplens-dev-prj` |
-| `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | `shoplens-dev-prj` |
-| `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | `shoplens-dev-prj.firebaseapp.com` |
-| `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | `shoplens-dev-prj.firebasestorage.app` |
+| `PROJECT_ID` | `shoplens-dev-499700` |
+| `FIREBASE_PROJECT_ID` | `shoplens-dev-499700` |
+| `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | `shoplens-dev-499700` |
+| `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | `shoplens-dev-499700.firebaseapp.com` |
+| `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | `shoplens-dev-499700.firebasestorage.app` |
 | `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID` | Firebase Console → Project Settings → Web app |
 | `NEXT_PUBLIC_FIREBASE_APP_ID` | Firebase Console → Project Settings → Web app |
 | `BUCKET_NAME` | `shoplens-dev-hls-segments` |

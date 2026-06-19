@@ -11,7 +11,7 @@ product-matcher   Running   https://product-matcher-1017419148960.us-central1.ru
 ai-analyzer       Running   https://ai-analyzer-1017419148960.us-central1.run.app
 pubsub-worker     Running   https://pubsub-worker-1017419148960.us-central1.run.app
 
-All services: us-central1, allow-unauthenticated, service account shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com
+All services: us-central1, allow-unauthenticated, service account shoplens-runner@shoplens-dev-499700.iam.gserviceaccount.com
 Deployed by: aistreamscan@gmail.com
 
 ================================================================================

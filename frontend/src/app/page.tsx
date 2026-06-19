@@ -10,6 +10,7 @@ import SignUpPage from '@/components/SignUpPage';
 import ProfilePage from '@/components/ProfilePage';
 import { auth, db } from '@/lib/firebase';
 import {
+  clampMaxSearches,
   deriveSessionId,
   rankProductsByPreferences,
   resolveDemoEmail,
@@ -137,6 +138,7 @@ export default function HomePage() {
   const sessionId = authUserId ? deriveSessionId(authUserId) : '';
   const preferenceTerms = profile?.preference_terms ?? [];
   const ignoreTerms = profile?.ignore_terms ?? [];
+  const maxSearches = clampMaxSearches(profile?.max_searches_per_run);
   const rankedDemoProducts = useMemo(
     () => rankProductsByPreferences(demoState?.products ?? [], preferenceTerms),
     [demoState?.products, preferenceTerms]
@@ -211,6 +213,7 @@ export default function HomePage() {
             favorite_cuisines: [],
             ignore_terms: [],
             preference_terms: [],
+            max_searches_per_run: 5,
           });
         }
         setProfileLoading(false);
@@ -368,6 +371,7 @@ export default function HomePage() {
           favorite_cuisines: [],
           ignore_terms: [],
           preference_terms: [],
+          max_searches_per_run: 5,
           role: 'user',
         },
         { merge: true }
@@ -479,6 +483,7 @@ export default function HomePage() {
         image_data: base64,
         image_mime_type: 'image/jpeg',
         ignore_terms: ignoreTerms,
+        max_searches: maxSearches,
       });
       const found = res.products ?? [];
       if (found.length === 0) {
@@ -517,11 +522,13 @@ export default function HomePage() {
           image_data: base64,
           image_mime_type: selectedFile.type || 'image/jpeg',
           ignore_terms: ignoreTerms,
+          max_searches: maxSearches,
         };
       } else {
         analyzeBody = {
           image_url: imageUrl.trim(),
           ignore_terms: ignoreTerms,
+          max_searches: maxSearches,
         };
       }
 
@@ -538,6 +545,7 @@ export default function HomePage() {
           const matches = await requestJson<MatchResponse>(`${matcherApiUrl}/match`, 'POST', {
             items: analysis.items ?? [],
             ignore_terms: ignoreTerms,
+            max_searches: maxSearches,
           });
           finalProducts = matches.matched_products ?? [];
           unmatchedItems = matches.unmatched ?? [];

@@ -29,7 +29,21 @@ export type UserProfileDocument = {
   ignore_terms: string[];
   preference_terms: string[];
   shopping_categories?: string[];
+  max_searches_per_run?: number;
 };
+
+// Hard ceiling on SerpAPI searches per analyze/match run — mirrors
+// MAX_SEARCHES_PER_RUN in services/ai-analyzer and services/product-matcher.
+// Users can dial it down (1-5) from their profile, never above this.
+export const MAX_SEARCHES_PER_RUN = 5;
+export const DEFAULT_MAX_SEARCHES_PER_RUN = 5;
+
+export function clampMaxSearches(value: number | null | undefined): number {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return DEFAULT_MAX_SEARCHES_PER_RUN;
+  }
+  return Math.max(1, Math.min(Math.round(value), MAX_SEARCHES_PER_RUN));
+}
 
 export const DEMO_USERS: DemoUserSeed[] = [
   {

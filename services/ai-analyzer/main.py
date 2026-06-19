@@ -106,6 +106,7 @@ class AnalyzeRequest(BaseModel):
     ignore_terms: list[str] = []
     query: str = ""
     country: str = "us"
+    max_searches: int = 5
 
 
 @app.post("/analyze")
@@ -144,6 +145,7 @@ async def analyze(request: AnalyzeRequest) -> JSONResponse:
             transcript=request.transcript,
             ignore_terms=request.ignore_terms,
             country=request.country,
+            max_searches=request.max_searches,
         )
     except Exception as exc:
         elapsed = time.monotonic() - start

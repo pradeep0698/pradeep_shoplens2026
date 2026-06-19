@@ -29,7 +29,18 @@ _DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
 _GCS_LENS_BUCKET = os.environ.get("GCS_LENS_BUCKET", "")
 _SERPAPI_KEY     = os.environ.get("SERPAPI_KEY", "")
 
+# Hard ceiling on SerpAPI (Lens) calls per analyze_media() run, regardless of
+# what the caller requests — protects the shared SerpAPI quota from a single
+# busy frame. Per-user profile preference (1-5) is clamped against this.
+MAX_SEARCHES_PER_RUN = 5
+
 _tls = threading.local()
+
+
+def clamp_max_searches(requested: int | None) -> int:
+    if requested is None:
+        return MAX_SEARCHES_PER_RUN
+    return max(1, min(int(requested), MAX_SEARCHES_PER_RUN))
 
 
 def _is_serp_quota_error(data: dict) -> bool:
@@ -610,6 +621,7 @@ def analyze_media(
     transcript: str = "",
     ignore_terms: list[str] | None = None,
     country: str = "us",
+    max_searches: int | None = None,
 ) -> tuple[list[str], list[dict], list[str]]:
     """Returns (item_names, products, warnings).
 
@@ -679,6 +691,12 @@ def analyze_media(
     if len(unique_items) < len(items_raw):
         logger.info("Deduped Gemini items: %d → %d", len(items_raw), len(unique_items))
     items_raw = unique_items
+
+    # Cap SerpAPI (Lens) calls per run — user-configurable up to MAX_SEARCHES_PER_RUN.
+    search_limit = clamp_max_searches(max_searches)
+    if len(items_raw) > search_limit:
+        logger.info("Capping Lens searches: %d detected → %d (limit=%d)", len(items_raw), search_limit, search_limit)
+        items_raw = items_raw[:search_limit]
 
     # Decode raw image bytes once for cropping
     products: list[dict] = []

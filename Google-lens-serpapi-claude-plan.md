@@ -44,7 +44,7 @@ requests>=2.31.0
 ## 2. `services/ai-analyzer/.env.example`
 ```
 PORT=8080
-PROJECT_ID=shoplens-dev-prj
+PROJECT_ID=shoplens-dev-499700
 LOCATION=us-central1
 GEMINI_MODEL=gemini-2.5-flash
 IMGBB_KEY=your_imgbb_api_key_here
@@ -250,7 +250,7 @@ $env:SERPAPI_KEY = "your_serpapi_key"
 gcloud run deploy ai-analyzer `
   --source ./services/ai-analyzer `
   --region us-central1 `
-  --project shoplens-dev-prj `
+  --project shoplens-dev-499700 `
   --update-env-vars "IMGBB_KEY=$env:IMGBB_KEY,SERPAPI_KEY=$env:SERPAPI_KEY" `
   --allow-unauthenticated
 ```

@@ -17,40 +17,37 @@ class DefaultFirebaseOptions {
   }
 
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'AIzaSyDDVt5Tb3NB28lxVosZeFc_-ZwQQUB9EE8',
-    appId: '1:156370923364:android:5d1b87929bbdf0e970d471',
-    messagingSenderId: '156370923364',
-    projectId: 'shoplens-dev-prj',
-    storageBucket: 'shoplens-dev-prj.firebasestorage.app',
+    apiKey: 'AIzaSyBovKs-EV8FiNoNuGYidTX90J5Dxgx-meQ',
+    appId: '1:935092313069:android:86ea0aa6e5b4ac2318a5e4',
+    messagingSenderId: '935092313069',
+    projectId: 'shoplens-dev-499700',
+    storageBucket: 'shoplens-dev-499700.firebasestorage.app',
   );
-
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'AIzaSyCv_sBKWIBoPC87E96IHeRo9Vm_vIWhxGM',
-    appId: '1:156370923364:ios:8718b68dacda95b870d471',
-    messagingSenderId: '156370923364',
-    projectId: 'shoplens-dev-prj',
-    storageBucket: 'shoplens-dev-prj.firebasestorage.app',
-    iosClientId: '156370923364-q8093os77qubtesc4fsskm3sov82jes7.apps.googleusercontent.com',
+    apiKey: 'AIzaSyCUZ4hbWyUkvduDCM0OreCZDM3B1yj9Npg',
+    appId: '1:935092313069:ios:523bea5e851d2cd718a5e4',
+    messagingSenderId: '935092313069',
+    projectId: 'shoplens-dev-499700',
+    storageBucket: 'shoplens-dev-499700.firebasestorage.app',
     iosBundleId: 'com.shoplens.app',
   );
-
-  // Defaults below are the dev Firebase project (shoplens-dev-prj),
+  // Defaults below are the dev Firebase project (shoplens-dev-499700),
   // used for local development and dev/preview builds. The prod build
   // overrides these via --dart-define in deploy-firebase.yml so the prod
-  // Firebase Hosting site (shoplens-dev-prj) talks to the dev Firebase
+  // Firebase Hosting site (shoplens-dev-499700) talks to the dev Firebase
   // project instead of dev.
   static const FirebaseOptions web = FirebaseOptions(
     apiKey: String.fromEnvironment('FIREBASE_WEB_API_KEY',
-        defaultValue: 'AIzaSyASGt9vR3C2cr03BXAKjRrcDPPTqvwdcio'),
+        defaultValue: 'AIzaSyDNo2wAuz-KHiHlQaf0OzZY-a_TWLVtTFo'),
     appId: String.fromEnvironment('FIREBASE_WEB_APP_ID',
-        defaultValue: '1:156370923364:web:253239fa549d313870d471'),
+        defaultValue: '1:935092313069:web:897de0204af606d618a5e4'),
     messagingSenderId: String.fromEnvironment('FIREBASE_WEB_MESSAGING_SENDER_ID',
-        defaultValue: '156370923364'),
+        defaultValue: '935092313069'),
     projectId: String.fromEnvironment('FIREBASE_WEB_PROJECT_ID',
-        defaultValue: 'shoplens-dev-prj'),
+        defaultValue: 'shoplens-dev-499700'),
     storageBucket: String.fromEnvironment('FIREBASE_WEB_STORAGE_BUCKET',
-        defaultValue: 'shoplens-dev-prj.firebasestorage.app'),
+        defaultValue: 'shoplens-dev-499700.firebasestorage.app'),
     authDomain: String.fromEnvironment('FIREBASE_WEB_AUTH_DOMAIN',
-        defaultValue: 'shoplens-dev-prj.firebaseapp.com'),
+        defaultValue: 'shoplens-dev-499700.firebaseapp.com'),
   );
 }

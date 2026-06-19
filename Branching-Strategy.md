@@ -31,8 +31,8 @@ feature/xyz  ──► develop ──► main
 Branch → GitHub Environment mapping:
 
 ```
-develop  →  dev  (shoplens-dev-prj)
-main     →  dev  (shoplens-dev-prj)
+develop  →  dev  (shoplens-dev-499700)
+main     →  dev  (shoplens-dev-499700)
 ```
 
 Both deploy workflows also support `workflow_dispatch` with a manual environment selector for on-demand deploys.
@@ -46,8 +46,8 @@ One environment in **Settings → Environments**: `dev`.
 | Secret | dev |
 |---|---|
 | `WIF_PROVIDER` | `projects/YOUR_PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider` |
-| `WIF_SERVICE_ACCOUNT` | `shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com` |
-| `SA_EMAIL` | `shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com` |
+| `WIF_SERVICE_ACCOUNT` | `shoplens-runner@shoplens-dev-499700.iam.gserviceaccount.com` |
+| `SA_EMAIL` | `shoplens-runner@shoplens-dev-499700.iam.gserviceaccount.com` |
 | `NEXT_PUBLIC_FIREBASE_API_KEY` | Firebase web API key |
 | `SERPAPI_KEY` | SerpApi key (Google Lens visual matching) |
 
@@ -55,11 +55,11 @@ One environment in **Settings → Environments**: `dev`.
 
 | Variable | dev |
 |---|---|
-| `PROJECT_ID` | `shoplens-dev-prj` |
-| `FIREBASE_PROJECT_ID` | `shoplens-dev-prj` |
-| `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | `shoplens-dev-prj` |
-| `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | `shoplens-dev-prj.firebaseapp.com` |
-| `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | `shoplens-dev-prj.firebasestorage.app` |
+| `PROJECT_ID` | `shoplens-dev-499700` |
+| `FIREBASE_PROJECT_ID` | `shoplens-dev-499700` |
+| `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | `shoplens-dev-499700` |
+| `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | `shoplens-dev-499700.firebaseapp.com` |
+| `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | `shoplens-dev-499700.firebasestorage.app` |
 | `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID` | *(from Firebase Console)* |
 | `NEXT_PUBLIC_FIREBASE_APP_ID` | *(from Firebase Console)* |
 | `SESSION_ID` | `live-session-001` |
@@ -79,7 +79,7 @@ endpoint, then deletes the object. This requires:
 ```bash
 # 1. Create the bucket
 gcloud storage buckets create gs://<bucket-name> \
-  --project=shoplens-dev-prj --location=us-central1 --uniform-bucket-level-access
+  --project=shoplens-dev-499700 --location=us-central1 --uniform-bucket-level-access
 
 # 2. Allow public read on objects (SerpApi must be able to fetch the image)
 gcloud storage buckets add-iam-policy-binding gs://<bucket-name> \
@@ -87,7 +87,7 @@ gcloud storage buckets add-iam-policy-binding gs://<bucket-name> \
 
 # 3. Let the Cloud Run runtime SA write/delete temp objects
 gcloud storage buckets add-iam-policy-binding gs://<bucket-name> \
-  --member="serviceAccount:shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com" \
+  --member="serviceAccount:shoplens-runner@shoplens-dev-499700.iam.gserviceaccount.com" \
   --role=roles/storage.objectAdmin
 
 # 4. (Optional) auto-expire anything _delete_gcs missed

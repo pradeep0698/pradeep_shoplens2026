@@ -195,9 +195,9 @@ rsr01/
 | `services/product-matcher` | ✅ Complete | rapidfuzz matches detected items against 20-item mock catalog with 70-score threshold |
 | `services/state-manager` | ✅ Complete | Firebase Admin SDK overwrites `LiveShoppingSessions/{id}` with products + server timestamp |
 | `frontend` | ✅ Complete | Next.js 14 app with HLS.js video player and Firestore `onSnapshot` real-time shopping list |
-| CI/CD — Cloud Run | ✅ Complete | GitHub Actions (`deploy-cloudrun.yml`) builds and deploys all 4 Cloud Run services on push to `main` / `develop` via Workload Identity Federation |
-| CI/CD — Firebase Hosting | ✅ Complete | GitHub Actions (`deploy-firebase.yml`) builds and deploys Next.js frontend with per-environment API URLs baked in at build time |
-| Image analysis path | ✅ Complete | Browser → `ai-analyzer` → `product-matcher` → `state-manager` is fully wired; Analyze button works end-to-end in prod |
+| CI/CD — Cloud Run | ❌ Not built | No `.github/workflows/` directory exists in this repo. All 4 Cloud Run services were deployed manually via `gcloud run deploy --source .` from Cloud Shell — see [docs/local-setup.md](docs/local-setup.md) and [docs/status/2026-06-18.md](docs/status/2026-06-18.md) |
+| CI/CD — Firebase Hosting | ❌ Not built | No `deploy-firebase.yml` exists. Frontend hasn't been deployed to Firebase Hosting yet — only run locally so far |
+| Image analysis path | ✅ Complete | Browser → `ai-analyzer` → `product-matcher` → `state-manager` is fully wired; the Analyze button (`frontend/src/components/admin/VideoAnnotator.tsx`) works end-to-end against the deployed `shoplens-dev-499700` services |
 
 ---
 
@@ -205,7 +205,7 @@ rsr01/
 
 | Priority | What | Where to add it |
 |----------|------|-----------------|
-| 🔴 High | **Live stream pipeline wiring** — `pubsub-worker` receives GCS events but does not yet call `ai-analyzer`; the streaming path is not connected | Add `httpx` call in `pubsub-worker/main.py` after extracting the segment URL: POST to `AI_ANALYZER_URL/analyze` |
+| 🔴 High | **Live Stream channel not set up yet** — `pubsub-worker` already calls `ai-analyzer` → `product-matcher` → `state-manager` end-to-end (confirmed working), but there's no live RTMP source yet, so nothing triggers the pipeline automatically. Only the on-demand Analyze button path has been tested | Run Part 5 of `docs/shop-lens-cloud-setup.md` to provision the Cloud Live Stream channel, then verify a real stream triggers the full pipeline |
 | 🔴 High | **Speech-to-Text transcription** — `analyze_segment()` accepts a `transcript` arg but nothing generates it | Add Cloud Speech-to-Text call in `ai-analyzer/main.py` on the audio track before calling Gemini |
 | 🟡 Medium | **Real product catalog** — currently a static 20-item JSON file | Replace `catalog.json` lookup in `product-matcher` with Cloud SQL or Google Shopping API |
 | 🟡 Medium | **Cart / "Add" button** — button is UI-only in the frontend | Add a cart service + Firebase Auth for user identity |
@@ -217,27 +217,31 @@ rsr01/
 
 ## 7. Prerequisites & Deployment Status
 
+There is only one environment, `shoplens-dev-499700` — no separate "prod" project exists. See [docs/status/2026-06-18.md](docs/status/2026-06-18.md) for the full session log this table is based on.
+
 ### ✅ Completed
 
 | Step | What | Status | Details |
 |------|------|--------|----------|
-| 1 | GCP Project + 13 APIs | ✅ Done | Cloud Run, Pub/Sub, Storage, Firestore, Firebase, Vertex AI, Speech-to-Text, Vision, Live Stream, Artifact Registry, Cloud Build, IAM, Secret Manager |
-| 2 | Service Account + IAM Roles | ✅ Done | `shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com` with Cloud Run Admin, Cloud Run Invoker, Pub/Sub Publisher/Subscriber, Datastore User, Vertex AI User, Storage Object Viewer/Admin, Live Stream Admin, IAM Service Account User |
-| 3 | GCS Bucket | ✅ Done | `gs://shoplens-dev-hls-segments` in us-central1, public read access for HLS playback |
-| 4 | Firestore Database | ✅ Done | Native mode, Standard edition, us-central1 |
-| 5 | Pub/Sub Topic + Subscription | ✅ Done | Topic: `video-segments-topic`, Subscription: `video-segments-sub` (push type, endpoint wired via deploy workflow) |
-| 6 | GitHub Actions CI/CD | ✅ Done | `deploy-cloudrun.yml` and `deploy-firebase.yml` with Workload Identity Federation; dev and prod GitHub Environments fully configured with secrets and variables |
-| 7 | Cloud Run Services Deployed (prod) | ✅ Done | `ai-analyzer`, `product-matcher`, `state-manager`, `pubsub-worker` deployed to `shoplens-dev-prj` via GitHub Actions |
-| 8 | Firebase Hosting Deployed (prod) | ✅ Done | Frontend live on Firebase Hosting; API URLs (`AI_ANALYZER_URL`, `PRODUCT_MATCHER_URL`, `STATE_MANAGER_URL`) baked in at build time via GitHub Environment variables |
-| 9 | Image Analysis Path Working | ✅ Done | Analyze button in prod frontend calls `ai-analyzer` → `product-matcher` → `state-manager` end-to-end |
+| 1 | GCP Project + required APIs | ✅ Done | `shoplens-dev-499700` (project number `935092313069`): Cloud Run, Pub/Sub, Storage, Firestore, Firebase, Vertex AI, Speech-to-Text, Vision, Live Stream, Artifact Registry, Cloud Build, IAM, Secret Manager |
+| 2 | Service Account + IAM Roles | ✅ Done | `shoplens-runner@shoplens-dev-499700.iam.gserviceaccount.com` with Cloud Run Admin, Cloud Run Invoker, Pub/Sub Publisher/Subscriber, Datastore User, Vertex AI User, Storage Object Admin, Live Stream Admin, Secret Manager Secret Accessor, IAM Service Account User |
+| 3 | GCS Buckets | ✅ Done | `gs://shoplens-dev-hls-segments` and `gs://shoplens-dev-lens-tmp`, both in us-central1 with public read access |
+| 4 | Firestore Database | ✅ Done | Native mode, us-central1 |
+| 5 | Pub/Sub Topic + Subscription | ✅ Done | Topic: `video-segments-topic`, Subscription: `video-segments-sub` — push endpoint points at `pubsub-worker`, authenticated via the `shoplens-runner` service account (not public) |
+| 6 | GitHub Actions CI/CD | ❌ Not built | `.github/workflows/` doesn't exist. All deploys below were manual `gcloud run deploy --source .` commands from Cloud Shell |
+| 7 | Cloud Run Services Deployed | ✅ Done | `ai-analyzer`, `product-matcher`, `state-manager` deployed publicly (`--allow-unauthenticated`, since the browser/mobile app call them directly with no auth token); `pubsub-worker` deployed **without** public access, since only the Pub/Sub push subscription should be able to call it |
+| 8 | Firebase Hosting Deployed | ❌ Not done | Frontend has only been run locally (`npm run dev`) so far, not deployed to Firebase Hosting |
+| 9 | Image Analysis Path Working | ✅ Done | Analyze button in the frontend calls `ai-analyzer` → `product-matcher` → `state-manager` end-to-end against the deployed services |
 
 ### 🔲 Remaining
 
 | Step | What | Details |
 |------|------|---------|
-| 10 | Wire live stream pipeline | `pubsub-worker` needs to call `ai-analyzer` after extracting GCS segment URL |
-| 11 | Wire GCS bucket notifications | Configure GCS bucket to emit Pub/Sub events on HLS segment finalize |
+| 10 | Set up the Live Stream channel | Part 5 of `docs/shop-lens-cloud-setup.md` — no RTMP source exists yet, so the live (non-Analyze-button) path is untested |
+| 11 | Wire GCS bucket notifications | Configure `gs://shoplens-dev-hls-segments` to emit Pub/Sub events on HLS segment finalize, so the live pipeline actually triggers |
 | 12 | End-to-end live stream test | Stream RTMP → confirm full pipeline fires → products appear in frontend in real time |
+| 13 | Deploy frontend to Firebase Hosting | Hasn't been done yet — currently dev-only via `npm run dev` |
+| 14 | (Optional) Build CI/CD | Author `deploy-cloudrun.yml` / `deploy-firebase.yml` if automated deploys are wanted instead of manual `gcloud`/`firebase` commands |
 
 ### Local Machine Requirements
 
@@ -479,80 +483,73 @@ curl -X POST http://localhost:8083/session/live-session-001/products \
 
 ## 11. Deployment to Google Cloud
 
-### Step 6 — Download Service Account Key & Deploy Cloud Run Services
+This reflects what was actually run (manually, from Cloud Shell, authenticated as the project owner's Google account — not a downloaded service account key). There is no CI/CD for this yet.
 
-Set up authentication and deploy the backend services to Cloud Run:
+### Step 6 — Deploy the Cloud Run Services
 
-```powershell
-# Download service account key (one-time, for local development)
-gcloud iam service-accounts keys create ./shoplens-runner-key.json `
-  --iam-account=shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com `
-  --project=shoplens-dev-prj
+```bash
+export PROJECT_ID=shoplens-dev-499700
+export REGION=us-central1
+export SA_EMAIL=shoplens-runner@${PROJECT_ID}.iam.gserviceaccount.com
+export SERPAPI_KEY=<the current key — ask the project owner>
 
-# Set project and region defaults
-gcloud config set project shoplens-dev-prj
-gcloud config set run/region us-central1
+cd services/ai-analyzer
+gcloud run deploy ai-analyzer \
+  --source . --project=$PROJECT_ID --region=$REGION --service-account=$SA_EMAIL \
+  --allow-unauthenticated \
+  --set-env-vars="PROJECT_ID=$PROJECT_ID,LOCATION=$REGION,GEMINI_MODEL=gemini-2.5-pro,GCS_LENS_BUCKET=shoplens-dev-lens-tmp,SERPAPI_KEY=$SERPAPI_KEY"
+cd ../..
 
-# Set credentials for local development
-$env:GOOGLE_APPLICATION_CREDENTIALS = "$(Get-Location)\shoplens-runner-key.json"
+cd services/product-matcher
+gcloud run deploy product-matcher \
+  --source . --project=$PROJECT_ID --region=$REGION --service-account=$SA_EMAIL \
+  --allow-unauthenticated --set-env-vars="SERPAPI_KEY=$SERPAPI_KEY"
+cd ../..
+
+cd services/state-manager
+gcloud run deploy state-manager \
+  --source . --project=$PROJECT_ID --region=$REGION --service-account=$SA_EMAIL \
+  --allow-unauthenticated --set-env-vars="PROJECT_ID=$PROJECT_ID,SESSION_ID=live-session-001"
+cd ../..
 ```
 
-Deploy each service in order (state-manager first, pubsub-worker last):
+`ai-analyzer`, `product-matcher`, and `state-manager` all use `--allow-unauthenticated` because the browser and mobile app call them directly with no Google auth token.
 
-```powershell
-# Deploy state-manager
-gcloud run deploy state-manager `
-  --source ./services/state-manager `
-  --platform managed `
-  --allow-unauthenticated `
-  --set-env-vars PROJECT_ID=shoplens-dev-prj
-
-# Deploy product-matcher
-gcloud run deploy product-matcher `
-  --source ./services/product-matcher `
-  --platform managed `
-  --allow-unauthenticated
-
-# Deploy ai-analyzer
-gcloud run deploy ai-analyzer `
-  --source ./services/ai-analyzer `
-  --platform managed `
-  --allow-unauthenticated `
-  --set-env-vars PROJECT_ID=shoplens-dev-prj,LOCATION=us-central1
-
-# Deploy pubsub-worker (entry point)
-gcloud run deploy pubsub-worker `
-  --source ./services/pubsub-worker `
-  --platform managed `
-  --allow-unauthenticated `
-  --set-env-vars PROJECT_ID=shoplens-dev-prj,TOPIC_ID=video-segments-topic,SUBSCRIPTION_ID=video-segments-sub,BUCKET_NAME=shoplens-dev-hls-segments
-```
-
-After each deployment, the command prints the service URL. **Save these URLs** — you'll need them in Steps 7 and 9.
-
-**Prod Cloud Run service URLs (shoplens-dev-prj):**
+**Current real Cloud Run service URLs (`shoplens-dev-499700`):**
 
 | Service | URL |
 |---------|-----|
-| `ai-analyzer` | `https://ai-analyzer-4lcxbpnnlq-uc.a.run.app` |
-| `product-matcher` | `https://product-matcher-4lcxbpnnlq-uc.a.run.app` |
-| `state-manager` | `https://state-manager-4lcxbpnnlq-uc.a.run.app` |
+| `ai-analyzer` | `https://ai-analyzer-935092313069.us-central1.run.app` |
+| `product-matcher` | `https://product-matcher-935092313069.us-central1.run.app` |
+| `state-manager` | `https://state-manager-935092313069.us-central1.run.app` |
+| `pubsub-worker` | `https://pubsub-worker-935092313069.us-central1.run.app` (not public — see Step 7) |
 
-### Step 8 — Update Pub/Sub Push Endpoint
+### Step 7 — Deploy `pubsub-worker` (locked down, not public)
 
-After `pubsub-worker` is deployed, get its Cloud Run URL and update the Pub/Sub subscription:
+Unlike the other three, `pubsub-worker` is **not** called directly by any client — only the Pub/Sub push subscription invokes it (`POST /pubsub`). So it's deployed *without* `--allow-unauthenticated`, and Pub/Sub authenticates via the `shoplens-runner` service account:
 
-```powershell
-# Get the deployed pubsub-worker URL
-gcloud run services describe pubsub-worker --region us-central1 --project shoplens-dev-prj --format="value(status.url)"
+```bash
+export PUSH_ENDPOINT="https://pubsub-worker-935092313069.us-central1.run.app/pubsub"
+
+cd services/pubsub-worker
+gcloud run deploy pubsub-worker \
+  --source . --project=$PROJECT_ID --region=$REGION --service-account=$SA_EMAIL \
+  --no-allow-unauthenticated \
+  --set-env-vars="PROJECT_ID=$PROJECT_ID,TOPIC_ID=video-segments-topic,SUBSCRIPTION_ID=video-segments-sub,BUCKET_NAME=shoplens-dev-hls-segments,PUSH_ENDPOINT=$PUSH_ENDPOINT,AI_ANALYZER_URL=https://ai-analyzer-935092313069.us-central1.run.app,PRODUCT_MATCHER_URL=https://product-matcher-935092313069.us-central1.run.app,STATE_MANAGER_URL=https://state-manager-935092313069.us-central1.run.app,SESSION_ID=live-session-001"
+cd ../..
+
+# One-time: let the Pub/Sub service agent mint auth tokens as shoplens-runner
+gcloud beta services identity create --service=pubsub.googleapis.com --project=$PROJECT_ID
+export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
+gcloud iam service-accounts add-iam-policy-binding $SA_EMAIL \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-pubsub.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountTokenCreator" --project=$PROJECT_ID
+
+# Create the authenticated push subscription
+gcloud pubsub subscriptions create video-segments-sub \
+  --project=$PROJECT_ID --topic=video-segments-topic \
+  --push-endpoint=$PUSH_ENDPOINT --push-auth-service-account=$SA_EMAIL
 ```
-
-Then update the subscription:
-
-1. Go to **Google Cloud Console > Pub/Sub > Subscriptions > video-segments-sub**
-2. Click **Edit**
-3. Under **Push endpoint**, paste: `https://<pubsub-worker-url>/pubsub`
-4. Click **Save**
 
 ### Step 9 — Wire GCS Bucket Notifications
 
@@ -562,7 +559,7 @@ Configure the GCS bucket to notify Pub/Sub when HLS segments are finalized:
 gcloud storage buckets notifications create gs://shoplens-dev-hls-segments `
   --topic=video-segments-topic `
   --event-types=OBJECT_FINALIZE `
-  --project=shoplens-dev-prj
+  --project=shoplens-dev-499700
 ```
 
 This completes the event-driven pipeline wiring.
@@ -602,120 +599,104 @@ firebase deploy --only hosting
 
 Follow the steps in **§11 Deployment to Google Cloud** above. Deploy each service individually and test locally before moving to the next service. This gives you fine-grained control and immediate feedback.
 
-### Option B: Deploy via GitHub Actions (Recommended for CI/CD)
+### Option B: Deploy via GitHub Actions — NOT YET BUILT
 
-This repository includes GitHub Actions workflows for automated deployment:
+**This option doesn't exist yet.** There is no `.github/workflows/` directory in this repo, and no `.github/DEPLOYMENT.md`. Everything deployed so far (§11) was done manually via `gcloud`/`firebase` CLI commands from Cloud Shell, authenticated as a real Google account — not via Workload Identity Federation from a GitHub Actions runner.
 
-- **`.github/workflows/deploy-cloudrun.yml`** — Deploys all Cloud Run services on push to `services/`
-- **`.github/workflows/deploy-firebase.yml`** — Builds and deploys frontend to Firebase Hosting on push to `frontend/`
-- **`.github/workflows/build-android.yml`** — Builds the Flutter Android APK on push to `develop` / `main`
-- **`.github/workflows/build-ios.yml`** — Builds an unsigned iOS IPA on manual dispatch
+The Workload Identity Federation pool/provider *has* been provisioned (see §11.5 below), so the WIF half of the prerequisite work is done if someone wants to build this later. What's still missing is the actual workflow YAML files (`deploy-cloudrun.yml`, `deploy-firebase.yml`, `build-android.yml`, `build-ios.yml`) and the GitHub Environment secrets/variables.
 
-To use GitHub Actions:
+If/when this gets built, here's the real `dev` Environment config it would need (single environment — there is no separate `prod`):
 
-1. Push this repo to GitHub
-2. Set up Workload Identity Federation (see [`.github/DEPLOYMENT.md`](.github/DEPLOYMENT.md))
-3. Add GitHub Secrets and Variables per environment (see table below)
-4. Push to `main` to trigger automated deployment
+| Type | Name | Value |
+|------|------|-------|
+| Secret | `WIF_PROVIDER` | `projects/935092313069/locations/global/workloadIdentityPools/github-pool/providers/github-provider` |
+| Secret | `WIF_SERVICE_ACCOUNT` | `shoplens-runner@shoplens-dev-499700.iam.gserviceaccount.com` |
+| Secret | `SA_EMAIL` | `shoplens-runner@shoplens-dev-499700.iam.gserviceaccount.com` |
+| Secret | `NEXT_PUBLIC_FIREBASE_API_KEY` | Firebase web API key (ask the project owner) |
+| Secret | `SERPAPI_KEY` | SerpApi key (ask the project owner — rotates periodically) |
+| Secret | `GOOGLE_SERVICES_JSON` | base64 of `mobile/android/app/google-services.json` |
+| Secret | `MOBILE_ENV` | base64 of `mobile/.env` |
+| Secret | `GOOGLE_SERVICE_INFO_PLIST` | base64 of `mobile/ios/Runner/GoogleService-Info.plist` |
+| Variable | `PROJECT_ID` / `FIREBASE_PROJECT_ID` / `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | `shoplens-dev-499700` |
+| Variable | `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | `shoplens-dev-499700.firebaseapp.com` |
+| Variable | `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | `shoplens-dev-499700.firebasestorage.app` |
+| Variable | `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID` | `935092313069` |
+| Variable | `NEXT_PUBLIC_FIREBASE_APP_ID` | `1:935092313069:web:897de0204af606d618a5e4` |
+| Variable | `AI_ANALYZER_URL` | `https://ai-analyzer-935092313069.us-central1.run.app` |
+| Variable | `PRODUCT_MATCHER_URL` | `https://product-matcher-935092313069.us-central1.run.app` |
+| Variable | `STATE_MANAGER_URL` | `https://state-manager-935092313069.us-central1.run.app` |
+| Variable | `BUCKET_NAME` | `shoplens-dev-hls-segments` |
+| Variable | `GCS_LENS_BUCKET` | `shoplens-dev-lens-tmp` |
+| Variable | `SESSION_ID` | `live-session-001` |
+| Variable | `HLS_STREAM_URL` | not set yet — no Live Stream channel exists (§7, step 10) |
 
-**GitHub Environment configuration** (Settings → Environments → `prod` / `dev`):
+A maintainer keeps a working copy of all of these (with real secret values) in a local-only, gitignored file called `github-secrets-dev` at the repo root — ask them for it rather than re-deriving these from scratch. See [docs/local-setup.md](docs/local-setup.md).
 
-| Type | Name | prod value | dev value |
-|------|------|-----------|-----------|
-| Secret | `WIF_PROVIDER` | WIF provider resource name | WIF provider resource name |
-| Secret | `WIF_SERVICE_ACCOUNT` | `shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com` | `shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com` |
-| Secret | `SA_EMAIL` | `shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com` | `shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com` |
-| Secret | `NEXT_PUBLIC_FIREBASE_API_KEY` | Firebase web API key | Firebase web API key |
-| Variable | `PROJECT_ID` | `shoplens-dev-prj` | `shoplens-dev-prj` |
-| Variable | `FIREBASE_PROJECT_ID` | `shoplens-dev-prj` | `shoplens-dev-prj` |
-| Variable | `NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN` | `shoplens-dev-prj.firebaseapp.com` | `shoplens-dev-prj.firebaseapp.com` |
-| Variable | `NEXT_PUBLIC_FIREBASE_PROJECT_ID` | `shoplens-dev-prj` | `shoplens-dev-prj` |
-| Variable | `NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET` | `shoplens-dev-prj.firebasestorage.app` | `shoplens-dev-prj.firebasestorage.app` |
-| Variable | `NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID` | `645158438988` | `156370923364` |
-| Variable | `NEXT_PUBLIC_FIREBASE_APP_ID` | `1:645158438988:web:b319ef6814bd85e0bb4ce9` | `1:156370923364:web:4bb870de319c305a70d471` |
-| Variable | `AI_ANALYZER_URL` | `https://ai-analyzer-4lcxbpnnlq-uc.a.run.app` | Cloud Run URL |
-| Variable | `PRODUCT_MATCHER_URL` | `https://product-matcher-4lcxbpnnlq-uc.a.run.app` | Cloud Run URL |
-| Variable | `STATE_MANAGER_URL` | `https://state-manager-4lcxbpnnlq-uc.a.run.app` | Cloud Run URL |
-| Variable | `BUCKET_NAME` | `shoplens-dev-hls-segments` | dev bucket name |
-| Variable | `SESSION_ID` | Firestore session document ID | Firestore session document ID |
-| Variable | `HLS_STREAM_URL` | HLS manifest URL | HLS manifest URL |
-| Variable | `GCS_LENS_BUCKET` | GCS bucket for temp Lens images, e.g. `shoplens-dev-prj-lens-tmp` | e.g. `shoplens-dev-prj-lens-tmp` |
-| Secret | `SERPAPI_KEY` | SerpApi key (Google Lens visual matching) | SerpApi key (Google Lens visual matching) |
-| Secret | `GOOGLE_SERVICES_JSON` | base64 of `mobile/android/app/google-services.json` | base64 of `mobile/android/app/google-services.json` |
-| Secret | `MOBILE_ENV` | base64 of `mobile/.env` (see `mobile/.env.example`) | base64 of `mobile/.env` (see `mobile/.env.example`) |
-| Secret | `GOOGLE_SERVICE_INFO_PLIST` | base64 of `mobile/ios/Runner/GoogleService-Info.plist` | base64 of `mobile/ios/Runner/GoogleService-Info.plist` |
-
-> `GOOGLE_SERVICES_JSON`, `MOBILE_ENV`, and `GOOGLE_SERVICE_INFO_PLIST` are read by
-> `build-android.yml` / `build-ios.yml`, which select the `dev` or `prod`
-> Environment based on the branch (or the `environment` input for manual iOS
-> builds). Encode each file with `base64 -w0 <file>` (macOS: `base64 -i <file>`)
-> and paste the output as the secret value.
-
-> `GCS_LENS_BUCKET` is an Environment **Variable** (not a secret) read by
-> `deploy-cloudrun.yml` for `ai-analyzer`. If unset, `vars.GCS_LENS_BUCKET`
-> silently resolves to an empty string (no workflow error) and `ai-analyzer`
-> logs `GCS_LENS_BUCKET or SERPAPI_KEY not set — visual matching disabled`.
-> The bucket must exist, allow public object reads (`allUsers` →
-> `roles/storage.objectViewer`, since SerpApi fetches a public
-> `storage.googleapis.com` URL), and grant the runtime SA
-> `roles/storage.objectAdmin` — see [Branching-Strategy.md](Branching-Strategy.md#gcs_lens_bucket-setup-one-time-per-project)
-> for the exact commands.
+> `GCS_LENS_BUCKET` must point at a bucket that allows public object reads (`allUsers` → `roles/storage.objectViewer`, since SerpApi fetches a public `storage.googleapis.com` URL) and grants the runtime SA `roles/storage.objectAdmin` — see [Branching-Strategy.md](Branching-Strategy.md#gcs_lens_bucket-setup-one-time-per-project) for the exact commands. `gs://shoplens-dev-lens-tmp` already satisfies both.
 
 **Required IAM roles for the Cloud Run runner SA** (grant once per project):
 
 ```bash
 # roles/run.admin — allows deploying and managing Cloud Run services
-gcloud projects add-iam-policy-binding shoplens-dev-prj \
-  --member="serviceAccount:shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com" \
+gcloud projects add-iam-policy-binding shoplens-dev-499700 \
+  --member="serviceAccount:shoplens-runner@shoplens-dev-499700.iam.gserviceaccount.com" \
   --role="roles/run.admin"
 
 # roles/iam.serviceAccountUser — allows SA to assign itself as Cloud Run runtime identity
 gcloud iam service-accounts add-iam-policy-binding \
-  shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com \
-  --member="serviceAccount:shoplens-runner@shoplens-dev-prj.iam.gserviceaccount.com" \
+  shoplens-runner@shoplens-dev-499700.iam.gserviceaccount.com \
+  --member="serviceAccount:shoplens-runner@shoplens-dev-499700.iam.gserviceaccount.com" \
   --role="roles/iam.serviceAccountUser"
 ```
 
 ## 13. Next Steps
 
-### ✅ Recently Completed
+### ✅ Recently Completed (2026-06-18 — see docs/status/2026-06-18.md)
 
-- ~~Deploy Cloud Run services~~ — all 4 services live in prod (`shoplens-dev-prj`)
-- ~~Set up CI/CD~~ — GitHub Actions with Workload Identity Federation, deploying on push to `main`
-- ~~Deploy frontend~~ — Firebase Hosting live with correct prod API URLs
-- ~~Wire Pub/Sub push endpoint~~ — automated in `deploy-cloudrun.yml` post-deploy step
-- ~~Image analysis path~~ — Analyze button works end-to-end in prod
+- ~~Deploy Cloud Run services~~ — all 4 services deployed manually to `shoplens-dev-499700` (3 public, `pubsub-worker` locked to authenticated-only)
+- ~~Wire Pub/Sub push endpoint~~ — `video-segments-sub` push subscription created, authenticated via `shoplens-runner`
+- ~~Image analysis path~~ — Analyze button works end-to-end against the deployed services
+- ~~Firebase app config~~ — Android/iOS apps registered via `flutterfire configure`, web app config retrieved from console
+- ~~Rotate leaked SerpApi key~~ — old key purged from git history and revoked, new key in use
+
+### Not yet done — don't assume these work
+
+- **No CI/CD** — `.github/workflows/` is empty; all deploys are manual `gcloud`/`firebase` CLI commands (see §12, Option B)
+- **No Firebase Hosting deploy** — frontend only runs locally so far (`npm run dev`)
+- **No Live Stream channel** — only the on-demand Analyze button path has been tested; nothing produces a live RTMP/HLS feed yet
 
 ### High Priority (Blocking)
 
-1. **Wire live stream pipeline** — `pubsub-worker` extracts the GCS segment URL but does not yet call `ai-analyzer`
-   - Add `httpx` POST to `${AI_ANALYZER_URL}/analyze` in `services/pubsub-worker/main.py` after extracting the segment
-   - `AI_ANALYZER_URL` is already injected as an env var by the deploy workflow
+1. **Set up the Live Stream channel** — Part 5 of `docs/shop-lens-cloud-setup.md`. Without it there's no RTMP source, so the live (non-Analyze-button) pipeline path is completely untested even though the code/infra for it is wired.
 
 2. **Wire GCS bucket notifications**
-   - Run once: `gcloud storage buckets notifications create gs://shoplens-dev-hls-segments --topic=video-segments-topic --event-types=OBJECT_FINALIZE --project=shoplens-dev-prj`
+   - Run once: `gcloud storage buckets notifications create gs://shoplens-dev-hls-segments --topic=video-segments-topic --event-types=OBJECT_FINALIZE --project=shoplens-dev-499700`
    - This is the missing trigger that starts the live pipeline
 
 3. **Verify end-to-end live stream**
    - Stream RTMP via OBS → confirm HLS segments land in GCS → Pub/Sub fires → Gemini analyzes → products appear in frontend in real time
 
+4. **Deploy the frontend to Firebase Hosting** — currently dev-only
+
 ### Medium Priority (Feature Complete)
 
-4. **Add Speech-to-Text transcription**
+5. **Add Speech-to-Text transcription**
    - `ai-analyzer/analyzer.py` already accepts a `transcript` parameter
    - Add a Cloud Speech-to-Text call on the audio track before Gemini analysis to improve detection accuracy
 
-5. **Replace product catalog**
+6. **Replace product catalog**
    - Currently a static 20-item JSON file in `services/product-matcher/catalog.json`
    - Integrate with Google Shopping API or Cloud SQL
 
 ### Low Priority (Polish)
 
-6. **Add Cloud Workflows orchestration**
+7. **Add Cloud Workflows orchestration**
    - Replace direct HTTP calls with Cloud Workflows for retry logic and observability
 
-7. **Analytics pipeline**
+8. **Analytics pipeline**
    - Stream Firestore writes to BigQuery via Datastream
 
-8. **Multi-tenant sessions**
+9. **Multi-tenant sessions**
    - Pass `session_id` through the entire pipeline to support concurrent live streams
+
+10. **(Optional) Build CI/CD** — author the GitHub Actions workflows referenced in §12 Option B, now that the Workload Identity Federation prerequisite is already provisioned

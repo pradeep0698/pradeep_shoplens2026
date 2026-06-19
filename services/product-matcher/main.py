@@ -40,11 +40,12 @@ app.add_middleware(
 class MatchRequest(BaseModel):
     items: List[str]
     ignore_terms: List[str] = []
+    max_searches: int = 5
 
 
 @app.post("/match")
 async def match(request: MatchRequest) -> JSONResponse:
-    result = match_products(request.items, request.ignore_terms)
+    result = match_products(request.items, request.ignore_terms, request.max_searches)
     return JSONResponse(content=result)
 
 

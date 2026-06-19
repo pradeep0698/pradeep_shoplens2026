@@ -13,6 +13,11 @@ logger = logging.getLogger(__name__)
 
 _SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 
+# Hard ceiling on SerpAPI calls per match_products() run, regardless of what the
+# caller requests — protects the shared SerpAPI quota. Per-user profile
+# preference (1-5) is clamped against this.
+MAX_SEARCHES_PER_RUN = 5
+
 _cache: TTLCache = TTLCache(maxsize=500, ttl=1800)
 
 _CATEGORY_KEYWORDS: dict[str, list[str]] = {
@@ -128,12 +133,27 @@ def _is_ignored(item: str, ignore_terms: list[str]) -> bool:
     return any(term in normalized for term in ignore_terms)
 
 
-def match_products(detected_items: list[str], ignore_terms: list[str] | None = None) -> dict:
+def clamp_max_searches(requested: int | None) -> int:
+    if requested is None:
+        return MAX_SEARCHES_PER_RUN
+    return max(1, min(int(requested), MAX_SEARCHES_PER_RUN))
+
+
+def match_products(
+    detected_items: list[str],
+    ignore_terms: list[str] | None = None,
+    max_searches: int | None = None,
+) -> dict:
     normalized_ignore = _normalize_terms(ignore_terms)
     items = [
         item for item in detected_items
         if not (normalized_ignore and _is_ignored(item, normalized_ignore))
     ]
+
+    search_limit = clamp_max_searches(max_searches)
+    if len(items) > search_limit:
+        logger.info("Capping SerpAPI searches: %d items → %d (limit=%d)", len(items), search_limit, search_limit)
+        items = items[:search_limit]
 
     # SerpAPI calls are I/O-bound — run them concurrently instead of one-by-one
     # (mirrors the ThreadPoolExecutor pattern in services/ai-analyzer/analyzer.py).

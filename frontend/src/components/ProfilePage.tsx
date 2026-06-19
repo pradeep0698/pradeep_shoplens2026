@@ -229,6 +229,22 @@ export default function ProfilePage({
           />
         </Field>
 
+        {/* Max searches per scan */}
+        <Field
+          label="Max product searches per scan"
+          hint={`Limits how many SerpAPI lookups run per analysis (1-${MAX_SEARCHES_PER_RUN})`}
+        >
+          <input
+            type="number"
+            min={1}
+            max={MAX_SEARCHES_PER_RUN}
+            step={1}
+            value={form.maxSearches}
+            onChange={(e) => set('maxSearches', clampMaxSearches(Number(e.target.value)))}
+            className={inputCls}
+          />
+        </Field>
+
         {(localError || error) && (
           <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
             {localError || error}

@@ -6,6 +6,8 @@
 		<string>ShopLens uses your camera to scan and identify products in real time.</string>
 		<key>NSPhotoLibraryUsageDescription</key>
 		<string>ShopLens needs access to your photo library to let you pick product images.</string>
+		<key>NSMicrophoneUsageDescription</key>
+		<string>ShopLens uses your microphone so you can set your shopping preferences by voice.</string>
 		<key>CADisableMinimumFrameDurationOnPhone</key>
 		<true/>
 		<key>CFBundleDevelopmentRegion</key>

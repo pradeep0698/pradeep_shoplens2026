@@ -218,12 +218,33 @@ def _guess_suffix(content_type: str | None, fallback_name: str) -> str:
     return suffix if suffix else ".img"
 
 
+def _downscale_for_gemini(binary: bytes, mime: str, max_dimension: int) -> tuple[bytes, str]:
+    """Downscale to at most max_dimension on the longest side, preserving aspect
+    ratio. Only the copy sent to Gemini is affected — callers that crop against
+    the original bytes (box coordinates are normalized 0-1000) are unaffected."""
+    img = Image.open(io.BytesIO(binary))
+    if max(img.size) <= max_dimension:
+        return binary, mime
+    img.thumbnail((max_dimension, max_dimension), Image.LANCZOS)
+    if img.mode in ("RGBA", "LA", "P", "PA"):
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return buf.getvalue(), "image/jpeg"
+
+
 def _load_image_part(
-    *, image_url: str | None, image_data: str | None, image_mime_type: str | None
+    *,
+    image_url: str | None,
+    image_data: str | None,
+    image_mime_type: str | None,
+    max_dimension: int | None = None,
 ) -> types.Part:
     if image_data:
         binary = base64.b64decode(image_data)
         mime = image_mime_type or "image/jpeg"
+        if max_dimension:
+            binary, mime = _downscale_for_gemini(binary, mime, max_dimension)
         return types.Part.from_bytes(data=binary, mime_type=mime)
 
     if image_url:
@@ -231,6 +252,8 @@ def _load_image_part(
         with urllib.request.urlopen(req, timeout=20) as response:
             binary = response.read()
             mime = response.headers.get_content_type() or "image/jpeg"
+        if max_dimension:
+            binary, mime = _downscale_for_gemini(binary, mime, max_dimension)
         return types.Part.from_bytes(data=binary, mime_type=mime)
 
     raise ValueError("An image URL or base64 image payload is required")
@@ -662,6 +685,7 @@ def analyze_media(
         image_url=image_url,
         image_data=image_data,
         image_mime_type=image_mime_type,
+        max_dimension=1280,
     )
     response = client.models.generate_content(
         model=_active_model,

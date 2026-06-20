@@ -18,6 +18,8 @@ _SERPAPI_KEY = os.environ.get("SERPAPI_KEY", "")
 # preference (1-5) is clamped against this.
 MAX_SEARCHES_PER_RUN = 5
 
+_session = requests.Session()
+
 _cache: TTLCache = TTLCache(maxsize=500, ttl=1800)
 
 _CATEGORY_KEYWORDS: dict[str, list[str]] = {
@@ -61,7 +63,7 @@ def _search_product(item: str) -> Optional[dict]:
         return _cache[cache_key]
 
     try:
-        resp = requests.get(
+        resp = _session.get(
             "https://serpapi.com/search",
             params={
                 "engine":  "google_shopping",

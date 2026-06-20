@@ -48,6 +48,8 @@ def _is_serp_quota_error(data: dict) -> bool:
     return "run out of searches" in err or "ran out of searches" in err
 
 
+_session = _req.Session()
+
 _gcs_client: Optional[gcs.Client] = None
 
 
@@ -288,7 +290,7 @@ def _delete_gcs(url: str) -> None:
 def _search_shopping(query: str, country: str = "us", max_results: int = 5) -> list[dict]:
     """Text-based Google Shopping search via SerpAPI. Used as Lens fallback."""
     try:
-        resp = _req.get(
+        resp = _session.get(
             "https://serpapi.com/search",
             params={
                 "engine":  "google_shopping",
@@ -458,7 +460,7 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
         base_params["q"] = query
 
     def _fetch(type_value: str) -> dict:
-        resp = _req.get(
+        resp = _session.get(
             "https://serpapi.com/search",
             params={**base_params, "type": type_value},
             timeout=25,

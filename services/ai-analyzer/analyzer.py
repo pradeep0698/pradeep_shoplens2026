@@ -285,7 +285,7 @@ def _delete_gcs(url: str) -> None:
         pass
 
 
-def _search_shopping(query: str, country: str = "us") -> list[dict]:
+def _search_shopping(query: str, country: str = "us", max_results: int = 5) -> list[dict]:
     """Text-based Google Shopping search via SerpAPI. Used as Lens fallback."""
     try:
         resp = _req.get(
@@ -296,7 +296,7 @@ def _search_shopping(query: str, country: str = "us") -> list[dict]:
                 "api_key": _SERPAPI_KEY,
                 "gl":      country or "us",
                 "hl":      "en",
-                "num":     5,
+                "num":     max_results,
             },
             timeout=10,
         )
@@ -308,7 +308,7 @@ def _search_shopping(query: str, country: str = "us") -> list[dict]:
             return []
         results = data.get("shopping_results", [])
         products = []
-        for r in results[:5]:
+        for r in results[:max_results]:
             name   = r.get("title", "")
             seller = r.get("source", "")
             price  = _parse_price(str(r.get("extracted_price") or r.get("price", "0")))
@@ -435,15 +435,15 @@ def _clean_product_name(name: str, seller: str) -> str:
     return cleaned if cleaned else name
 
 
-def _google_lens(image_url: str, query: str = "", country: str = "us") -> list[dict]:
-    """Call SerpAPI Google Lens and return up to 5 product matches.
+def _google_lens(image_url: str, query: str = "", country: str = "us", max_results: int = 5) -> list[dict]:
+    """Call SerpAPI Google Lens and return up to max_results product matches.
 
     Two-pass strategy:
     - Pass 1 (type=products): Google's shopping tab → shopping_results.
-    - Pass 2 (type=visual_matches): only if Pass 1 returned fewer than 5 results;
+    - Pass 2 (type=visual_matches): only if Pass 1 returned fewer than max_results;
       fills remaining slots from visual similarity tab.
     """
-    MAX = 5
+    MAX = max_results
     results: list[dict] = []
 
     base_params: dict = {
@@ -724,7 +724,9 @@ def analyze_media(
                 item_warnings.append(msg)
                 return [], item_warnings, False
             try:
-                matched = _google_lens(gcs_url, query=name, country=country)
+                # One listing per detected object — total listings == number of
+                # objects searched, matching the user-configured max_searches.
+                matched = _google_lens(gcs_url, query=name, country=country, max_results=1)
             finally:
                 _delete_gcs(gcs_url)
             if matched:
@@ -732,7 +734,7 @@ def analyze_media(
             else:
                 logger.warning("No Lens results for '%s' — trying Shopping fallback", name)
                 if _SERPAPI_KEY:
-                    matched = _search_shopping(name, country=country)
+                    matched = _search_shopping(name, country=country, max_results=1)
                 if matched:
                     logger.info("Shopping fallback matched '%s' → %d result(s)", name, len(matched))
                 else:

@@ -20,6 +20,20 @@ service account as the live revision) and running the collection against
 via `newman -n 5`. This is noisier than a local run (real network + shared Cloud Run
 instance autoscaling) but exercises the real code path end-to-end.
 
+## Summary (all 5 candidates tested 2026-06-20)
+
+| # | Candidate | Verdict | Shipped? |
+|---|-----------|---------|----------|
+| 1 | `asyncio.to_thread` in `product-matcher`/`state-manager` | Sound fix, payoff is concurrency under parallel load — not measurable by this single-request harness. No regression. | Yes (commit `f1ef435`) |
+| 2 | Gate Lens `visual_matches` on `products` underfill | **Measured regression** (+25% latency, 0% of the claimed call savings) — `products` tab returned 0 results on every one of 39 calls for this image mix, so `visual_matches` still ran every time, just sequentially instead of concurrently. | No — reverted (commit `c8b5b17`) |
+| 3 | Drop synchronous GCS delete from critical path | No measurable latency change (effect is ~1 round-trip against a 40-90s floor) but it's still correct/lower-risk than the explicit delete, with no orphaned-object risk (lifecycle rule covers it). | Yes (commit `5fe3318`) |
+| 4 | Shared `requests.Session()` for SerpAPI calls | Standard, low-risk pattern; this session's SerpAPI quota got exhausted mid-testing so the speedup itself couldn't be measured. | Yes (commit `8f42c33`), re-validate timing once quota resets |
+| 5 | Resize image to 1280px before Gemini | Logic verified correct locally; **inconclusive on this harness** because the fixed test image (1000×563px) is already under the resize threshold, so the code path never triggers. | Yes (commit `836d847`), needs a >1280px test image to actually validate |
+
+**Biggest actionable finding:** candidate #2 looked like a free win on paper but was a real regression in practice — the only way that surfaced was by actually measuring it. The original doc's own caution ("log the hit rate for a week before cutting the call") was correct caution; this session's test data effectively did that validation in one run and confirmed Pass 1 contributes nothing for this traffic.
+
+**Known gaps for a follow-up run:** #4 and #5 need a clean SerpAPI quota and a >1280px test image, respectively, to get real before/after numbers instead of the proxies used here (Gemini-only latency via log timestamps, local PIL sanity checks).
+
 ## Log
 
 | # | Date | Change under test | Model | time_ms (5 runs, median bolded) | items | products | warnings | notes |

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from typing import List
@@ -11,6 +12,7 @@ import requests as _requests
 from matcher import match_products, _search_product, _SERPAPI_KEY
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Product Matching Service")
 
@@ -45,7 +47,9 @@ class MatchRequest(BaseModel):
 
 @app.post("/match")
 async def match(request: MatchRequest) -> JSONResponse:
-    result = match_products(request.items, request.ignore_terms, request.max_searches)
+    result = await asyncio.to_thread(
+        match_products, request.items, request.ignore_terms, request.max_searches
+    )
     return JSONResponse(content=result)
 
 

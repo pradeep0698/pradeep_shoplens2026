@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from typing import List
@@ -42,13 +43,13 @@ class UpdateRequest(BaseModel):
 
 @app.post("/session/{session_id}/products")
 async def update(session_id: str, request: UpdateRequest) -> JSONResponse:
-    update_session(session_id, request.products)
+    await asyncio.to_thread(update_session, session_id, request.products)
     return JSONResponse(content={"status": "updated", "session_id": session_id})
 
 
 @app.get("/session/{session_id}")
 async def get(session_id: str) -> JSONResponse:
-    data = get_session(session_id)
+    data = await asyncio.to_thread(get_session, session_id)
     if data is None:
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found")
     return JSONResponse(content=data)
@@ -56,7 +57,7 @@ async def get(session_id: str) -> JSONResponse:
 
 @app.delete("/session/{session_id}")
 async def clear(session_id: str) -> JSONResponse:
-    clear_session(session_id)
+    await asyncio.to_thread(clear_session, session_id)
     return JSONResponse(content={"status": "cleared", "session_id": session_id})
 
 

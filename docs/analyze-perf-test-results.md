@@ -25,6 +25,7 @@ instance autoscaling) but exercises the real code path end-to-end.
 | # | Date | Change under test | Model | time_ms (5 runs, median bolded) | items | products | warnings | notes |
 |---|------|--------------------|-------|---------|-------|----------|----------|-------|
 | 1 | 2026-06-20 | Baseline (no changes) | gemini-2.5-pro | 81056, 76654, **67691**, 51316, 43640 | 17-20 (median run: 20) | 5 (every run) | median run had 5 "no bounding box" warnings (non-fatal, Gemini omitted a box) | Deployed current `main` as-is to Cloud Run (revision `ai-analyzer-00005-89d`) before any perf changes. Item count varies run-to-run (Gemini detection isn't deterministic); product count is stable at 5 (capped by `max_searches`). |
+| 2 | 2026-06-20 | #1 — `asyncio.to_thread` in `product-matcher`/`state-manager` | gemini-2.5-pro | **66701**, 53739, 67514 (3 runs) | 21-24 | 5 (every run) | none | `ai-analyzer` itself is unchanged by this fix (it already used `to_thread` correctly) — only `product-matcher`/`state-manager` were touched, and this single-request `/analyze`-only harness never calls them. As predicted in the improvement doc, time_ms is unchanged within noise vs. baseline (66701 vs 67691 median) — this fix's payoff is concurrency under parallel load, not measurable here. Deployed `product-matcher-00003-ms9` and `state-manager-00002-j2t`; both `/health` checks OK post-deploy. |
 
 ## How to add a row
 

@@ -54,6 +54,7 @@ frontend/.eslintrc.json
 # Credentials & secrets — block all JSON, then allow known-safe files
 *.json
 !services/*/catalog.json
+!postman/*.json
 !frontend/package.json
 !frontend/package-lock.json
 !frontend/tsconfig.json

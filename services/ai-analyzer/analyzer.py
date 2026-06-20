@@ -485,22 +485,13 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
             "category":     _infer_category(name, seller),
         }
 
-    # ── Run both passes concurrently ────────────────────────────────────────
+    # ── Pass 1: products tab (always fetched) ───────────────────────────────
     pass1_data: dict = {}
-    pass2_data: dict = {}
-    with ThreadPoolExecutor(max_workers=2) as _lens_pool:
-        f1 = _lens_pool.submit(_fetch, "products")
-        f2 = _lens_pool.submit(_fetch, "visual_matches")
-        try:
-            pass1_data = f1.result()
-        except Exception as exc:
-            logger.warning("Lens pass 1 failed: %s", exc)
-        try:
-            pass2_data = f2.result()
-        except Exception as exc:
-            logger.warning("Lens pass 2 failed: %s", exc)
+    try:
+        pass1_data = _fetch("products")
+    except Exception as exc:
+        logger.warning("Lens pass 1 failed: %s", exc)
 
-    # ── Pass 1: products tab ────────────────────────────────────────────────
     for r in pass1_data.get("shopping_results", []):
         if len(results) >= MAX:
             break
@@ -516,8 +507,13 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
         results.append(_build_result(r, price))
     logger.info("Pass 1 (products): %d result(s)", len(results))
 
-    # ── Pass 2: visual matches tab (fills remaining slots) ──────────────────
+    # ── Pass 2: visual matches tab — only fetched if Pass 1 underfilled ─────
     if len(results) < MAX:
+        pass2_data: dict = {}
+        try:
+            pass2_data = _fetch("visual_matches")
+        except Exception as exc:
+            logger.warning("Lens pass 2 failed: %s", exc)
         for r in pass2_data.get("visual_matches", []):
             if len(results) >= MAX:
                 break

@@ -723,12 +723,11 @@ def analyze_media(
                 logger.warning(msg)
                 item_warnings.append(msg)
                 return [], item_warnings, False
-            try:
-                # One listing per detected object — total listings == number of
-                # objects searched, matching the user-configured max_searches.
-                matched = _google_lens(gcs_url, query=name, country=country, max_results=1)
-            finally:
-                _delete_gcs(gcs_url)
+            # One listing per detected object — total listings == number of
+            # objects searched, matching the user-configured max_searches.
+            # Cleanup handled by the bucket's 1-day lifecycle rule, not an
+            # explicit delete here, so it's off the request's critical path.
+            matched = _google_lens(gcs_url, query=name, country=country, max_results=1)
             if matched:
                 logger.info("Lens matched '%s' -> %d result(s)", name, len(matched))
             else:

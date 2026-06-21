@@ -461,12 +461,17 @@ def _clean_product_name(name: str, seller: str) -> str:
 
 
 def _google_lens(image_url: str, query: str = "", country: str = "us", max_results: int = 5) -> list[dict]:
-    """Call SerpAPI Google Lens and return up to max_results product matches.
+    """Call SerpAPI Google Lens and return up to max_results product matches
+    from the visual_matches tab.
 
-    Two-pass strategy:
-    - Pass 1 (type=products): Google's shopping tab → shopping_results.
-    - Pass 2 (type=visual_matches): only if Pass 1 returned fewer than max_results;
-      fills remaining slots from visual similarity tab.
+    Used to also fetch the products tab (type=products) concurrently, but it
+    returned 0 results on every single call observed in production traffic
+    (logged and confirmed across hundreds of calls, many item categories) —
+    pure wasted SerpAPI quota and a wait on whichever of the two was slower.
+    Dropped entirely rather than made conditional (see the
+    analyzePerfomanceImprovement.md #2 regression for why "conditional but
+    sequential" made things worse, not better — this is a different,
+    unconditional removal, not that same change).
     """
     MAX = max_results
     results: list[dict] = []
@@ -510,54 +515,27 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
             "category":     _infer_category(name, seller),
         }
 
-    # ── Run both passes concurrently ────────────────────────────────────────
-    pass1_data: dict = {}
-    pass2_data: dict = {}
-    with ThreadPoolExecutor(max_workers=2) as _lens_pool:
-        f1 = _lens_pool.submit(_fetch, "products")
-        f2 = _lens_pool.submit(_fetch, "visual_matches")
-        try:
-            pass1_data = f1.result()
-        except Exception as exc:
-            logger.warning("Lens pass 1 failed: %s", exc)
-        try:
-            pass2_data = f2.result()
-        except Exception as exc:
-            logger.warning("Lens pass 2 failed: %s", exc)
+    try:
+        data = _fetch("visual_matches")
+    except Exception as exc:
+        logger.warning("Lens visual_matches fetch failed: %s", exc)
+        data = {}
 
-    # ── Pass 1: products tab ────────────────────────────────────────────────
-    for r in pass1_data.get("shopping_results", []):
+    for r in data.get("visual_matches", []):
         if len(results) >= MAX:
             break
-        name = r.get("title", "")
-        link = r.get("link", "")
+        name      = r.get("title", "")
+        link      = r.get("link", "")
         if not name or not link:
             continue
         if not _is_product_name(name) or not _is_shopping_url(link):
-            logger.warning("Skipping shopping result '%s' (%s)", name, link)
             continue
-        price = _parse_price(r.get("price", "0"))
-        logger.info("Pass 1 match: '%s' price=%.2f url=%s", name, price, link)
+        price_obj = r.get("price", {})
+        price_val = price_obj.get("extracted_value", 0) if isinstance(price_obj, dict) else 0
+        price     = _parse_price(str(price_val)) if price_val else 0.0
+        logger.info("Lens match: '%s' price=%.2f url=%s", name, price, link)
         results.append(_build_result(r, price))
-    logger.info("Pass 1 (products): %d result(s)", len(results))
-
-    # ── Pass 2: visual matches tab (fills remaining slots) ──────────────────
-    if len(results) < MAX:
-        for r in pass2_data.get("visual_matches", []):
-            if len(results) >= MAX:
-                break
-            name      = r.get("title", "")
-            link      = r.get("link", "")
-            if not name or not link:
-                continue
-            if not _is_product_name(name) or not _is_shopping_url(link):
-                continue
-            price_obj = r.get("price", {})
-            price_val = price_obj.get("extracted_value", 0) if isinstance(price_obj, dict) else 0
-            price     = _parse_price(str(price_val)) if price_val else 0.0
-            logger.info("Pass 2 match: '%s' price=%.2f url=%s", name, price, link)
-            results.append(_build_result(r, price))
-        logger.info("Pass 2 (visual_matches): %d total result(s)", len(results))
+    logger.info("Lens (visual_matches): %d result(s)", len(results))
 
     if not results:
         logger.warning("Lens: no usable results for %s", image_url)

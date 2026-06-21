@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 _PROJECT      = os.environ.get("PROJECT_ID", "")
 _LOCATION     = os.environ.get("LOCATION", "us-central1")
 _DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
+# Lighter/faster tier for _describe_crop's short (3-7 word) description task —
+# doesn't need the full multi-object-detection model's reasoning power.
+_DESCRIBE_MODEL = os.environ.get("GEMINI_DESCRIBE_MODEL", "gemini-2.5-flash")
 _GCS_LENS_BUCKET = os.environ.get("GCS_LENS_BUCKET", "")
 _SERPAPI_KEY     = os.environ.get("SERPAPI_KEY", "")
 
@@ -157,7 +160,7 @@ def _describe_crop(jpeg_bytes: bytes) -> str:
         client = _get_client()
         part = types.Part.from_bytes(data=jpeg_bytes, mime_type="image/jpeg")
         response = client.models.generate_content(
-            model=_active_model,
+            model=_DESCRIBE_MODEL,
             contents=[part, _IDENTIFY_PROMPT],
             config=types.GenerateContentConfig(
                 safety_settings=_SAFETY,

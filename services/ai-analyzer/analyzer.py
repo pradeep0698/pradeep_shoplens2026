@@ -620,10 +620,9 @@ def identify_crop(
         _warnings.append(msg)
         return [], _warnings
 
-    try:
-        products = _google_lens(gcs_url, query=effective_query, country=country)
-    finally:
-        _delete_gcs(gcs_url)
+    # Cleanup handled by the bucket's 1-day lifecycle rule, not an explicit
+    # delete here, so it's off the request's critical path.
+    products = _google_lens(gcs_url, query=effective_query, country=country)
 
     if not products and effective_query and _SERPAPI_KEY:
         logger.info("Lens found nothing — trying Shopping fallback for '%s'", effective_query)

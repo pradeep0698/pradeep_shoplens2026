@@ -1,0 +1,30 @@
+# `ai-analyzer` API changes — 2026-06-20/21 session
+
+Consolidated list of every change made to the `/analyze` and `/identify` API
+behavior during the perf investigation, in the order they shipped. Full
+measurement methodology and raw run-by-run data are in
+[`analyze-perf-test-results.md`](analyze-perf-test-results.md); the original
+candidate writeups are in
+[`analyzePerfomanceImprovement.md`](analyzePerfomanceImprovement.md). This
+table exists to answer "what changed and was it worth it" at a glance.
+
+| Change | Why we did it | Potential time savings | Commit |
+|---|---|---|---|
+| `asyncio.to_thread` around blocking calls in `product-matcher`/`state-manager` route handlers | Single-worker Uvicorn has one event loop; calling blocking code directly inside `async def` freezes it for every other in-flight request — a concurrency bug, not a tuning knob. `ai-analyzer` already did this correctly; the other two services didn't. | Not observable on a single-request harness — the win is removing a hard "1 request at a time per instance" ceiling under concurrent load. | `f1ef435` |
+| Gate Lens `visual_matches` (Pass 2) on `products` (Pass 1) underfill, made sequential instead of concurrent | Hypothesis: skip the second SerpAPI tab when the first already has enough results, to cut call volume. | **Regression: +25% latency** (84.7s vs 67.7s median). Pass 1 returned 0 results on every call for this traffic, so Pass 2 still ran every time — just after paying Pass 1's round-trip first instead of concurrently. Reverted. | `6dd4ef1` (reverted by `c8b5b17`) |
+| Drop the synchronous GCS delete from `/analyze`'s per-item critical path | The bucket already has a 1-day lifecycle rule covering `lens-tmp/`, so the explicit delete was redundant cleanup blocking the item's return for no benefit. | ~1 GCS round-trip per item (not measurable against this pipeline's 40-90s floor, but real and strictly non-negative). | `5fe3318` |
+| Reuse a single `requests.Session()` for SerpAPI calls instead of `requests.get()` | `requests.get()` opens a brand-new session (fresh TCP+TLS handshake) every call; this pipeline fires up to 20 concurrent SerpAPI calls per request. | ~9.5% faster (61.2s vs 67.7s median) — directionally consistent but inside this harness's noise band. | `8f42c33` |
+| Downscale the image sent to Gemini detection to a 1280px max dimension (crop still uses original bytes) | Vertex AI's own docs say image tokens scale with resolution and recommend resizing to the minimum resolution needed; box coordinates are already normalized 0-1000 so crop quality is unaffected. | ~16% faster Gemini-only latency on a 2000×1126 test image (39.5s vs 47.0s median); the original fixed test image was already under the threshold so didn't exercise this path. | `836d847` |
+| Parallelize `_describe_crop` + `_upload_gcs` in `identify_crop` (were sequential, are independent) | The two calls don't depend on each other's output, so running them concurrently can only help. | No measurable change (29.4s vs 27.9s baseline median) — uploading a small crop was never the bottleneck. Kept: zero behavior change, zero downside. | `d3b6a24` |
+| Drop the synchronous GCS delete from `identify_crop`'s critical path (same fix as the `/analyze` one, second call site) | Same lifecycle-rule reasoning as the `/analyze` change, applied to the tap-to-identify endpoint. | No measurable change (29.5s vs 27.9s baseline median) — real but tiny against this endpoint's noise floor. Kept for correctness/simplicity. | `b816fc7` |
+| Use `gemini-2.5-flash` instead of `gemini-2.5-pro` for `identify_crop`'s 3-7 word description | Chase the same latency win the main-detection model swap (below) eventually validated, on the cheaper/shorter description task. | **Real 44% speedup** (15.7s vs 27.9s median) — **but reverted**: flash misidentified the test crop ("wooden cutting board") in 5/6 calls. Lens's image-based match saved the visible result, but the same wrong text feeds the untested Shopping-fallback query with nothing to correct it. | `4f1efc6` (reverted by `032bf6c`) |
+| Switch the main multi-object detection model (`analyze_media`) from `gemini-2.5-pro` to `gemini-2.5-flash` | This call is the first step of every single `/analyze` request and dominates its latency; worth re-testing flash on a more structured prompt after the identify-description regression above. | **>2x faster** Gemini-only latency (22.6s vs 49.9s median). ~17% fewer items detected per run, but every prominent item still named correctly across 5 runs with no hallucinations — kept. | `0e17092` |
+| Drop the `products` tab (Pass 1) from `_google_lens` entirely (unconditional removal, not gated like the reverted Pass-2 attempt above) | Pass 1 returned 0 results on every call sampled in production (50/50, hundreds of calls, many categories) — pure wasted SerpAPI quota and a wait on whichever of the two concurrent calls was slower. | **~37% end-to-end** (47.3s → 29.8s median), though only ~19% of that is attributable to the Lens portion itself; the unconditional win is **SerpAPI call volume exactly halved** (1 call/item instead of 2). | `5232e0d` |
+| Add per-stage `TIMING` log lines (describe+upload / Lens / Shopping / crop / Gemini / items-phase) to `identify_crop` and `analyze_media` | The candidates above were measured via ad-hoc Cloud Run log timestamp diffs each time — these are now first-class structured logs so future perf work doesn't need to re-instrument from scratch. | N/A — observability change, not a speedup. Enables faster, cheaper measurement of any future candidate. | _uncommitted_ |
+
+**Net effect so far:** two changes shipped and then reverted after real
+measurement (Pass-2 gating, identify-description flash model); the rest
+shipped. The two unconditional wins worth calling out are the main-detection
+flash swap (>2x Gemini latency) and dropping the dead `products` Lens tab
+(~37% end-to-end, half the SerpAPI quota) — both validated by mid-session
+production sampling, not just the fixed-image harness.

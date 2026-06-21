@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 import threading
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -570,6 +571,7 @@ def identify_crop(
     Skips Gemini bounding-box detection (region already selected), but uses Gemini
     to produce a rich product description (color, material, brand, style) that
     improves Lens recall. Falls back to the caller-supplied query if Gemini fails."""
+    _t_total_start = time.monotonic()
     _warnings: list[str] = []
     _tls.serp_quota_exhausted = False
     img_bytes = base64.b64decode(image_data)
@@ -584,11 +586,13 @@ def identify_crop(
 
     # Gemini description and GCS upload are independent (the upload doesn't
     # need the description) — run them concurrently instead of sequentially.
+    _t_describe_upload_start = time.monotonic()
     with ThreadPoolExecutor(max_workers=2) as _pool:
         _describe_future = _pool.submit(_describe_crop, jpeg_bytes)
         _upload_future = _pool.submit(_upload_gcs, jpeg_bytes)
         gemini_query = _describe_future.result()
         gcs_url = _upload_future.result()
+    _t_describe_upload = time.monotonic() - _t_describe_upload_start
 
     effective_query = gemini_query or query
 
@@ -596,15 +600,24 @@ def identify_crop(
         msg = "identify_crop: GCS upload failed — visual search skipped"
         logger.warning(msg)
         _warnings.append(msg)
+        logger.info(
+            "TIMING | total=%.2fs describe_and_upload=%.2fs lens=0.00s shopping=0.00s",
+            time.monotonic() - _t_total_start, _t_describe_upload,
+        )
         return [], _warnings
 
     # Cleanup handled by the bucket's 1-day lifecycle rule, not an explicit
     # delete here, so it's off the request's critical path.
+    _t_lens_start = time.monotonic()
     products = _google_lens(gcs_url, query=effective_query, country=country)
+    _t_lens = time.monotonic() - _t_lens_start
 
+    _t_shopping = 0.0
     if not products and effective_query and _SERPAPI_KEY:
         logger.info("Lens found nothing — trying Shopping fallback for '%s'", effective_query)
+        _t_shopping_start = time.monotonic()
         products = _search_shopping(effective_query, country=country)
+        _t_shopping = time.monotonic() - _t_shopping_start
 
     if getattr(_tls, "serp_quota_exhausted", False):
         logger.warning("SERP API quota exhausted — no product matches returned")
@@ -615,6 +628,10 @@ def identify_crop(
         logger.warning(msg)
         _warnings.append(msg)
 
+    logger.info(
+        "TIMING | total=%.2fs describe_and_upload=%.2fs lens=%.2fs shopping=%.2fs",
+        time.monotonic() - _t_total_start, _t_describe_upload, _t_lens, _t_shopping,
+    )
     return products, _warnings
 
 
@@ -637,6 +654,7 @@ def analyze_media(
     products:   visually matched products from Google Lens via GCS (empty for GCS video path).
     warnings:   non-fatal issues surfaced to the caller (e.g. Lens quota, GCS failures).
     """
+    _t_total_start = time.monotonic()
     _warnings: list[str] = []
     client = _get_client()
     text_part = _PROMPT.format(
@@ -646,6 +664,7 @@ def analyze_media(
     if gcs_video_uri:
         # Live-video path — no cropping/Lens available, return items only
         media_part = types.Part.from_uri(file_uri=gcs_video_uri, mime_type="video/mp4")
+        _t_gemini_start = time.monotonic()
         response = client.models.generate_content(
             model=_active_model,
             contents=[media_part, text_part],
@@ -654,6 +673,7 @@ def analyze_media(
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             ),
         )
+        _t_gemini = time.monotonic() - _t_gemini_start
         try:
             items_raw = _parse_items_with_boxes(response.text)
         except Exception as exc:
@@ -661,6 +681,10 @@ def analyze_media(
             items_raw = []
         item_names = [r["name"] for r in items_raw]
         logger.info("analyze_media (video) detected %d item(s): %s", len(item_names), item_names)
+        logger.info(
+            "TIMING | total=%.2fs gemini=%.2fs items_phase=0.00s items=0 (video path, no Lens)",
+            time.monotonic() - _t_total_start, _t_gemini,
+        )
         return item_names, [], _warnings
 
     # Mobile/image path
@@ -670,6 +694,7 @@ def analyze_media(
         image_mime_type=image_mime_type,
         max_dimension=1280,
     )
+    _t_gemini_start = time.monotonic()
     response = client.models.generate_content(
         model=_active_model,
         contents=[media_part, text_part],
@@ -678,6 +703,7 @@ def analyze_media(
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         ),
     )
+    _t_gemini = time.monotonic() - _t_gemini_start
     try:
         items_raw = _parse_items_with_boxes(response.text)
     except Exception as exc:
@@ -709,14 +735,19 @@ def analyze_media(
 
     # Decode raw image bytes once for cropping
     products: list[dict] = []
+    _t_items_start = time.monotonic()
+    _item_timings: dict[str, dict] = {}
     if image_data and _GCS_LENS_BUCKET and _SERPAPI_KEY:
         img_bytes = base64.b64decode(image_data)
 
-        def _process_item(item: dict) -> tuple[list[dict], list[str], bool]:
+        def _process_item(item: dict) -> tuple[list[dict], list[str], bool, dict]:
+            _t_item_start = time.monotonic()
             _tls.serp_quota_exhausted = False
             item_warnings: list[str] = []
             name = item["name"]
             box  = item.get("box")
+
+            _t_crop_start = time.monotonic()
             if box:
                 crop = _crop_product(img_bytes, box)
                 logger.info("Cropped '%s' box=%s → %d bytes", name, box, len(crop))
@@ -726,37 +757,54 @@ def analyze_media(
                 logger.warning("No bounding box for '%s' — using full image for Lens", name)
                 item_warnings.append(f"No bounding box for '{name}' — used full image")
                 crop = img_bytes
+            _t_crop = time.monotonic() - _t_crop_start
+
+            _t_upload_start = time.monotonic()
             gcs_url = _upload_gcs(crop)
+            _t_upload = time.monotonic() - _t_upload_start
             if not gcs_url:
                 msg = f"GCS upload failed for '{name}' — Lens skipped"
                 logger.warning(msg)
                 item_warnings.append(msg)
-                return [], item_warnings, False
+                timing = {"crop": _t_crop, "upload": _t_upload, "lens": 0.0, "shopping": 0.0,
+                          "total": time.monotonic() - _t_item_start}
+                return [], item_warnings, False, timing
+
             # One listing per detected object — total listings == number of
             # objects searched, matching the user-configured max_searches.
             # Cleanup handled by the bucket's 1-day lifecycle rule, not an
             # explicit delete here, so it's off the request's critical path.
+            _t_lens_start = time.monotonic()
             matched = _google_lens(gcs_url, query=name, country=country, max_results=1)
+            _t_lens = time.monotonic() - _t_lens_start
+
+            _t_shopping = 0.0
             if matched:
                 logger.info("Lens matched '%s' -> %d result(s)", name, len(matched))
             else:
                 logger.warning("No Lens results for '%s' — trying Shopping fallback", name)
                 if _SERPAPI_KEY:
+                    _t_shopping_start = time.monotonic()
                     matched = _search_shopping(name, country=country, max_results=1)
+                    _t_shopping = time.monotonic() - _t_shopping_start
                 if matched:
                     logger.info("Shopping fallback matched '%s' → %d result(s)", name, len(matched))
                 else:
                     msg = f"No results for '{name}' (Lens + Shopping both empty)"
                     logger.warning(msg)
                     item_warnings.append(msg)
-            return matched, item_warnings, getattr(_tls, "serp_quota_exhausted", False)
+
+            timing = {"crop": _t_crop, "upload": _t_upload, "lens": _t_lens, "shopping": _t_shopping,
+                      "total": time.monotonic() - _t_item_start}
+            return matched, item_warnings, getattr(_tls, "serp_quota_exhausted", False), timing
 
 
         quota_exhausted = False
         with ThreadPoolExecutor(max_workers=10) as pool:
             futures = {pool.submit(_process_item, item): item for item in items_raw}
             for future in as_completed(futures):
-                result, item_warnings, item_quota = future.result()
+                result, item_warnings, item_quota, timing = future.result()
+                _item_timings[futures[future]["name"]] = timing
                 if item_quota:
                     quota_exhausted = True
                 _warnings.extend(item_warnings)
@@ -786,6 +834,22 @@ def analyze_media(
         msg = "GCS_LENS_BUCKET or SERPAPI_KEY not set — visual matching disabled"
         logger.warning(msg)
         _warnings.append(msg)
+
+    _t_items = time.monotonic() - _t_items_start
+    _t_total = time.monotonic() - _t_total_start
+    if _item_timings:
+        slowest_name, slowest = max(_item_timings.items(), key=lambda kv: kv[1]["total"])
+        logger.info(
+            "TIMING | total=%.2fs gemini=%.2fs items_phase=%.2fs items=%d | "
+            "slowest_item='%s' crop=%.2fs upload=%.2fs lens=%.2fs shopping=%.2fs item_total=%.2fs",
+            _t_total, _t_gemini, _t_items, len(_item_timings), slowest_name,
+            slowest["crop"], slowest["upload"], slowest["lens"], slowest["shopping"], slowest["total"],
+        )
+    else:
+        logger.info(
+            "TIMING | total=%.2fs gemini=%.2fs items_phase=%.2fs items=0",
+            _t_total, _t_gemini, _t_items,
+        )
 
     return item_names, products, _warnings
 

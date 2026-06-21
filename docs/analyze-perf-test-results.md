@@ -62,6 +62,7 @@ they were identified by inspecting `identify_crop()`'s own critical path.
 | # | Date | Change under test | Model | time_ms (5 runs, median bolded) | products | warnings | notes |
 |---|------|--------------------|-------|---------|----------|----------|-------|
 | 1 | 2026-06-21 | Baseline (no changes) | gemini-2.5-pro | 35014, **27940**, 22192, 46131, 18439 | 5, 5, 5, 0, 5 | iter 4 had "No results found" (Lens + Shopping both empty, no SERP_QUOTA warning — genuine miss, not quota) | Deployed current `main` as-is (rev `ai-analyzer-00013-4td`) before any `/identify`-specific changes. Much faster than `/analyze` (~28s vs ~67s median) since it skips Gemini's multi-object detection — single Gemini description call + one Lens lookup instead of N. |
+| 2 | 2026-06-21 | Speedup #1 — parallelize `_describe_crop` + `_upload_gcs` in `identify_crop` (were sequential, are independent) | gemini-2.5-pro | 18247, 26750, 33094, **29398**, 43471 | 5 (every run) | none | No measurable change vs. baseline (29398ms vs 27940ms median — slightly *higher*, within noise). Expected on reflection: GCS-uploading a small (~340×298) crop is fast (likely well under 1s), so the serial wait this removed was never the bottleneck — Gemini's description call dominates this endpoint's latency, same lesson as perf #3 on `/analyze` (saves a real but tiny amount, invisible against this much larger noise floor). Kept anyway — zero behavior change, strictly less wasted waiting, same validated pattern used elsewhere in this file. Deployed `ai-analyzer-00014-pmh`. |
 
 ## How to add a row
 

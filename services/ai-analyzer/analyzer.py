@@ -604,10 +604,16 @@ def identify_crop(
     img.save(buf, format="JPEG", quality=85)
     jpeg_bytes = buf.getvalue()
 
-    gemini_query = _describe_crop(jpeg_bytes)
+    # Gemini description and GCS upload are independent (the upload doesn't
+    # need the description) — run them concurrently instead of sequentially.
+    with ThreadPoolExecutor(max_workers=2) as _pool:
+        _describe_future = _pool.submit(_describe_crop, jpeg_bytes)
+        _upload_future = _pool.submit(_upload_gcs, jpeg_bytes)
+        gemini_query = _describe_future.result()
+        gcs_url = _upload_future.result()
+
     effective_query = gemini_query or query
 
-    gcs_url = _upload_gcs(jpeg_bytes)
     if not gcs_url:
         msg = "identify_crop: GCS upload failed — visual search skipped"
         logger.warning(msg)

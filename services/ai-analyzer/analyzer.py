@@ -854,6 +854,155 @@ def analyze_media(
     return item_names, products, _warnings
 
 
+def analyze_media_stream(
+    *,
+    image_url: str | None = None,
+    image_data: str | None = None,
+    image_mime_type: str | None = None,
+    ignore_terms: list[str] | None = None,
+    country: str = "us",
+    max_searches: int | None = None,
+):
+    """Generator version of analyze_media's image path, for streaming partial
+    results to the client as each item's Lens search completes instead of
+    making the whole request wait for the slowest one.
+
+    Yields one dict per event:
+    - {"type": "items", "items": [name, ...]}                            — once, right after Gemini detection
+    - {"type": "match", "name": ..., "products": [...], "warnings": [...]} — once per item, as its Lens/Shopping search completes
+    - {"type": "done", "warnings": [...]}                                 — once, at the end
+
+    Video path isn't supported here — it already returns fast with no
+    per-item Lens fan-out, so there's nothing to stream.
+    """
+    _t_total_start = time.monotonic()
+    client = _get_client()
+    text_part = _PROMPT.format(ignore_block=_build_ignore_block(ignore_terms))
+
+    media_part = _load_image_part(
+        image_url=image_url,
+        image_data=image_data,
+        image_mime_type=image_mime_type,
+        max_dimension=1280,
+    )
+    _t_gemini_start = time.monotonic()
+    response = client.models.generate_content(
+        model=_active_model,
+        contents=[media_part, text_part],
+        config=types.GenerateContentConfig(
+            safety_settings=_SAFETY,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        ),
+    )
+    _t_gemini = time.monotonic() - _t_gemini_start
+    try:
+        items_raw = _parse_items_with_boxes(response.text)
+    except Exception as exc:
+        logger.warning("Gemini parse failed: %s | raw=%s", exc, response.text)
+        items_raw = []
+
+    item_names = [r["name"] for r in items_raw]
+    logger.info("analyze_media_stream detected %d item(s): %s", len(item_names), item_names)
+    yield {"type": "items", "items": item_names}
+
+    seen_keys: set[str] = set()
+    unique_items: list[dict] = []
+    for item in items_raw:
+        key = re.sub(r"[^a-z0-9]", "", item["name"].lower())
+        if key not in seen_keys:
+            seen_keys.add(key)
+            unique_items.append(item)
+    items_raw = unique_items
+
+    search_limit = clamp_max_searches(max_searches)
+    if len(items_raw) > search_limit:
+        items_raw = items_raw[:search_limit]
+
+    final_warnings: list[str] = []
+
+    if not (image_data and _GCS_LENS_BUCKET and _SERPAPI_KEY):
+        if not _GCS_LENS_BUCKET or not _SERPAPI_KEY:
+            msg = "GCS_LENS_BUCKET or SERPAPI_KEY not set — visual matching disabled"
+            logger.warning(msg)
+            final_warnings.append(msg)
+        logger.info(
+            "TIMING (stream) | total=%.2fs gemini=%.2fs items_phase=0.00s items=0",
+            time.monotonic() - _t_total_start, _t_gemini,
+        )
+        yield {"type": "done", "warnings": final_warnings}
+        return
+
+    img_bytes = base64.b64decode(image_data)
+    seen_ids:  set[str] = set()
+    seen_urls: set[str] = set()
+
+    def _process_item(item: dict) -> tuple[list[dict], list[str], bool]:
+        _tls.serp_quota_exhausted = False
+        item_warnings: list[str] = []
+        name = item["name"]
+        box  = item.get("box")
+        if box:
+            crop = _crop_product(img_bytes, box)
+            logger.info("Cropped '%s' box=%s → %d bytes", name, box, len(crop))
+        else:
+            logger.warning("No bounding box for '%s' — using full image for Lens", name)
+            item_warnings.append(f"No bounding box for '{name}' — used full image")
+            crop = img_bytes
+        gcs_url = _upload_gcs(crop)
+        if not gcs_url:
+            msg = f"GCS upload failed for '{name}' — Lens skipped"
+            logger.warning(msg)
+            item_warnings.append(msg)
+            return [], item_warnings, False
+        matched = _google_lens(gcs_url, query=name, country=country, max_results=1)
+        if matched:
+            logger.info("Lens matched '%s' -> %d result(s)", name, len(matched))
+        else:
+            logger.warning("No Lens results for '%s' — trying Shopping fallback", name)
+            if _SERPAPI_KEY:
+                matched = _search_shopping(name, country=country, max_results=1)
+            if matched:
+                logger.info("Shopping fallback matched '%s' → %d result(s)", name, len(matched))
+            else:
+                msg = f"No results for '{name}' (Lens + Shopping both empty)"
+                logger.warning(msg)
+                item_warnings.append(msg)
+        return matched, item_warnings, getattr(_tls, "serp_quota_exhausted", False)
+
+    quota_exhausted = False
+    _t_items_start = time.monotonic()
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(_process_item, item): item for item in items_raw}
+        for future in as_completed(futures):
+            item = futures[future]
+            result, item_warnings, item_quota = future.result()
+            if item_quota:
+                quota_exhausted = True
+            final_warnings.extend(item_warnings)
+            # Dedupe against everything already yielded this run, same rule
+            # as analyze_media's post-hoc dedup, just applied incrementally.
+            deduped: list[dict] = []
+            for p in result:
+                pid = p.get("product_id", "")
+                url = p.get("purchase_url", "")
+                if (pid and pid in seen_ids) or (url and url in seen_urls):
+                    continue
+                if pid: seen_ids.add(pid)
+                if url: seen_urls.add(url)
+                deduped.append(p)
+            yield {"type": "match", "name": item["name"], "products": deduped, "warnings": item_warnings}
+
+    if quota_exhausted:
+        logger.warning("SERP API quota exhausted — no product matches returned")
+        final_warnings.append("SERP_QUOTA_EXCEEDED")
+
+    logger.info(
+        "TIMING (stream) | total=%.2fs gemini=%.2fs items_phase=%.2fs items=%d",
+        time.monotonic() - _t_total_start, _t_gemini, time.monotonic() - _t_items_start, len(items_raw),
+    )
+    yield {"type": "done", "warnings": final_warnings}
+
+
 def analyze_segment(gcs_video_uri: str, transcript: str) -> list[str]:
     items, *_ = analyze_media(gcs_video_uri=gcs_video_uri, transcript=transcript)
     return items

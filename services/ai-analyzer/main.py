@@ -1,16 +1,25 @@
 import asyncio
+import json
 import logging
 import os
+import threading
 import time
 import uuid
 from contextvars import ContextVar
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from analyzer import analyze_media, classify_exception, identify_crop, get_active_model, set_active_model
+from analyzer import (
+    analyze_media,
+    analyze_media_stream,
+    classify_exception,
+    identify_crop,
+    get_active_model,
+    set_active_model,
+)
 
 # Per-request correlation id, propagated to every log line (including those
 # emitted from analyzer.py and from threads spawned via asyncio.to_thread).
@@ -173,6 +182,81 @@ async def analyze(request: AnalyzeRequest) -> JSONResponse:
             "image_url": request.image_url,
         },
         headers={"X-Request-Id": req_id},
+    )
+
+
+@app.post("/analyze/stream")
+async def analyze_stream(request: AnalyzeRequest) -> StreamingResponse:
+    """Same as /analyze, but streams one NDJSON line per item as its Lens
+    search completes, instead of waiting for the slowest item before
+    returning anything. The mobile "live camera dot" flow uses this so
+    matched products appear as they're found rather than all at once.
+
+    Each line is a JSON object with a "type" field:
+      {"type": "items", "items": [...]}                              — once, after Gemini detection
+      {"type": "match", "name": ..., "products": [...], "warnings": [...]} — once per item
+      {"type": "done", "warnings": [...]}                             — once, at the end
+      {"type": "error", "detail": ..., "error_code": ...}             — only on failure
+
+    Doesn't support gcs_video_uri (the video path has no per-item fan-out
+    to stream — use /analyze for that).
+    """
+    req_id = uuid.uuid4().hex[:8]
+    _request_id_ctx.set(req_id)
+
+    if not request.image_url and not request.image_data:
+        logger.warning("Rejecting /analyze/stream: neither image_url nor image_data provided")
+        raise HTTPException(status_code=400, detail="Provide image_url or image_data.")
+
+    logger.info(
+        "analyze/stream start | image_url=%s image_data_b64_len=%d ignore_terms=%d country=%s",
+        request.image_url,
+        len(request.image_data) if request.image_data else 0,
+        len(request.ignore_terms),
+        request.country,
+    )
+
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    _sentinel = object()
+
+    def _produce() -> None:
+        _request_id_ctx.set(req_id)
+        try:
+            for event in analyze_media_stream(
+                image_url=request.image_url,
+                image_data=request.image_data,
+                image_mime_type=request.image_mime_type,
+                ignore_terms=request.ignore_terms,
+                country=request.country,
+                max_searches=request.max_searches,
+            ):
+                asyncio.run_coroutine_threadsafe(queue.put(event), loop)
+        except Exception as exc:
+            status_code, error_code = classify_exception(exc)
+            logger.exception(
+                "analyze/stream producer FAILED | %s: %s | error_code=%s status=%d",
+                type(exc).__name__, exc, error_code, status_code,
+            )
+            asyncio.run_coroutine_threadsafe(
+                queue.put({"type": "error", "detail": str(exc), "error_code": error_code}), loop,
+            )
+        finally:
+            asyncio.run_coroutine_threadsafe(queue.put(_sentinel), loop)
+
+    threading.Thread(target=_produce, daemon=True).start()
+
+    async def _event_stream():
+        while True:
+            event = await queue.get()
+            if event is _sentinel:
+                break
+            yield json.dumps(event) + "\n"
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="application/x-ndjson",
+        headers={"X-Request-Id": req_id, **_CORS},
     )
 
 

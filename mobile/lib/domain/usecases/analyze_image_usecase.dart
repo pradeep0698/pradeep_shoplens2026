@@ -4,7 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/utils/image_utils.dart';
 import '../../core/utils/product_ranker.dart';
 import '../../data/models/analyze_request.dart';
+import '../../data/models/analyzer_error.dart';
 import '../../data/models/match_request.dart';
+import '../../data/models/product.dart';
 import '../../data/sources/remote/analyzer_api.dart';
 import '../../data/sources/remote/matcher_api.dart';
 import '../../data/sources/remote/session_api.dart';
@@ -37,35 +39,69 @@ class AnalyzeImageUseCase {
     String?               country,
   }) async* {
     yield const PipelineEvent(PipelineStep.analyzing);
-    final analyzeResponse = await _analyzer.analyze(AnalyzeRequest(
+
+    // Uses /analyze/stream instead of /analyze: results are saved to the
+    // session as each item's Lens search completes (not all at once after
+    // the slowest item finishes), so shoppingListProvider's Firestore
+    // listener shows products appearing one by one instead of a single
+    // jump at the end.
+    final allProducts = <Product>[];
+    final warnings = <String>[];
+    var detectedItems = const <String>[];
+    var anyMatched = false;
+
+    await for (final event in _analyzer.analyzeStream(AnalyzeRequest(
       imageData:     encodeImageToBase64(imageBytes),
       imageMimeType: mimeType,
       ignoreTerms:   ignoreTerms,
       transcript:    '',
       country:       country,
-    ));
+    ))) {
+      switch (event['type']) {
+        case 'items':
+          detectedItems = ((event['items'] as List?) ?? const []).cast<String>();
+          break;
+        case 'match':
+          warnings.addAll(((event['warnings'] as List?) ?? const []).cast<String>());
+          final productsJson = (event['products'] as List?) ?? const [];
+          if (productsJson.isNotEmpty) {
+            anyMatched = true;
+            final ranked = rankProducts(
+              productsJson.map((p) => Product.fromJson(p as Map<String, dynamic>)).toList(),
+              preferenceTerms,
+              isExactMatchSource: true,
+            );
+            allProducts.addAll(ranked);
+            await _session.saveProducts(sessionId, allProducts);
+            yield PipelineEvent(PipelineStep.saving, warnings: warnings);
+          }
+          break;
+        case 'done':
+          warnings.addAll(((event['warnings'] as List?) ?? const []).cast<String>());
+          break;
+        case 'error':
+          throw AnalyzerException(
+            code: AnalyzerErrorCode.fromWire(event['error_code'] as String?),
+            message: (event['detail'] as String?) ?? 'Something went wrong',
+          );
+      }
+    }
 
-    if (analyzeResponse.products.isNotEmpty) {
-      // Lens returned visual matches — save directly, skip product-matcher
-      yield const PipelineEvent(PipelineStep.saving);
-      final ranked = rankProducts(analyzeResponse.products, preferenceTerms,
-              isExactMatchSource: true)
-          .toList();
-      await _session.saveProducts(sessionId, ranked);
-    } else if (analyzeResponse.items.isNotEmpty) {
-      // No Lens results — fall back to product-matcher. This text search is
-      // slower than the Lens path, so run it in the background instead of
-      // blocking "done": shoppingListProvider streams from Firestore in real
-      // time, so whatever the matcher finds will appear the moment it's saved.
+    if (!anyMatched && detectedItems.isNotEmpty) {
+      // No Lens results for any item — fall back to product-matcher. This
+      // text search is slower than the Lens path, so run it in the
+      // background instead of blocking "done": shoppingListProvider streams
+      // from Firestore in real time, so whatever the matcher finds will
+      // appear the moment it's saved.
       unawaited(_matchInBackground(
         sessionId:       sessionId,
-        items:           analyzeResponse.items,
+        items:           detectedItems,
         ignoreTerms:     ignoreTerms,
         preferenceTerms: preferenceTerms,
       ));
     }
 
-    yield PipelineEvent(PipelineStep.done, warnings: analyzeResponse.warnings);
+    yield PipelineEvent(PipelineStep.done, warnings: warnings);
   }
 
   Future<void> _matchInBackground({

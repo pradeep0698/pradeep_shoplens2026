@@ -10,6 +10,7 @@ class AnalyzeRequest {
   @JsonKey(name: 'ignore_terms')    final List<String>  ignoreTerms;
   @JsonKey(name: 'gcs_uri')         final String?       gcsUri;
   @JsonKey(name: 'image_url')       final String?       imageUrl;
+  @JsonKey(name: 'max_searches')    final int?          maxSearches;
   final String transcript;
   final String? query;
   final String? country;
@@ -20,6 +21,7 @@ class AnalyzeRequest {
     this.ignoreTerms = const [],
     this.gcsUri,
     this.imageUrl,
+    this.maxSearches,
     this.transcript = '',
     this.query,
     this.country,

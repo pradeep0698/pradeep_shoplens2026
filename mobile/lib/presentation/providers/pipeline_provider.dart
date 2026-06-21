@@ -71,6 +71,7 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
         ignoreTerms:     profile.ignoreTerms,
         preferenceTerms: profile.preferenceTerms,
         country:         profile.country.isEmpty ? null : profile.country,
+        maxSearches:     profile.maxSearchesPerRun,
       )) {
         state = PipelineState(
           imageBytes: bytes,

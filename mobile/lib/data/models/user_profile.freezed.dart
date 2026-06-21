@@ -24,6 +24,7 @@ mixin _$UserProfile {
   List<String> get shoppingCategories => throw _privateConstructorUsedError;
   List<String> get preferenceTerms => throw _privateConstructorUsedError;
   List<String> get ignoreTerms => throw _privateConstructorUsedError;
+  int get maxSearchesPerRun => throw _privateConstructorUsedError;
 
   /// Create a copy of UserProfile
   /// with the given fields replaced by the non-null parameter values.
@@ -46,7 +47,8 @@ abstract class $UserProfileCopyWith<$Res> {
       String country,
       List<String> shoppingCategories,
       List<String> preferenceTerms,
-      List<String> ignoreTerms});
+      List<String> ignoreTerms,
+      int maxSearchesPerRun});
 }
 
 /// @nodoc
@@ -72,6 +74,7 @@ class _$UserProfileCopyWithImpl<$Res, $Val extends UserProfile>
     Object? shoppingCategories = null,
     Object? preferenceTerms = null,
     Object? ignoreTerms = null,
+    Object? maxSearchesPerRun = null,
   }) {
     return _then(_value.copyWith(
       username: null == username
@@ -106,6 +109,10 @@ class _$UserProfileCopyWithImpl<$Res, $Val extends UserProfile>
           ? _value.ignoreTerms
           : ignoreTerms // ignore: cast_nullable_to_non_nullable
               as List<String>,
+      maxSearchesPerRun: null == maxSearchesPerRun
+          ? _value.maxSearchesPerRun
+          : maxSearchesPerRun // ignore: cast_nullable_to_non_nullable
+              as int,
     ) as $Val);
   }
 }
@@ -126,7 +133,8 @@ abstract class _$$UserProfileImplCopyWith<$Res>
       String country,
       List<String> shoppingCategories,
       List<String> preferenceTerms,
-      List<String> ignoreTerms});
+      List<String> ignoreTerms,
+      int maxSearchesPerRun});
 }
 
 /// @nodoc
@@ -150,6 +158,7 @@ class __$$UserProfileImplCopyWithImpl<$Res>
     Object? shoppingCategories = null,
     Object? preferenceTerms = null,
     Object? ignoreTerms = null,
+    Object? maxSearchesPerRun = null,
   }) {
     return _then(_$UserProfileImpl(
       username: null == username
@@ -184,6 +193,10 @@ class __$$UserProfileImplCopyWithImpl<$Res>
           ? _value._ignoreTerms
           : ignoreTerms // ignore: cast_nullable_to_non_nullable
               as List<String>,
+      maxSearchesPerRun: null == maxSearchesPerRun
+          ? _value.maxSearchesPerRun
+          : maxSearchesPerRun // ignore: cast_nullable_to_non_nullable
+              as int,
     ));
   }
 }
@@ -199,7 +212,8 @@ class _$UserProfileImpl implements _UserProfile {
       this.country = '',
       final List<String> shoppingCategories = const [],
       final List<String> preferenceTerms = const [],
-      final List<String> ignoreTerms = const []})
+      final List<String> ignoreTerms = const [],
+      this.maxSearchesPerRun = defaultMaxSearchesPerRun})
       : _shoppingCategories = shoppingCategories,
         _preferenceTerms = preferenceTerms,
         _ignoreTerms = ignoreTerms;
@@ -248,8 +262,12 @@ class _$UserProfileImpl implements _UserProfile {
   }
 
   @override
+  @JsonKey()
+  final int maxSearchesPerRun;
+
+  @override
   String toString() {
-    return 'UserProfile(username: $username, dob: $dob, profilePhotoUrl: $profilePhotoUrl, gender: $gender, country: $country, shoppingCategories: $shoppingCategories, preferenceTerms: $preferenceTerms, ignoreTerms: $ignoreTerms)';
+    return 'UserProfile(username: $username, dob: $dob, profilePhotoUrl: $profilePhotoUrl, gender: $gender, country: $country, shoppingCategories: $shoppingCategories, preferenceTerms: $preferenceTerms, ignoreTerms: $ignoreTerms, maxSearchesPerRun: $maxSearchesPerRun)';
   }
 
   @override
@@ -269,7 +287,9 @@ class _$UserProfileImpl implements _UserProfile {
             const DeepCollectionEquality()
                 .equals(other._preferenceTerms, _preferenceTerms) &&
             const DeepCollectionEquality()
-                .equals(other._ignoreTerms, _ignoreTerms));
+                .equals(other._ignoreTerms, _ignoreTerms) &&
+            (identical(other.maxSearchesPerRun, maxSearchesPerRun) ||
+                other.maxSearchesPerRun == maxSearchesPerRun));
   }
 
   @override
@@ -282,7 +302,8 @@ class _$UserProfileImpl implements _UserProfile {
       country,
       const DeepCollectionEquality().hash(_shoppingCategories),
       const DeepCollectionEquality().hash(_preferenceTerms),
-      const DeepCollectionEquality().hash(_ignoreTerms));
+      const DeepCollectionEquality().hash(_ignoreTerms),
+      maxSearchesPerRun);
 
   /// Create a copy of UserProfile
   /// with the given fields replaced by the non-null parameter values.
@@ -302,7 +323,8 @@ abstract class _UserProfile implements UserProfile {
       final String country,
       final List<String> shoppingCategories,
       final List<String> preferenceTerms,
-      final List<String> ignoreTerms}) = _$UserProfileImpl;
+      final List<String> ignoreTerms,
+      final int maxSearchesPerRun}) = _$UserProfileImpl;
 
   @override
   String get username;
@@ -320,6 +342,8 @@ abstract class _UserProfile implements UserProfile {
   List<String> get preferenceTerms;
   @override
   List<String> get ignoreTerms;
+  @override
+  int get maxSearchesPerRun;
 
   /// Create a copy of UserProfile
   /// with the given fields replaced by the non-null parameter values.

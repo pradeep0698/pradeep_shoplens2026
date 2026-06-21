@@ -37,6 +37,7 @@ class AnalyzeImageUseCase {
     required List<String> ignoreTerms,
     required List<String> preferenceTerms,
     String?               country,
+    int?                  maxSearches,
   }) async* {
     yield const PipelineEvent(PipelineStep.analyzing);
 
@@ -56,6 +57,7 @@ class AnalyzeImageUseCase {
       ignoreTerms:   ignoreTerms,
       transcript:    '',
       country:       country,
+      maxSearches:   maxSearches,
     ))) {
       switch (event['type']) {
         case 'items':
@@ -98,6 +100,7 @@ class AnalyzeImageUseCase {
         items:           detectedItems,
         ignoreTerms:     ignoreTerms,
         preferenceTerms: preferenceTerms,
+        maxSearches:     maxSearches,
       ));
     }
 
@@ -109,11 +112,13 @@ class AnalyzeImageUseCase {
     required List<String> items,
     required List<String> ignoreTerms,
     required List<String> preferenceTerms,
+    int?                  maxSearches,
   }) async {
     try {
       final matchResponse = await _matcher.match(MatchRequest(
         items:       items,
         ignoreTerms: ignoreTerms,
+        maxSearches: maxSearches,
       ));
       if (matchResponse.matchedProducts.isNotEmpty) {
         final ranked = rankProducts(matchResponse.matchedProducts, preferenceTerms,

@@ -26,6 +26,7 @@ class _ProfileFormState extends State<ProfileForm> {
   late TextEditingController _preferenceTerms;
   late Set<String> _selectedCategories;
   String? _country;
+  late int _maxSearchesPerRun;
 
   String? _localError;
 
@@ -71,6 +72,7 @@ class _ProfileFormState extends State<ProfileForm> {
     _preferenceTerms = TextEditingController(text: p.preferenceTerms.join(', '));
     _selectedCategories = Set<String>.from(p.shoppingCategories);
     _country = p.country.isEmpty ? null : p.country;
+    _maxSearchesPerRun = clampMaxSearchesPerRun(p.maxSearchesPerRun);
   }
 
   @override
@@ -104,6 +106,7 @@ class _ProfileFormState extends State<ProfileForm> {
       shoppingCategories: _selectedCategories.toList(),
       ignoreTerms:        _splitTerms(_ignoreTerms.text),
       preferenceTerms:    _splitTerms(_preferenceTerms.text),
+      maxSearchesPerRun:  _maxSearchesPerRun,
     ));
   }
 
@@ -122,6 +125,7 @@ class _ProfileFormState extends State<ProfileForm> {
           _categorySection(),
           _textArea('Ignore terms', _ignoreTerms, hint: 'item1, item2', hint2: 'Hidden from analysis and matching'),
           _textArea('Preference terms', _preferenceTerms, hint: 'item1, item2', hint2: 'These matches float to the top'),
+          _maxSearchesSection(),
           if (_localError != null)
             Container(
               margin: const EdgeInsets.symmetric(vertical: 8),
@@ -201,6 +205,56 @@ class _ProfileFormState extends State<ProfileForm> {
                         color: selected ? const Color(0xFF34D399) : const Color(0xFFCBD5E1),
                         fontSize: 13,
                         fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+          ],
+        ),
+      );
+
+  Widget _maxSearchesSection() => Padding(
+        padding: const EdgeInsets.only(bottom: 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Search results per scan',
+              style: TextStyle(color: Color(0xFFCBD5E1), fontSize: 13, fontWeight: FontWeight.w500),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'How many product searches to run per scan (1-5). Lower is faster, higher finds more.',
+              style: TextStyle(color: Color(0xFF64748B), fontSize: 11),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: List.generate(maxSearchesPerRunCeiling, (i) => i + 1).map((n) {
+                final selected = n == _maxSearchesPerRun;
+                return GestureDetector(
+                  onTap: () => setState(() => _maxSearchesPerRun = n),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    width: 40,
+                    height: 40,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: selected ? const Color(0xFF34D399).withValues(alpha: 0.15) : Colors.white.withValues(alpha: 0.05),
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: selected ? const Color(0xFF34D399) : Colors.white.withValues(alpha: 0.1),
+                      ),
+                    ),
+                    child: Text(
+                      '$n',
+                      style: TextStyle(
+                        color: selected ? const Color(0xFF34D399) : const Color(0xFFCBD5E1),
+                        fontSize: 14,
+                        fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
                       ),
                     ),
                   ),

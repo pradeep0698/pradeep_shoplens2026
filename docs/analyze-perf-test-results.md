@@ -34,6 +34,21 @@ instance autoscaling) but exercises the real code path end-to-end.
 
 **Update 2026-06-21:** the SerpAPI key was rotated (the old one's quota was exhausted by this session's own testing), unblocking #4. #5 was re-tested with an upscaled (2000×1126) image so the resize path actually executes — see rows 7-8 below. Both show a directionally-favorable but statistically weak signal (small sample sizes, high inherent Gemini-call variance); neither is a strong enough result to call "proven," but neither shows a regression either.
 
+## Summary — `/identify` speedups (2026-06-21)
+
+The "live camera dot" feature's only backend latency is the tap-to-identify
+call (`/identify` → `identify_crop()`) — the dots themselves are rendered
+on-device via ML Kit, no backend round-trip. Three candidates were tested
+against a new fixed-crop fixture (see Identify Log below):
+
+| # | Candidate | Verdict | Shipped? |
+|---|-----------|---------|----------|
+| 1 | Parallelize `_describe_crop` + `_upload_gcs` (were sequential, are independent) | No measurable change (29398ms vs 27940ms baseline median) — GCS upload of a small crop was never the bottleneck. Zero behavior change, zero downside. | Yes (commit `d3b6a24`) |
+| 2 | Drop synchronous GCS delete from `identify_crop` (same fix as `/analyze` perf #3, second call site) | No measurable change (29493ms vs 27940ms baseline median) — same reasoning as #1. | Yes (commit `b816fc7`) |
+| 3 | `gemini-2.5-flash` instead of `gemini-2.5-pro` for the crop description | **Real 44% speedup (15657ms median) but a real accuracy regression** — flash misidentified the test crop as a "wooden cutting board" in 5/6 calls. Lens's image-based matching saved the actual results this time, but the same wrong text feeds the Shopping-fallback query with no image to correct it if Lens ever comes up empty — an untested, believable failure mode. | No — reverted (commit `032bf6c`, attempt kept at `4f1efc6` for traceability) |
+
+**Biggest actionable finding here:** the one candidate with a real, unambiguous latency win was also the one with a real, unambiguous quality regression — and the quality problem only showed up by actually reading the Gemini output, not just the latency number or the final product count (which looked fine by coincidence). Speed and correctness are separate questions; a clean time_ms result doesn't vouch for the content.
+
 ## Log
 
 | # | Date | Change under test | Model | time_ms (5 runs, median bolded) | items | products | warnings | notes |

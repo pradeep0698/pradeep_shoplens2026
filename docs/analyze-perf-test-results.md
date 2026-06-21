@@ -47,6 +47,22 @@ instance autoscaling) but exercises the real code path end-to-end.
 | 7 | 2026-06-21 | #4 re-validation — shared `requests.Session()`, SerpAPI key rotated (old one's quota was exhausted) | gemini-2.5-pro | 59204, 54334, 88904, 84126, **61230** | 18-25 | 5, 5, 5, 5, 4 | iter 5 had 1 "Lens + Shopping both empty" warning (non-fatal) | **New SerpAPI key (`...56f0aeaca`) confirmed working** — `products` counts back to normal (4-5 per run), no `SERP_QUOTA_EXCEEDED`. Median 61230ms vs. 67691ms baseline (~9.5% faster), directionally consistent with the expected (modest) connection-reuse benefit, but individual samples still span 54-89s — this harness's per-call noise floor is wide enough that a single 5-run set can't cleanly separate a ~10% effect from chance. Treat as weak supporting evidence, not proof. Key rotated in `github-secrets-dev` and on Cloud Run (`ai-analyzer` rev `ai-analyzer-00011-sl6`, `product-matcher` rev `product-matcher-00005-zcx`) via `gcloud run services update --update-env-vars` (preserves other env vars, unlike `--set-env-vars`). |
 | 8 | 2026-06-21 | #5 re-validation — resize, tested against an upscaled 2000×1126 image (2x the original) so the resize path actually executes | gemini-2.5-pro | n/a (one-off curl test, not the standard 5-run harness) | n/a | n/a | n/a | **Gemini-only latency** (log timestamps, 3 samples each): **with resize** (current code, rev `ai-analyzer-00011-sl6`): 39.53s, 73.56s, 31.78s → median **39.53s**. **Without resize** (`max_dimension=1280` temporarily removed for this test only, not committed, rev `ai-analyzer-00012-jvv`): 31.30s, 54.04s, 47.00s → median **47.00s**. Resize is ~16% faster directionally, consistent with the doc's claim, but n=3 per group is too small to be confident given this pipeline's per-call variance (individual samples range 31-89s in *both* groups, overlapping). Real signal, but call it suggestive rather than proven — would need a larger sample (10+ runs per group) for real confidence. Test artifacts (a 2000×1126 JPEG upscaled from the fixed test image, and its JSON payload) were one-off, not committed, and deleted after the test — regenerate via `Image.open(...).resize((w*2, h*2))` on the fixed test image if re-running this. Service was redeployed from the real committed code (rev `ai-analyzer-00013-4td`) immediately after this test, restoring resize. |
 
+## Identify Log (`/identify` — tap-to-identify, the "live camera dot" feature's backend call)
+
+Same fixed-input methodology as the Log above, but using the **"2. Identify -
+Fixed Crop"** request (see `postman/README.md`) instead of "1. Analyze".
+This endpoint is what fires when a user taps a detected dot in the mobile
+app's live camera view — `identify_crop()` in
+[analyzer.py](../services/ai-analyzer/analyzer.py): Gemini description →
+GCS upload → Google Lens, skipping Gemini's multi-object detection (the
+region is already selected client-side). Candidates tested here are not
+from `analyzePerfomanceImprovement.md` (that doc only covers `/analyze`) —
+they were identified by inspecting `identify_crop()`'s own critical path.
+
+| # | Date | Change under test | Model | time_ms (5 runs, median bolded) | products | warnings | notes |
+|---|------|--------------------|-------|---------|----------|----------|-------|
+| 1 | 2026-06-21 | Baseline (no changes) | gemini-2.5-pro | 35014, **27940**, 22192, 46131, 18439 | 5, 5, 5, 0, 5 | iter 4 had "No results found" (Lens + Shopping both empty, no SERP_QUOTA warning — genuine miss, not quota) | Deployed current `main` as-is (rev `ai-analyzer-00013-4td`) before any `/identify`-specific changes. Much faster than `/analyze` (~28s vs ~67s median) since it skips Gemini's multi-object detection — single Gemini description call + one Lens lookup instead of N. |
+
 ## How to add a row
 
 1. Apply (or revert) exactly one change from `analyzePerfomanceImprovement.md`.

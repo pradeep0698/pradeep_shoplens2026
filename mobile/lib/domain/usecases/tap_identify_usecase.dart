@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/utils/image_utils.dart';
 import '../../core/utils/product_ranker.dart';
 import '../../data/models/analyze_request.dart';
+import '../../data/models/product.dart';
 import '../../data/sources/remote/analyzer_api.dart';
 import '../../data/sources/remote/session_api.dart';
 
@@ -40,9 +41,23 @@ class TapIdentifyUseCase {
             isExactMatchSource: true)
         .take(5)
         .toList();
-    await _session.clearSession(sessionId);
-    await _session.saveProducts(sessionId, ranked);
+
+    // Merge with whatever's already in the session instead of overwriting —
+    // each tap should add to the shopping list, not replace it.
+    final existing = await _session.loadSession(sessionId);
+    final merged = _mergeProducts(existing, ranked);
+    await _session.saveProducts(sessionId, merged);
     return ranked.first.name;
+  }
+
+  /// Combines [existing] with [newProducts], deduping by productId. New
+  /// matches win on conflict (fresher data for the same product).
+  List<Product> _mergeProducts(List<Product> existing, List<Product> newProducts) {
+    final byId = {for (final p in existing) p.productId: p};
+    for (final p in newProducts) {
+      byId[p.productId] = p;
+    }
+    return byId.values.toList();
   }
 }
 

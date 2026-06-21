@@ -555,7 +555,28 @@ class _TapResultBar extends StatelessWidget {
             ],
           ),
         ),
-      TapIdentifySuccess() => const SizedBox(height: 8),
+      TapIdentifySuccess(productName: final name) => Padding(
+          padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+          child: name != null
+              ? Row(
+                  children: [
+                    const Icon(Icons.check_circle_outline, size: 14, color: Color(0xFF34D399)),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Added: $name',
+                        style: const TextStyle(color: Color(0xFF6EE7B7), fontSize: 12),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                )
+              : const Text(
+                  'No matching product found',
+                  style: TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
+                ),
+        ),
       TapIdentifyError(message: final msg) => Padding(
           padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
           child: Text(

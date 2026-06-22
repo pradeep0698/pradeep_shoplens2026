@@ -22,6 +22,7 @@ mixin _$PipelineState {
   bool get isRetryable => throw _privateConstructorUsedError;
   List<String> get warnings => throw _privateConstructorUsedError;
   Uint8List? get imageBytes => throw _privateConstructorUsedError;
+  bool get fromLiveScan => throw _privateConstructorUsedError;
 
   /// Create a copy of PipelineState
   /// with the given fields replaced by the non-null parameter values.
@@ -42,7 +43,8 @@ abstract class $PipelineStateCopyWith<$Res> {
       AnalyzerErrorCode? errorCode,
       bool isRetryable,
       List<String> warnings,
-      Uint8List? imageBytes});
+      Uint8List? imageBytes,
+      bool fromLiveScan});
 }
 
 /// @nodoc
@@ -66,6 +68,7 @@ class _$PipelineStateCopyWithImpl<$Res, $Val extends PipelineState>
     Object? isRetryable = null,
     Object? warnings = null,
     Object? imageBytes = freezed,
+    Object? fromLiveScan = null,
   }) {
     return _then(_value.copyWith(
       status: null == status
@@ -92,6 +95,10 @@ class _$PipelineStateCopyWithImpl<$Res, $Val extends PipelineState>
           ? _value.imageBytes
           : imageBytes // ignore: cast_nullable_to_non_nullable
               as Uint8List?,
+      fromLiveScan: null == fromLiveScan
+          ? _value.fromLiveScan
+          : fromLiveScan // ignore: cast_nullable_to_non_nullable
+              as bool,
     ) as $Val);
   }
 }
@@ -110,7 +117,8 @@ abstract class _$$PipelineStateImplCopyWith<$Res>
       AnalyzerErrorCode? errorCode,
       bool isRetryable,
       List<String> warnings,
-      Uint8List? imageBytes});
+      Uint8List? imageBytes,
+      bool fromLiveScan});
 }
 
 /// @nodoc
@@ -132,6 +140,7 @@ class __$$PipelineStateImplCopyWithImpl<$Res>
     Object? isRetryable = null,
     Object? warnings = null,
     Object? imageBytes = freezed,
+    Object? fromLiveScan = null,
   }) {
     return _then(_$PipelineStateImpl(
       status: null == status
@@ -158,6 +167,10 @@ class __$$PipelineStateImplCopyWithImpl<$Res>
           ? _value.imageBytes
           : imageBytes // ignore: cast_nullable_to_non_nullable
               as Uint8List?,
+      fromLiveScan: null == fromLiveScan
+          ? _value.fromLiveScan
+          : fromLiveScan // ignore: cast_nullable_to_non_nullable
+              as bool,
     ));
   }
 }
@@ -171,7 +184,8 @@ class _$PipelineStateImpl implements _PipelineState {
       this.errorCode,
       this.isRetryable = false,
       final List<String> warnings = const [],
-      this.imageBytes})
+      this.imageBytes,
+      this.fromLiveScan = false})
       : _warnings = warnings;
 
   @override
@@ -195,10 +209,13 @@ class _$PipelineStateImpl implements _PipelineState {
 
   @override
   final Uint8List? imageBytes;
+  @override
+  @JsonKey()
+  final bool fromLiveScan;
 
   @override
   String toString() {
-    return 'PipelineState(status: $status, errorMessage: $errorMessage, errorCode: $errorCode, isRetryable: $isRetryable, warnings: $warnings, imageBytes: $imageBytes)';
+    return 'PipelineState(status: $status, errorMessage: $errorMessage, errorCode: $errorCode, isRetryable: $isRetryable, warnings: $warnings, imageBytes: $imageBytes, fromLiveScan: $fromLiveScan)';
   }
 
   @override
@@ -215,7 +232,9 @@ class _$PipelineStateImpl implements _PipelineState {
                 other.isRetryable == isRetryable) &&
             const DeepCollectionEquality().equals(other._warnings, _warnings) &&
             const DeepCollectionEquality()
-                .equals(other.imageBytes, imageBytes));
+                .equals(other.imageBytes, imageBytes) &&
+            (identical(other.fromLiveScan, fromLiveScan) ||
+                other.fromLiveScan == fromLiveScan));
   }
 
   @override
@@ -226,7 +245,8 @@ class _$PipelineStateImpl implements _PipelineState {
       errorCode,
       isRetryable,
       const DeepCollectionEquality().hash(_warnings),
-      const DeepCollectionEquality().hash(imageBytes));
+      const DeepCollectionEquality().hash(imageBytes),
+      fromLiveScan);
 
   /// Create a copy of PipelineState
   /// with the given fields replaced by the non-null parameter values.
@@ -244,7 +264,8 @@ abstract class _PipelineState implements PipelineState {
       final AnalyzerErrorCode? errorCode,
       final bool isRetryable,
       final List<String> warnings,
-      final Uint8List? imageBytes}) = _$PipelineStateImpl;
+      final Uint8List? imageBytes,
+      final bool fromLiveScan}) = _$PipelineStateImpl;
 
   @override
   PipelineStatus get status;
@@ -258,6 +279,8 @@ abstract class _PipelineState implements PipelineState {
   List<String> get warnings;
   @override
   Uint8List? get imageBytes;
+  @override
+  bool get fromLiveScan;
 
   /// Create a copy of PipelineState
   /// with the given fields replaced by the non-null parameter values.

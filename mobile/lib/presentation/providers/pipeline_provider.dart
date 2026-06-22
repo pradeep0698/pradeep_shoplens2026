@@ -22,11 +22,13 @@ class PipelineState with _$PipelineState {
     @Default(false) bool isRetryable,
     @Default([]) List<String> warnings,
     Uint8List? imageBytes,
+    @Default(false) bool fromLiveScan,
   }) = _PipelineState;
 }
 
 class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
   String? _mimeType;
+  bool _fromLiveScan = false;
 
   @override PipelineState build() => const PipelineState();
 
@@ -38,9 +40,10 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
 
   /// Load an image without running analysis. Clears the session so the
   /// shopping list resets immediately when a new image is loaded.
-  Future<void> setImage(Uint8List bytes, String mimeType) async {
+  Future<void> setImage(Uint8List bytes, String mimeType, {bool fromLiveScan = false}) async {
     _mimeType = mimeType;
-    state = PipelineState(status: PipelineStatus.idle, imageBytes: bytes);
+    _fromLiveScan = fromLiveScan;
+    state = PipelineState(status: PipelineStatus.idle, imageBytes: bytes, fromLiveScan: fromLiveScan);
     final user = ref.read(authStateProvider).value;
     if (user != null) await _clearSession(getSessionId(user.uid));
   }
@@ -60,7 +63,7 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
 
     final sessionId = getSessionId(user.uid);
     await _clearSession(sessionId);
-    state = PipelineState(status: PipelineStatus.analyzing, imageBytes: bytes);
+    state = PipelineState(status: PipelineStatus.analyzing, imageBytes: bytes, fromLiveScan: _fromLiveScan);
     await ref.read(sessionRepositoryProvider).clear(sessionId);
 
     try {
@@ -75,6 +78,7 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
       )) {
         state = PipelineState(
           imageBytes: bytes,
+          fromLiveScan: _fromLiveScan,
           status: switch (event.step) {
             PipelineStep.analyzing => PipelineStatus.analyzing,
             PipelineStep.matching  => PipelineStatus.matching,
@@ -90,9 +94,10 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
         errorMessage: e.displayMessage,
         errorCode: e.code,
         isRetryable: e.isRetryable,
+        fromLiveScan: _fromLiveScan,
       );
     } catch (e) {
-      state = PipelineState(status: PipelineStatus.error, errorMessage: e.toString());
+      state = PipelineState(status: PipelineStatus.error, errorMessage: e.toString(), fromLiveScan: _fromLiveScan);
     }
   }
 
@@ -100,10 +105,14 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
     final user = ref.read(authStateProvider).value;
     if (user == null) return;
     await _clearSession(getSessionId(user.uid));
+    _fromLiveScan = false;
     state = const PipelineState();
   }
 
-  void resetImage() => state = const PipelineState();
+  void resetImage() {
+    _fromLiveScan = false;
+    state = const PipelineState();
+  }
 }
 
 final pipelineProvider =

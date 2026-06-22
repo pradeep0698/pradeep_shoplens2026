@@ -29,8 +29,34 @@ bool isPreferred(Product product, List<String> shoppingCategories) {
   return false;
 }
 
-/// Ranks [products] by category preference, then — for non-exact-match sources —
-/// sinks $0.00 items toward the bottom so priced results surface first.
+bool _matchesPreferenceTerms(Product product, List<String> preferenceTerms) {
+  if (preferenceTerms.isEmpty) return false;
+  final haystack = '${product.name} ${product.seller ?? ''}'.toLowerCase();
+  return preferenceTerms.any((term) {
+    final needle = term.trim().toLowerCase();
+    return needle.isNotEmpty && haystack.contains(needle);
+  });
+}
+
+/// Within [products], sinks nothing — just moves preference-term matches to
+/// the front. Free-text style/brand/material words (e.g. "minimalist", "Nike")
+/// don't map to the 8 fixed categories, so this matches against product name
+/// and seller text directly, independent of [isPreferred]'s category logic.
+List<Product> _boostByPreferenceTerms(List<Product> products, List<String> preferenceTerms) {
+  if (preferenceTerms.isEmpty) return products;
+  final matched   = <Product>[];
+  final unmatched = <Product>[];
+  for (final product in products) {
+    _matchesPreferenceTerms(product, preferenceTerms)
+        ? matched.add(product)
+        : unmatched.add(product);
+  }
+  return [...matched, ...unmatched];
+}
+
+/// Ranks [products] by category preference, then by [preferenceTerms]
+/// (additive boost within each category bucket), then — for non-exact-match
+/// sources — sinks $0.00 items toward the bottom so priced results surface first.
 ///
 /// [isExactMatchSource] should be `true` when [products] came directly from
 /// Google Lens's visual match on the photo (the literal item the camera saw),
@@ -40,6 +66,7 @@ bool isPreferred(Product product, List<String> shoppingCategories) {
 List<Product> rankProducts(
   List<Product> products,
   List<String> shoppingCategories, {
+  List<String> preferenceTerms = const [],
   required bool isExactMatchSource,
 }) {
   List<Product> ranked = products;
@@ -51,7 +78,12 @@ List<Product> rankProducts(
           ? preferred.add(product)
           : rest.add(product);
     }
-    ranked = [...preferred, ...rest];
+    ranked = [
+      ..._boostByPreferenceTerms(preferred, preferenceTerms),
+      ..._boostByPreferenceTerms(rest, preferenceTerms),
+    ];
+  } else {
+    ranked = _boostByPreferenceTerms(products, preferenceTerms);
   }
 
   if (isExactMatchSource) return ranked;

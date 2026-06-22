@@ -21,6 +21,7 @@ class TapIdentifyUseCase {
     required String       sessionId,
     required List<String> ignoreTerms,
     required List<String> preferenceTerms,
+    List<String>          shoppingCategories = const [],
     String?               query,
     String?               country,
   }) async {
@@ -37,8 +38,8 @@ class TapIdentifyUseCase {
 
     if (analyzeResponse.products.isEmpty) return null;
 
-    final ranked = rankProducts(analyzeResponse.products, preferenceTerms,
-            isExactMatchSource: true)
+    final ranked = rankProducts(analyzeResponse.products, shoppingCategories,
+            preferenceTerms: preferenceTerms, isExactMatchSource: true)
         .take(5)
         .toList();
 

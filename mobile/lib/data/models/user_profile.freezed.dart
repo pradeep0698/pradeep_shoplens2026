@@ -25,6 +25,7 @@ mixin _$UserProfile {
   List<String> get preferenceTerms => throw _privateConstructorUsedError;
   List<String> get ignoreTerms => throw _privateConstructorUsedError;
   int get maxSearchesPerRun => throw _privateConstructorUsedError;
+  bool get voiceOnboardingSeen => throw _privateConstructorUsedError;
 
   /// Create a copy of UserProfile
   /// with the given fields replaced by the non-null parameter values.
@@ -48,7 +49,8 @@ abstract class $UserProfileCopyWith<$Res> {
       List<String> shoppingCategories,
       List<String> preferenceTerms,
       List<String> ignoreTerms,
-      int maxSearchesPerRun});
+      int maxSearchesPerRun,
+      bool voiceOnboardingSeen});
 }
 
 /// @nodoc
@@ -75,6 +77,7 @@ class _$UserProfileCopyWithImpl<$Res, $Val extends UserProfile>
     Object? preferenceTerms = null,
     Object? ignoreTerms = null,
     Object? maxSearchesPerRun = null,
+    Object? voiceOnboardingSeen = null,
   }) {
     return _then(_value.copyWith(
       username: null == username
@@ -113,6 +116,10 @@ class _$UserProfileCopyWithImpl<$Res, $Val extends UserProfile>
           ? _value.maxSearchesPerRun
           : maxSearchesPerRun // ignore: cast_nullable_to_non_nullable
               as int,
+      voiceOnboardingSeen: null == voiceOnboardingSeen
+          ? _value.voiceOnboardingSeen
+          : voiceOnboardingSeen // ignore: cast_nullable_to_non_nullable
+              as bool,
     ) as $Val);
   }
 }
@@ -134,7 +141,8 @@ abstract class _$$UserProfileImplCopyWith<$Res>
       List<String> shoppingCategories,
       List<String> preferenceTerms,
       List<String> ignoreTerms,
-      int maxSearchesPerRun});
+      int maxSearchesPerRun,
+      bool voiceOnboardingSeen});
 }
 
 /// @nodoc
@@ -159,6 +167,7 @@ class __$$UserProfileImplCopyWithImpl<$Res>
     Object? preferenceTerms = null,
     Object? ignoreTerms = null,
     Object? maxSearchesPerRun = null,
+    Object? voiceOnboardingSeen = null,
   }) {
     return _then(_$UserProfileImpl(
       username: null == username
@@ -197,6 +206,10 @@ class __$$UserProfileImplCopyWithImpl<$Res>
           ? _value.maxSearchesPerRun
           : maxSearchesPerRun // ignore: cast_nullable_to_non_nullable
               as int,
+      voiceOnboardingSeen: null == voiceOnboardingSeen
+          ? _value.voiceOnboardingSeen
+          : voiceOnboardingSeen // ignore: cast_nullable_to_non_nullable
+              as bool,
     ));
   }
 }
@@ -213,7 +226,8 @@ class _$UserProfileImpl implements _UserProfile {
       final List<String> shoppingCategories = const [],
       final List<String> preferenceTerms = const [],
       final List<String> ignoreTerms = const [],
-      this.maxSearchesPerRun = defaultMaxSearchesPerRun})
+      this.maxSearchesPerRun = defaultMaxSearchesPerRun,
+      this.voiceOnboardingSeen = false})
       : _shoppingCategories = shoppingCategories,
         _preferenceTerms = preferenceTerms,
         _ignoreTerms = ignoreTerms;
@@ -264,10 +278,13 @@ class _$UserProfileImpl implements _UserProfile {
   @override
   @JsonKey()
   final int maxSearchesPerRun;
+  @override
+  @JsonKey()
+  final bool voiceOnboardingSeen;
 
   @override
   String toString() {
-    return 'UserProfile(username: $username, dob: $dob, profilePhotoUrl: $profilePhotoUrl, gender: $gender, country: $country, shoppingCategories: $shoppingCategories, preferenceTerms: $preferenceTerms, ignoreTerms: $ignoreTerms, maxSearchesPerRun: $maxSearchesPerRun)';
+    return 'UserProfile(username: $username, dob: $dob, profilePhotoUrl: $profilePhotoUrl, gender: $gender, country: $country, shoppingCategories: $shoppingCategories, preferenceTerms: $preferenceTerms, ignoreTerms: $ignoreTerms, maxSearchesPerRun: $maxSearchesPerRun, voiceOnboardingSeen: $voiceOnboardingSeen)';
   }
 
   @override
@@ -289,7 +306,9 @@ class _$UserProfileImpl implements _UserProfile {
             const DeepCollectionEquality()
                 .equals(other._ignoreTerms, _ignoreTerms) &&
             (identical(other.maxSearchesPerRun, maxSearchesPerRun) ||
-                other.maxSearchesPerRun == maxSearchesPerRun));
+                other.maxSearchesPerRun == maxSearchesPerRun) &&
+            (identical(other.voiceOnboardingSeen, voiceOnboardingSeen) ||
+                other.voiceOnboardingSeen == voiceOnboardingSeen));
   }
 
   @override
@@ -303,7 +322,8 @@ class _$UserProfileImpl implements _UserProfile {
       const DeepCollectionEquality().hash(_shoppingCategories),
       const DeepCollectionEquality().hash(_preferenceTerms),
       const DeepCollectionEquality().hash(_ignoreTerms),
-      maxSearchesPerRun);
+      maxSearchesPerRun,
+      voiceOnboardingSeen);
 
   /// Create a copy of UserProfile
   /// with the given fields replaced by the non-null parameter values.
@@ -324,7 +344,8 @@ abstract class _UserProfile implements UserProfile {
       final List<String> shoppingCategories,
       final List<String> preferenceTerms,
       final List<String> ignoreTerms,
-      final int maxSearchesPerRun}) = _$UserProfileImpl;
+      final int maxSearchesPerRun,
+      final bool voiceOnboardingSeen}) = _$UserProfileImpl;
 
   @override
   String get username;
@@ -344,6 +365,8 @@ abstract class _UserProfile implements UserProfile {
   List<String> get ignoreTerms;
   @override
   int get maxSearchesPerRun;
+  @override
+  bool get voiceOnboardingSeen;
 
   /// Create a copy of UserProfile
   /// with the given fields replaced by the non-null parameter values.

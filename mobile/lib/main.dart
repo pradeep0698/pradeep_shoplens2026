@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -26,6 +27,15 @@ void main() async {
   await dotenv.load(fileName: '.env');
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   FirebaseFirestore.instance.settings = const Settings(persistenceEnabled: false);
+
+  // TEMPORARY: local Auth/Firestore emulators, used while shoplens-dev-499700
+  // is inaccessible (see firebase.json's `emulators` block for ports). Remove
+  // once real project access is restored.
+  if (dotenv.env['USE_FIREBASE_EMULATOR'] == 'true') {
+    const host = kIsWeb ? 'localhost' : '127.0.0.1';
+    await FirebaseAuth.instance.useAuthEmulator(host, 9099);
+    FirebaseFirestore.instance.useFirestoreEmulator(host, 8090);
+  }
 
   // FCM background handler spawns a second Flutter engine — skip on web and
   // when running with --dart-define=NO_FCM=true (useful for emulators).

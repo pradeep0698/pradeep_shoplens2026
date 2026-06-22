@@ -27,30 +27,33 @@ class UserProfile with _$UserProfile {
     @Default([]) List<String> preferenceTerms,
     @Default([]) List<String> ignoreTerms,
     @Default(defaultMaxSearchesPerRun) int maxSearchesPerRun,
+    @Default(false) bool voiceOnboardingSeen,
   }) = _UserProfile;
 
   // Field names must match existing Firestore UserProfiles documents exactly
   factory UserProfile.fromFirestore(Map<String, dynamic> data) => UserProfile(
-        username:           data['username']           as String? ?? '',
-        dob:                data['dob']                as String? ?? '',
-        profilePhotoUrl:    data['profile_photo_url']  as String? ?? '',
-        gender:             data['gender']             as String? ?? '',
-        country:            data['country']            as String? ?? '',
-        shoppingCategories: List<String>.from(data['shopping_categories'] ?? []),
-        preferenceTerms:    List<String>.from(data['preference_terms']    ?? []),
-        ignoreTerms:        List<String>.from(data['ignore_terms']        ?? []),
-        maxSearchesPerRun:  clampMaxSearchesPerRun(data['max_searches_per_run'] as int?),
+        username:            data['username']           as String? ?? '',
+        dob:                 data['dob']                as String? ?? '',
+        profilePhotoUrl:     data['profile_photo_url']  as String? ?? '',
+        gender:              data['gender']             as String? ?? '',
+        country:             data['country']            as String? ?? '',
+        shoppingCategories:  List<String>.from(data['shopping_categories'] ?? []),
+        preferenceTerms:     List<String>.from(data['preference_terms']    ?? []),
+        ignoreTerms:         List<String>.from(data['ignore_terms']        ?? []),
+        maxSearchesPerRun:   clampMaxSearchesPerRun(data['max_searches_per_run'] as int?),
+        voiceOnboardingSeen: data['voice_onboarding_seen'] as bool? ?? false,
       );
 
   static Map<String, dynamic> toFirestore(UserProfile p) => {
-        'username':            p.username,
-        'dob':                 p.dob,
-        'profile_photo_url':   p.profilePhotoUrl,
-        'gender':              p.gender,
-        'country':             p.country,
-        'shopping_categories': p.shoppingCategories,
-        'preference_terms':    p.preferenceTerms,
-        'ignore_terms':        p.ignoreTerms,
-        'max_searches_per_run': p.maxSearchesPerRun,
+        'username':              p.username,
+        'dob':                   p.dob,
+        'profile_photo_url':     p.profilePhotoUrl,
+        'gender':                p.gender,
+        'country':               p.country,
+        'shopping_categories':   p.shoppingCategories,
+        'preference_terms':      p.preferenceTerms,
+        'ignore_terms':          p.ignoreTerms,
+        'max_searches_per_run':  p.maxSearchesPerRun,
+        'voice_onboarding_seen': p.voiceOnboardingSeen,
       };
 }

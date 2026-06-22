@@ -10,6 +10,7 @@ import '../../core/utils/image_utils.dart';
 import '../../core/utils/product_ranker.dart';
 import '../../core/utils/session_id.dart';
 import '../../data/models/user_profile.dart';
+import '../../data/repositories/profile_repository.dart';
 import '../../domain/usecases/tap_identify_usecase.dart';
 import '../../domain/usecases/video_analyze_usecase.dart';
 import 'video_player_screen.dart';
@@ -19,11 +20,13 @@ import '../providers/pipeline_provider.dart';
 import '../providers/profile_provider.dart';
 import '../providers/shopping_list_provider.dart';
 import '../providers/video_provider.dart';
+import '../widgets/chatbot_fab.dart';
 import '../widgets/info_tooltip_icon.dart';
 import '../widgets/pipeline_status_bar.dart';
 import '../widgets/product_card.dart';
 import '../widgets/sync_indicator.dart';
 import '../widgets/tap_target_detector.dart';
+import '../widgets/voice_assistant_overlay.dart';
 
 class MainScreen extends ConsumerStatefulWidget {
   const MainScreen({super.key});
@@ -37,11 +40,35 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   final _tapKey = GlobalKey<TapTargetDetectorState>();
   bool  _productCheckSettled = false;
   Timer? _productCheckTimer;
+  bool  _onboardingTriggered = false;
 
   @override
   void dispose() {
     _productCheckTimer?.cancel();
     super.dispose();
+  }
+
+  // Shows the voice assistant once, the first time the resolved profile comes
+  // back with voiceOnboardingSeen == false — fires off the loading frame, not
+  // on a default-constructed UserProfile (see plan risk #7).
+  Future<void> _maybeShowOnboarding(UserProfile resolvedProfile) async {
+    if (_onboardingTriggered || resolvedProfile.voiceOnboardingSeen) return;
+    _onboardingTriggered = true;
+
+    await showVoiceAssistantOverlay(context, isOnboarding: true);
+    if (!mounted) return;
+
+    final user = ref.read(authStateProvider).value;
+    if (user == null) return;
+    // Re-read the freshest profile rather than reusing the stale snapshot —
+    // a finalized voice session may have already merged new preferences into
+    // Firestore server-side while the overlay was open.
+    final latest = ref.read(profileProvider).value ?? resolvedProfile;
+    if (latest.voiceOnboardingSeen) return;
+    await ref.read(profileRepositoryProvider).save(
+          user.uid,
+          latest.copyWith(voiceOnboardingSeen: true),
+        );
   }
 
   @override
@@ -70,6 +97,10 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     final shoppingCategories = profile?.shoppingCategories ?? const [];
     final isAdmin            = ref.watch(isAdminProvider).value ?? false;
     final hasSelection       = _tapKey.currentState?.hasSelection ?? false;
+
+    if (profile != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowOnboarding(profile));
+    }
 
     final isBusy = pipeline.status == PipelineStatus.analyzing ||
                    pipeline.status == PipelineStatus.matching   ||
@@ -340,6 +371,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
           ],
         ),
       ),
+      floatingActionButton: const ChatbotFab(),
     );
   }
 
@@ -539,11 +571,12 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     if (user == null) return null;
 
     return ref.read(tapIdentifyUseCaseProvider).identify(
-      croppedBytes:    croppedBytes,
-      sessionId:       getSessionId(user.uid),
-      ignoreTerms:     profile.ignoreTerms,
-      preferenceTerms: profile.preferenceTerms,
-      country:         profile.country.isEmpty ? null : profile.country,
+      croppedBytes:       croppedBytes,
+      sessionId:          getSessionId(user.uid),
+      ignoreTerms:        profile.ignoreTerms,
+      preferenceTerms:    profile.preferenceTerms,
+      shoppingCategories: profile.shoppingCategories,
+      country:            profile.country.isEmpty ? null : profile.country,
     );
   }
 

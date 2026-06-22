@@ -16,8 +16,8 @@ workflows:
       - name: Inject secrets
         script: |
           echo $GOOGLE_SERVICE_INFO_PLIST | base64 --decode > ios/Runner/GoogleService-Info.plist
-          printf "ANALYZER_API_URL=%s\nMATCHER_API_URL=%s\nSTATE_API_URL=%s\n" \
-            "$ANALYZER_API_URL" "$MATCHER_API_URL" "$STATE_API_URL" > .env
+          printf "ANALYZER_API_URL=%s\nMATCHER_API_URL=%s\nSTATE_API_URL=%s\nVOICE_ASSISTANT_API_URL=%s\n" \
+            "$ANALYZER_API_URL" "$MATCHER_API_URL" "$STATE_API_URL" "$VOICE_ASSISTANT_API_URL" > .env
       - name: Flutter pub get
         script: flutter pub get
       - name: Install CocoaPods

@@ -240,10 +240,15 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
             children: [
               const Icon(Icons.error_outline, color: _kError, size: 40),
               const SizedBox(height: 12),
-              Text(
-                state.errorMessage ?? 'Something went wrong.',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: _kMuted, fontSize: 13),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 280),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    state.errorMessage ?? 'Something went wrong.',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: _kMuted, fontSize: 13),
+                  ),
+                ),
               ),
               const SizedBox(height: 16),
               ElevatedButton(

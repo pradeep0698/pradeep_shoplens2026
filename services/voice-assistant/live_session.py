@@ -797,9 +797,21 @@ async def _run_pumps(websocket: WebSocket, gemini_session, session: SessionState
                 raise exc
         return bool(done)
     finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
+        # Reached not just on a clean return but also when our own caller
+        # cancels us (e.g. _watch_inactivity finishing first) while we're
+        # awaiting the asyncio.wait above — that CancelledError skips
+        # straight past the done/pending handling in the try block, so
+        # client_task/gemini_task can still be running here. Cancelling them
+        # without awaiting would abandon them mid-flight: one of them
+        # hitting the now-dead websocket and raising (e.g.
+        # WebSocketDisconnect) with nobody left to retrieve the exception
+        # surfaces as an "exception was never retrieved" log on GC instead
+        # of being handled.
+        leftover = [task for task in tasks if not task.done()]
+        for task in leftover:
+            task.cancel()
+        if leftover:
+            await asyncio.gather(*leftover, return_exceptions=True)
 
 
 async def _send_timeout_nudge(gemini_session) -> None:

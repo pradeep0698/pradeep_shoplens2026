@@ -125,8 +125,12 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
       // turn lands (see live_session.py's _send_greeting_trigger) — it
       // arrives as a normal transcript/audio frame, same as any other turn.
       state = state.copyWith(status: VoiceStatus.listening);
-    } catch (e) {
-      state = state.copyWith(status: VoiceStatus.error, errorMessage: e.toString());
+    } catch (e, st) {
+      // Stack trace is included here (not just e.toString()) purely as a
+      // temporary diagnostic aid since this path is hard to attach a
+      // debugger to on a real device — remove once the cause is found.
+      final frames = st.toString().split('\n').take(8).join('\n');
+      state = state.copyWith(status: VoiceStatus.error, errorMessage: '$e\n\n$frames');
     }
   }
 

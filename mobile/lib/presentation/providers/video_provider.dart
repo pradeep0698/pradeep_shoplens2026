@@ -151,11 +151,12 @@ class VideoNotifier extends Notifier<VideoState> {
 
     try {
       await for (final step in ref.read(videoAnalyzeUseCaseProvider).analyzeAndCache(
-        frameBytes:      frameBytes,
-        fileName:        fileName,
-        sessionId:       sessionId,
-        ignoreTerms:     profile.ignoreTerms,
-        preferenceTerms: profile.preferenceTerms,
+        frameBytes:         frameBytes,
+        fileName:           fileName,
+        sessionId:          sessionId,
+        ignoreTerms:        profile.ignoreTerms,
+        preferenceTerms:    profile.preferenceTerms,
+        shoppingCategories: profile.shoppingCategories,
       )) {
         state = VideoAnalyzing(step: step, fileName: fileName, thumbnail: thumbnail);
       }

@@ -52,15 +52,17 @@ class VideoAnalyzeUseCase {
     required String       sessionId,
     required List<String> ignoreTerms,
     required List<String> preferenceTerms,
+    List<String>          shoppingCategories = const [],
   }) async* {
     await _session.clearSession(sessionId);
 
     await for (final event in _analyzeUseCase.execute(
-      imageBytes:      frameBytes,
-      mimeType:        _mimeFromBytes(frameBytes),
-      sessionId:       sessionId,
-      ignoreTerms:     ignoreTerms,
-      preferenceTerms: preferenceTerms,
+      imageBytes:         frameBytes,
+      mimeType:           _mimeFromBytes(frameBytes),
+      sessionId:          sessionId,
+      ignoreTerms:        ignoreTerms,
+      preferenceTerms:    preferenceTerms,
+      shoppingCategories: shoppingCategories,
     )) {
       if (event.step != PipelineStep.done) {
         yield switch (event.step) {

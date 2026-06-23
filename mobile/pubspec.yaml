@@ -3,7 +3,7 @@ description: ShopLens Flutter app — connects to existing GCP backend
 
 publish_to: 'none'
 
-version: 1.29.0
+version: 2.1.0
 
 environment:
   sdk: '>=3.4.0 <4.0.0'
@@ -55,6 +55,19 @@ dependencies:
   # Data models
   freezed_annotation:   ^2.4.4
   json_annotation:      ^4.9.0
+
+  # Voice assistant — mic capture + WebSocket relay to services/voice-assistant
+  record:               ^7.1.0
+  web_socket_channel:   ^3.0.1
+  permission_handler:   ^11.3.0
+  # flutter_pcm_sound has zero web support; flutter_sound's stream-playback
+  # path (alpha-quality on web, stable on Android/iOS/macOS) covers all the
+  # platforms this app targets with one package.
+  flutter_sound:        ^9.27.0
+  # Used directly (not just transitively via record_web/flutter_sound_web) to
+  # probe the browser's real AudioContext sample rate — see
+  # core/utils/web_audio_sample_rate_web.dart.
+  web:                  ^1.1.0
 
 dev_dependencies:
   build_runner:           ^2.4.11

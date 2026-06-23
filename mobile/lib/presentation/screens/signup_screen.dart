@@ -140,7 +140,13 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const Text('Already have an account? ', style: TextStyle(color: Color(0xFFCBD5E1), fontSize: 13)),
+                    const Flexible(
+                      child: Text(
+                        'Already have an account? ',
+                        style: TextStyle(color: Color(0xFFCBD5E1), fontSize: 13),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
                     GestureDetector(
                       onTap: () => context.go('/login'),
                       child: const Text(

@@ -36,6 +36,7 @@ class AnalyzeImageUseCase {
     required String       sessionId,
     required List<String> ignoreTerms,
     required List<String> preferenceTerms,
+    List<String>          shoppingCategories = const [],
     String?               country,
     int?                  maxSearches,
   }) async* {
@@ -96,11 +97,12 @@ class AnalyzeImageUseCase {
       // from Firestore in real time, so whatever the matcher finds will
       // appear the moment it's saved.
       unawaited(_matchInBackground(
-        sessionId:       sessionId,
-        items:           detectedItems,
-        ignoreTerms:     ignoreTerms,
-        preferenceTerms: preferenceTerms,
-        maxSearches:     maxSearches,
+        sessionId:          sessionId,
+        items:              detectedItems,
+        ignoreTerms:        ignoreTerms,
+        preferenceTerms:    preferenceTerms,
+        shoppingCategories: shoppingCategories,
+        maxSearches:        maxSearches,
       ));
     }
 
@@ -112,6 +114,7 @@ class AnalyzeImageUseCase {
     required List<String> items,
     required List<String> ignoreTerms,
     required List<String> preferenceTerms,
+    List<String>          shoppingCategories = const [],
     int?                  maxSearches,
   }) async {
     try {
@@ -121,8 +124,8 @@ class AnalyzeImageUseCase {
         maxSearches: maxSearches,
       ));
       if (matchResponse.matchedProducts.isNotEmpty) {
-        final ranked = rankProducts(matchResponse.matchedProducts, preferenceTerms,
-                isExactMatchSource: false)
+        final ranked = rankProducts(matchResponse.matchedProducts, shoppingCategories,
+                preferenceTerms: preferenceTerms, isExactMatchSource: false)
             .toList();
         await _session.saveProducts(sessionId, ranked);
       }

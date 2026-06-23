@@ -68,13 +68,14 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
 
     try {
       await for (final event in ref.read(analyzeImageUseCaseProvider).execute(
-        imageBytes:      bytes,
-        mimeType:        mimeType,
-        sessionId:       sessionId,
-        ignoreTerms:     profile.ignoreTerms,
-        preferenceTerms: profile.preferenceTerms,
-        country:         profile.country.isEmpty ? null : profile.country,
-        maxSearches:     profile.maxSearchesPerRun,
+        imageBytes:         bytes,
+        mimeType:           mimeType,
+        sessionId:          sessionId,
+        ignoreTerms:        profile.ignoreTerms,
+        preferenceTerms:    profile.preferenceTerms,
+        shoppingCategories: profile.shoppingCategories,
+        country:            profile.country.isEmpty ? null : profile.country,
+        maxSearches:        profile.maxSearchesPerRun,
       )) {
         state = PipelineState(
           imageBytes: bytes,

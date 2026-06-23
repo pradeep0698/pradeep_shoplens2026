@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "935092313069",
+    "project_id": "shoplens-dev-499700",
+    "storage_bucket": "shoplens-dev-499700.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:935092313069:android:86ea0aa6e5b4ac2318a5e4",
+        "android_client_info": {
+          "package_name": "com.shoplens.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBovKs-EV8FiNoNuGYidTX90J5Dxgx-meQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

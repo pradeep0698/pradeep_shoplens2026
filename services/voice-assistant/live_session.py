@@ -17,10 +17,11 @@ import profile_store
 logger = logging.getLogger(__name__)
 
 _PROJECT = os.environ.get("PROJECT_ID", "")
-# "global" — Vertex AI's Gemini Live API GA is only reachable at the global
-# endpoint as of June 2026, not regional ones like us-central1 (confirmed by
-# testing every region; only global worked).
-_LOCATION = os.environ.get("LOCATION", "global")
+# "us-central1" — unlike the older cascade model (gemini-live-2.5-flash,
+# only reachable at "global"), the native-audio VOICE_MODEL below is
+# currently only available at us-central1; global returns a 1008
+# policy-violation close on connect.
+_LOCATION = os.environ.get("LOCATION", "us-central1")
 _VOICE_MODEL = os.environ.get("VOICE_MODEL", "gemini-live-2.5-flash-native-audio")
 # Cheap text-only model for the separate structured-extraction call (see
 # _extract_patch_from_transcript) — deliberately not the Live model.

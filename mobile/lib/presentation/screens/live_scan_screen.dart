@@ -159,10 +159,14 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
       // A confidently-classified tapped object skips straight to the cheap
       // single-item /identify lookup; "Scan All" and low-confidence taps
       // still get the full cloud Gemini detection pass.
-      if (_topConfidence(tappedObject) case final confidence?
-          when confidence >= _kOnDeviceConfidenceThreshold) {
+      final confidence = _topConfidence(tappedObject);
+      if (confidence != null && confidence >= _kOnDeviceConfidenceThreshold) {
+        debugPrint('[MLKit] on-device confidence ${confidence.toStringAsFixed(2)} >= '
+            '$_kOnDeviceConfidenceThreshold -> /identify (skip Gemini)');
         ref.read(pipelineProvider.notifier).identifyTappedObject(imageBytes);
       } else {
+        debugPrint('[MLKit] ${tappedObject == null ? "Scan All" : "confidence ${confidence?.toStringAsFixed(2) ?? "none"}"} '
+            '-> /analyze (full cloud detection)');
         ref.read(pipelineProvider.notifier).analyzeLoaded();
       }
     } catch (e) {

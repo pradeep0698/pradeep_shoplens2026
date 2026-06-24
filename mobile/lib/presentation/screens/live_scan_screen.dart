@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -10,7 +9,6 @@ import 'package:google_mlkit_object_detection/google_mlkit_object_detection.dart
 
 import '../../core/services/mlkit_detector_service.dart';
 import '../../core/utils/image_utils.dart';
-import '../../core/utils/tap_crop_utils.dart';
 import '../providers/pipeline_provider.dart';
 import '../widgets/info_tooltip_icon.dart';
 import '../widgets/object_glow_overlay.dart';
@@ -24,6 +22,11 @@ class LiveScanScreen extends ConsumerStatefulWidget {
 
 class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
     with WidgetsBindingObserver {
+  // Below this, ML Kit's on-device classification is too unsure of what the
+  // object is — escalate to the full cloud pipeline so Gemini gets a fresh
+  // look instead of risking a wrong /identify search query.
+  static const double _kOnDeviceConfidenceThreshold = 0.70;
+
   CameraController? _cam;
   final _detector = MlKitDetectorService();
   List<DetectedObject> _liveObjects = [];
@@ -151,8 +154,17 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
 
       await ref.read(pipelineProvider.notifier).setImage(imageBytes, mime, fromLiveScan: true);
       if (mounted) context.go('/main');
-      // Auto-start analysis so the user doesn't need to press Scan Image
-      ref.read(pipelineProvider.notifier).analyzeLoaded();
+
+      // Auto-start analysis so the user doesn't need to press Scan Image.
+      // A confidently-classified tapped object skips straight to the cheap
+      // single-item /identify lookup; "Scan All" and low-confidence taps
+      // still get the full cloud Gemini detection pass.
+      if (_topConfidence(tappedObject) case final confidence?
+          when confidence >= _kOnDeviceConfidenceThreshold) {
+        ref.read(pipelineProvider.notifier).identifyTappedObject(imageBytes);
+      } else {
+        ref.read(pipelineProvider.notifier).analyzeLoaded();
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -164,54 +176,8 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
     }
   }
 
-  Future<void> _freezeAndIdentifyObject(DetectedObject obj) async {
-    final cam = _cam;
-    if (cam == null || !cam.value.isInitialized) return;
-
-    try {
-      await cam.stopImageStream();
-      final file  = await cam.takePicture();
-      final bytes = await file.readAsBytes();
-
-      // Get the actual captured image dimensions
-      final codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      final imgW  = frame.image.width.toDouble();
-      final imgH  = frame.image.height.toDouble();
-      frame.image.dispose();
-
-      // ML Kit bbox is in portrait camera-stream space; scale to captured image
-      final preview = cam.value.previewSize ?? const Size(1080, 1920);
-      final streamW = preview.width  > preview.height ? preview.height : preview.width;
-      final streamH = preview.width  > preview.height ? preview.width  : preview.height;
-
-      final box = obj.boundingBox;
-      final scaledRect = Rect.fromLTRB(
-        box.left   * imgW / streamW,
-        box.top    * imgH / streamH,
-        box.right  * imgW / streamW,
-        box.bottom * imgH / streamH,
-      );
-
-      final cropped = await TapCropUtils.cropRect(
-        imageBytes: bytes,
-        rect:       scaledRect,
-        imageSize:  Size(imgW, imgH),
-      );
-
-      // analyzeImage sets state to `analyzing` synchronously before its first
-      // await, so the progress indicator is visible the moment /main renders.
-      ref.read(pipelineProvider.notifier).analyzeImage(cropped, 'image/png');
-      if (mounted) context.go('/main');
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Capture failed: $e')),
-        );
-      }
-      cam.startImageStream(_onFrame);
-    }
-  }
+  double? _topConfidence(DetectedObject? obj) =>
+      (obj == null || obj.labels.isEmpty) ? null : obj.labels.first.confidence;
 
   @override
   Widget build(BuildContext context) {

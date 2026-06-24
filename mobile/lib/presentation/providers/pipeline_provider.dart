@@ -6,6 +6,7 @@ import '../../data/models/analyzer_error.dart';
 import '../../data/models/user_profile.dart';
 import '../../data/repositories/session_repository.dart';
 import '../../domain/usecases/analyze_image_usecase.dart';
+import '../../domain/usecases/tap_identify_usecase.dart';
 import 'auth_provider.dart';
 import 'profile_provider.dart';
 
@@ -97,6 +98,32 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
         isRetryable: e.isRetryable,
         fromLiveScan: _fromLiveScan,
       );
+    } catch (e) {
+      state = PipelineState(status: PipelineStatus.error, errorMessage: e.toString(), fromLiveScan: _fromLiveScan);
+    }
+  }
+
+  /// Resolves a high-confidence on-device detection via the cheap /identify
+  /// endpoint instead of the full cloud pipeline — skips Gemini re-detection
+  /// entirely since ML Kit already localized and classified the object.
+  Future<void> identifyTappedObject(Uint8List bytes) async {
+    final user    = ref.read(authStateProvider).value;
+    final profile = ref.read(profileProvider).value ?? const UserProfile();
+    if (user == null) return;
+
+    final sessionId = getSessionId(user.uid);
+    state = PipelineState(status: PipelineStatus.matching, imageBytes: bytes, fromLiveScan: _fromLiveScan);
+
+    try {
+      await ref.read(tapIdentifyUseCaseProvider).identify(
+        croppedBytes:       bytes,
+        sessionId:          sessionId,
+        ignoreTerms:        profile.ignoreTerms,
+        preferenceTerms:    profile.preferenceTerms,
+        shoppingCategories: profile.shoppingCategories,
+        country:            profile.country.isEmpty ? null : profile.country,
+      );
+      state = PipelineState(status: PipelineStatus.success, imageBytes: bytes, fromLiveScan: _fromLiveScan);
     } catch (e) {
       state = PipelineState(status: PipelineStatus.error, errorMessage: e.toString(), fromLiveScan: _fromLiveScan);
     }

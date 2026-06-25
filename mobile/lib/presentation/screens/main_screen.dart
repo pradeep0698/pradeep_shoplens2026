@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../core/services/vision_service.dart';
 import '../../core/utils/image_utils.dart';
 import '../../core/utils/product_ranker.dart';
@@ -41,6 +42,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   bool  _productCheckSettled = false;
   Timer? _productCheckTimer;
   bool  _onboardingTriggered = false;
+  bool  _micPrewarmed = false;
 
   @override
   void dispose() {
@@ -100,6 +102,16 @@ class _MainScreenState extends ConsumerState<MainScreen> {
 
     if (profile != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowOnboarding(profile));
+    }
+
+    // Acquiring the mic for the first time in a browser tab is slow (OS/
+    // browser audio-hardware cold start) even when permission was already
+    // granted in a prior session — paying that cost here, as soon as the
+    // main screen loads, means the user doesn't eat it the moment they tap
+    // the voice chat FAB. Guarded to run once per screen lifetime.
+    if (!_micPrewarmed) {
+      _micPrewarmed = true;
+      unawaited(Permission.microphone.request());
     }
 
     final isBusy = pipeline.status == PipelineStatus.analyzing ||

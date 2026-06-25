@@ -3,13 +3,13 @@ import logging
 import os
 from typing import List
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import requests as _requests
-from matcher import match_products, _search_product, _SERPAPI_KEY
+from matcher import clamp_max_searches, fetch_thumbnail, match_products, search_products, _search_product, _SERPAPI_KEY
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,6 +51,36 @@ async def match(request: MatchRequest) -> JSONResponse:
         match_products, request.items, request.ignore_terms, request.max_searches
     )
     return JSONResponse(content=result)
+
+
+class SearchRequest(BaseModel):
+    query: str
+    max_results: int = 5
+
+
+@app.post("/search")
+async def search(request: SearchRequest) -> JSONResponse:
+    max_results = clamp_max_searches(request.max_results)
+    products = await asyncio.to_thread(search_products, request.query, max_results)
+    return JSONResponse(content={"products": products})
+
+
+@app.get("/thumbnail")
+async def thumbnail(url: str) -> Response:
+    # Google's image CDN (where every product thumbnail we hand back points)
+    # never sends Access-Control-Allow-Origin, so the browser blocks Flutter
+    # web from fetching it directly. The mobile client routes thumbnails
+    # through us instead — CORSMiddleware above adds the header on our way
+    # back out, since this is now same-origin from the app's perspective.
+    result = await asyncio.to_thread(fetch_thumbnail, url)
+    if result is None:
+        return Response(status_code=502)
+    content, content_type = result
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @app.get("/debug/{item}")

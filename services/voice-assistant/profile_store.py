@@ -85,6 +85,93 @@ def _find_conflicts(preference_terms: list[str], ignore_terms: list[str]) -> lis
     return sorted(pref_lower & ignore_lower)
 
 
+VOICE_CATEGORIES = [
+    "Furniture",
+    "Clothing",
+    "Kitchen & Cookware",
+    "Accessories",
+    "Electronics",
+    "Home Decor",
+    "Sports & Outdoors",
+    "Books & Stationery",
+]
+
+_CATEGORY_IGNORE_ALIASES: dict[str, set[str]] = {
+    "Furniture": {"furniture", "chair", "chairs", "sofa", "sofas", "couch", "couches", "desk", "desks", "table", "tables"},
+    "Clothing": {"clothing", "clothes", "apparel", "shirt", "shirts", "jacket", "jackets", "jeans", "dress", "dresses", "shoes", "sneakers"},
+    "Kitchen & Cookware": {"kitchen", "cookware", "cooking", "pan", "pans", "pot", "pots", "appliance", "appliances"},
+    "Accessories": {"accessories", "accessory", "watch", "watches", "bag", "bags", "jewelry", "jewellery", "wallet", "wallets"},
+    "Electronics": {"electronics", "electronic", "phone", "phones", "laptop", "laptops", "tablet", "tablets", "headphones", "gadget", "gadgets", "tech"},
+    "Home Decor": {"home decor", "decor", "decoration", "decorations", "candle", "candles", "vase", "vases", "rug", "rugs", "lamp", "lamps", "pillow", "pillows"},
+    "Sports & Outdoors": {"sports", "sport", "outdoors", "outdoor", "gym", "fitness", "camping", "hiking", "yoga"},
+    "Books & Stationery": {"books", "book", "stationery", "notebook", "notebooks", "pen", "pens", "journal", "journals", "planner", "planners"},
+}
+
+
+def _normalize_terms(values: list[str] | None) -> list[str]:
+    return _dedup_case_insensitive([], [str(v) for v in (values or [])])
+
+
+def _normalize_categories(values: list[str] | None) -> list[str]:
+    allowed = set(VOICE_CATEGORIES)
+    return [category for category in _dedup_case_insensitive([], [str(v) for v in (values or [])]) if category in allowed]
+
+
+def _ignored_category_names(ignore_terms: list[str]) -> set[str]:
+    ignored = {term.strip().lower() for term in ignore_terms if term.strip()}
+    blocked: set[str] = set()
+    for category, aliases in _CATEGORY_IGNORE_ALIASES.items():
+        if ignored & aliases:
+            blocked.add(category)
+    return blocked
+
+
+def normalize_reviewed_patch(patch: dict) -> dict:
+    """Normalize the exact profile shape approved on the review screen.
+
+    Unlike merge_and_save, this is not an append-only patch. The reviewed chips
+    are authoritative for the three voice-managed fields.
+    """
+    ignore_terms = _normalize_terms(patch.get("ignore_terms"))
+    ignore_lower = {term.lower() for term in ignore_terms}
+
+    preference_terms = [
+        term for term in _normalize_terms(patch.get("preference_terms"))
+        if term.lower() not in ignore_lower
+    ]
+
+    blocked_categories = _ignored_category_names(ignore_terms)
+    shopping_categories = [
+        category for category in _normalize_categories(patch.get("shopping_categories"))
+        if category not in blocked_categories and category.lower() not in ignore_lower
+    ]
+
+    return {
+        "shopping_categories": shopping_categories,
+        "preference_terms": preference_terms,
+        "ignore_terms": ignore_terms,
+        "conflicts": [],
+    }
+
+
+def save_reviewed_profile(uid: str, patch: dict) -> dict:
+    """Save the reviewed voice profile exactly, preserving unrelated fields."""
+    db = _get_db()
+    ref = db.collection("UserProfiles").document(uid)
+    normalized = normalize_reviewed_patch(patch)
+
+    ref.set(
+        {
+            "shopping_categories": normalized["shopping_categories"],
+            "preference_terms": normalized["preference_terms"],
+            "ignore_terms": normalized["ignore_terms"],
+        },
+        merge=True,
+    )
+
+    return normalized
+
+
 def merge_and_save(uid: str, patch: dict) -> dict:
     """Merge a confirmed voice-derived patch into UserProfiles/{uid}.
 

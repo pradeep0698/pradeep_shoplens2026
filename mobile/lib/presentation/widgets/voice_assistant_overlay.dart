@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/models/voice_session.dart';
 import '../providers/voice_assistant_provider.dart';
+import 'product_card.dart';
 
 const _kBg = Color(0xFF0F172A);
 const _kSurface = Color(0xFF1E293B);
@@ -16,24 +19,34 @@ const _kError = Color(0xFFF87171);
 // (hook point is LiveConnectConfig.speech_config on the backend).
 const _languageOptions = ['English', 'Spanish', 'French', 'Hindi', 'German', 'Mandarin'];
 
-const _suggestionChips = [
+const _onboardingSuggestionChips = [
   'I like minimalist design',
   'No plastic items',
   'Show me smart tech',
+];
+
+const _searchSuggestionChips = [
+  'Wireless headphones under \$50',
+  'A black leather jacket',
+  'Minimalist desk lamp',
 ];
 
 /// Shows the assistant as a dimmed-background sheet over whatever screen is
 /// active — used both for the forced first-run onboarding and for the
 /// dismissible overlay opened from [ChatbotFab].
 Future<void> showVoiceAssistantOverlay(BuildContext context, {required bool isOnboarding}) {
+  if (_voiceAssistantOverlayOpen) return Future.value();
+  _voiceAssistantOverlayOpen = true;
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
     barrierColor: Colors.black.withValues(alpha: 0.6),
     builder: (_) => VoiceAssistantOverlay(isOnboarding: isOnboarding),
-  );
+  ).whenComplete(() => _voiceAssistantOverlayOpen = false);
 }
+
+bool _voiceAssistantOverlayOpen = false;
 
 class VoiceAssistantOverlay extends ConsumerStatefulWidget {
   const VoiceAssistantOverlay({super.key, required this.isOnboarding});
@@ -52,12 +65,19 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(voiceAssistantProvider.notifier).start();
+      ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding);
     });
   }
 
   @override
   void dispose() {
+    // The only teardown trigger now — previously a WidgetsBindingObserver
+    // also cancelled on AppLifecycleState.inactive, which fires the instant
+    // the window/tab loses focus (e.g. url_launcher opening a product's Buy
+    // link), wiping the whole conversation even though the user never
+    // closed the overlay. Exiting (closing this sheet) is the only thing
+    // that should end the session now.
+    unawaited(ref.read(voiceAssistantProvider.notifier).cancel());
     _textController.dispose();
     super.dispose();
   }
@@ -145,8 +165,9 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
             ),
             IconButton(
               icon: const Icon(Icons.close, color: _kMuted),
-              onPressed: () {
-                ref.read(voiceAssistantProvider.notifier).cancel();
+              onPressed: () async {
+                await ref.read(voiceAssistantProvider.notifier).cancel();
+                if (!context.mounted) return;
                 final navigator = Navigator.of(context);
                 if (navigator.canPop()) navigator.pop();
               },
@@ -198,15 +219,17 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
           children: [
             const SizedBox(height: 8),
             Text(
-              widget.isOnboarding ? "Let's personalize\nyour profile" : 'How can I help?',
+              widget.isOnboarding ? "Let's personalize\nyour profile" : 'What are you shopping for?',
               textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w700, height: 1.25),
             ),
             const SizedBox(height: 8),
-            const Text(
-              'Tell me about your shopping interests, brands you like, or products you want to ignore.',
+            Text(
+              widget.isOnboarding
+                  ? 'Tell me about your shopping interests, brands you like, or products you want to ignore.'
+                  : "Tell me what you're looking for and I'll find it.",
               textAlign: TextAlign.center,
-              style: TextStyle(color: _kMuted, fontSize: 13),
+              style: const TextStyle(color: _kMuted, fontSize: 13),
             ),
             const SizedBox(height: 24),
             _MicVisualizer(isSpeaking: state.status == VoiceStatus.speaking, isRecording: state.isRecording),
@@ -216,17 +239,22 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
                 alignment: WrapAlignment.center,
                 spacing: 8,
                 runSpacing: 8,
-                children: _suggestionChips
+                children: (widget.isOnboarding ? _onboardingSuggestionChips : _searchSuggestionChips)
                     .map((s) => _SuggestionChip(label: s, onTap: () => ref.read(voiceAssistantProvider.notifier).sendText(s)))
                     .toList(),
               ),
               const SizedBox(height: 16),
             ],
-            if (!state.patch.isEmpty) ...[
+            if (widget.isOnboarding && !state.patch.isEmpty) ...[
               _PreferencePreview(patch: state.patch),
               const SizedBox(height: 16),
             ],
-            if (state.transcript.isNotEmpty) _TranscriptList(transcript: state.transcript),
+            if (state.transcript.isNotEmpty || state.searchResults.isNotEmpty)
+              _ConversationList(
+                transcript: state.transcript,
+                searchResults: state.searchResults,
+                shoppingCategories: state.patch.shoppingCategories,
+              ),
             const SizedBox(height: 8),
           ],
         ),
@@ -252,7 +280,7 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
               ),
               const SizedBox(height: 16),
               ElevatedButton(
-                onPressed: () => ref.read(voiceAssistantProvider.notifier).start(),
+                onPressed: () => ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _kAccent,
                   foregroundColor: _kBg,
@@ -289,8 +317,9 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
             children: [
               Expanded(
                 child: OutlinedButton(
-                  onPressed: () {
-                    ref.read(voiceAssistantProvider.notifier).cancel();
+                  onPressed: () async {
+                    await ref.read(voiceAssistantProvider.notifier).cancel();
+                    if (!context.mounted) return;
                     final navigator = Navigator.of(context);
                     if (navigator.canPop()) navigator.pop();
                   },
@@ -375,13 +404,16 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
           children: [
             _holdToTalkButton(state),
             const SizedBox(height: 4),
-            TextButton(
-              onPressed: () => ref.read(voiceAssistantProvider.notifier).finishNow(),
-              child: const Text(
-                "I'm done — review what I've shared",
-                style: TextStyle(color: _kMuted, fontSize: 12.5, fontWeight: FontWeight.w600),
+            // No review step exists in search mode — only onboarding's
+            // preference flow needs an explicit "done" affordance.
+            if (widget.isOnboarding)
+              TextButton(
+                onPressed: () => ref.read(voiceAssistantProvider.notifier).finishNow(),
+                child: const Text(
+                  "I'm done — review what I've shared",
+                  style: TextStyle(color: _kMuted, fontSize: 12.5, fontWeight: FontWeight.w600),
+                ),
               ),
-            ),
             Row(
               children: [
                 Expanded(
@@ -527,28 +559,66 @@ class _PreferencePreview extends StatelessWidget {
       );
 }
 
-class _TranscriptList extends StatelessWidget {
-  const _TranscriptList({required this.transcript});
+/// Interleaves transcript turns and search-result batches into one
+/// chronological conversation (ordered by VoiceAssistantNotifier._nextSeq()),
+/// instead of rendering all transcript first and all results in a separate
+/// block underneath — so a product result shows up right after the search
+/// that produced it, and a later refinement appears after that.
+class _ConversationList extends StatelessWidget {
+  const _ConversationList({
+    required this.transcript,
+    required this.searchResults,
+    required this.shoppingCategories,
+  });
+
   final List<VoiceTranscriptTurn> transcript;
+  final List<VoiceSearchResult> searchResults;
+  final List<String> shoppingCategories;
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: transcript
-          .map((turn) => Align(
-                alignment: turn.role == 'user' ? Alignment.centerRight : Alignment.centerLeft,
-                child: Container(
-                  margin: const EdgeInsets.symmetric(vertical: 4),
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  constraints: const BoxConstraints(maxWidth: 280),
-                  decoration: BoxDecoration(
-                    color: turn.role == 'user' ? _kAccent.withValues(alpha: 0.15) : _kSurface,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Text(turn.text, style: const TextStyle(color: Colors.white, fontSize: 13)),
-                ),
-              ))
-          .toList(),
-    );
+    final items = <MapEntry<int, Widget>>[
+      ...transcript.map((turn) => MapEntry(turn.seq, _transcriptBubble(turn))),
+      ...searchResults.map((result) => MapEntry(result.seq, _searchResultBlock(result, shoppingCategories))),
+    ]..sort((a, b) => a.key.compareTo(b.key));
+
+    return Column(children: items.map((e) => e.value).toList());
   }
+
+  Widget _transcriptBubble(VoiceTranscriptTurn turn) => Align(
+        alignment: turn.role == 'user' ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          constraints: const BoxConstraints(maxWidth: 280),
+          decoration: BoxDecoration(
+            color: turn.role == 'user' ? _kAccent.withValues(alpha: 0.15) : _kSurface,
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Text(turn.text, style: const TextStyle(color: Colors.white, fontSize: 13)),
+        ),
+      );
+
+  Widget _searchResultBlock(VoiceSearchResult result, List<String> shoppingCategories) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              "Results for '${result.query}'",
+              style: const TextStyle(color: _kMuted, fontSize: 12, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            if (result.products.isEmpty)
+              const Text(
+                "Didn't find anything for that — try rephrasing.",
+                style: TextStyle(color: _kFaint, fontSize: 12.5),
+              )
+            else
+              ...result.products.map(
+                (p) => ProductCard(product: p, shoppingCategories: shoppingCategories),
+              ),
+          ],
+        ),
+      );
 }

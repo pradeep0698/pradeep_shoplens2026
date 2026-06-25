@@ -1,3 +1,5 @@
+import 'product.dart';
+
 /// A snapshot of the three preference lists, shared by the existing profile
 /// (returned at session start) and by patches proposed/finalized mid-conversation.
 class VoiceProfilePatch {
@@ -83,7 +85,31 @@ class VoiceFinalizeResult {
 }
 
 class VoiceTranscriptTurn {
-  const VoiceTranscriptTurn({required this.role, required this.text});
+  // seq orders this turn relative to VoiceSearchResult entries in the same
+  // conversation — see VoiceAssistantNotifier._nextSeq() — so search-mode's
+  // product results can be interleaved into the transcript in arrival order
+  // instead of dumped in a separate block underneath it.
+  const VoiceTranscriptTurn({required this.role, required this.text, this.seq = 0});
   final String role; // 'user' | 'model'
   final String text;
+  final int seq;
+}
+
+/// One `search_products` tool call's results — search-mode sessions append
+/// one of these per query, so refining a search keeps the earlier results
+/// visible above the newer ones (mirrors how transcript turns accumulate).
+class VoiceSearchResult {
+  const VoiceSearchResult({required this.query, required this.products, this.seq = 0});
+
+  final String query;
+  final List<Product> products;
+  final int seq;
+
+  factory VoiceSearchResult.fromJson(Map<String, dynamic> json, {required int seq}) => VoiceSearchResult(
+        query: json['query'] as String? ?? '',
+        products: ((json['products'] as List?) ?? const [])
+            .map((p) => Product.fromJson(p as Map<String, dynamic>))
+            .toList(),
+        seq: seq,
+      );
 }

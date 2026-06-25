@@ -7,6 +7,7 @@ import 'package:record/record.dart';
 
 import '../../core/constants/api_constants.dart';
 import '../../core/utils/pcm16_resampler.dart';
+import '../../core/utils/pcm16_speech_gate.dart';
 import '../../core/utils/voice_audio_player.dart';
 import '../../core/utils/web_audio_sample_rate.dart';
 import '../../data/models/voice_session.dart';
@@ -27,6 +28,7 @@ class VoiceAssistantState {
     this.finalizeProposal,
     this.result,
     this.errorMessage,
+    this.searchResults = const [],
   });
 
   final VoiceStatus status;
@@ -38,6 +40,9 @@ class VoiceAssistantState {
   final VoiceProfilePatch? finalizeProposal;
   final VoiceFinalizeResult? result;
   final String? errorMessage;
+  // Search-mode only — one entry per search_products tool call, oldest
+  // first, so a refined search appends rather than replaces.
+  final List<VoiceSearchResult> searchResults;
 
   VoiceAssistantState copyWith({
     VoiceStatus? status,
@@ -47,6 +52,7 @@ class VoiceAssistantState {
     VoiceProfilePatch? finalizeProposal,
     VoiceFinalizeResult? result,
     String? errorMessage,
+    List<VoiceSearchResult>? searchResults,
   }) =>
       VoiceAssistantState(
         status: status ?? this.status,
@@ -56,6 +62,7 @@ class VoiceAssistantState {
         finalizeProposal: finalizeProposal ?? this.finalizeProposal,
         result: result ?? this.result,
         errorMessage: errorMessage,
+        searchResults: searchResults ?? this.searchResults,
       );
 }
 
@@ -63,7 +70,7 @@ class VoiceAssistantState {
 /// services/voice-assistant, streams mic audio, relays typed text turns,
 /// plays back the model's spoken audio, and surfaces the live
 /// transcript/preference preview/finalize proposal.
-class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
+class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   String? _sessionId;
   AudioRecorder? _recorder;
   final VoiceSocketClient _socket = VoiceSocketClient();
@@ -72,7 +79,19 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
   Timer? _speakingDebounce;
   VoiceAudioPlayer? _player;
   Pcm16Resampler? _micResampler;
+  Pcm16SpeechGate? _speechGate;
   int _captureSampleRate = _kInputSampleRate;
+  bool _speechStarted = false;
+  int _generation = 0;
+  // Set by start() — gates the preference-only closing-phrase/review-step
+  // behavior in sendText()/finishNow() below, since search-mode sessions
+  // never reach a review step.
+  bool _isOnboarding = true;
+  // Stamps transcript turns and search results with their arrival order so
+  // the overlay can interleave the two lists into one conversation instead
+  // of rendering them in two separate blocks — see _nextSeq().
+  int _seq = 0;
+  int _nextSeq() => _seq++;
   // feedUint8FromStream() must not be called again before the previous call's
   // future completes — this chain serializes frames as they arrive, since the
   // socket can deliver them faster than playback consumes them.
@@ -84,10 +103,15 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
     return const VoiceAssistantState();
   }
 
-  Future<void> start() async {
+  Future<void> start({required bool isOnboarding}) async {
+    await _teardownSession();
+    _isOnboarding = isOnboarding;
+    _seq = 0;
+    final generation = ++_generation;
     state = const VoiceAssistantState(status: VoiceStatus.connecting);
     try {
       final micStatus = await Permission.microphone.request();
+      if (!_isCurrent(generation)) return;
       if (!micStatus.isGranted) {
         state = state.copyWith(
           status: VoiceStatus.error,
@@ -96,15 +120,28 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
         return;
       }
 
-      final startResponse = await ref.read(voiceApiProvider).startSession();
+      final startResponse = await ref.read(voiceApiProvider).startSession(isOnboarding: isOnboarding);
+      if (!_isCurrent(generation)) return;
       _sessionId = startResponse.sessionId;
       state = state.copyWith(patch: startResponse.profile);
 
       await _socket.connect(ApiConstants.voiceAssistantWsUrl(startResponse.wsUrl));
-      _frameSubscription = _socket.frames.listen(_handleFrame, onError: _handleSocketError);
+      if (!_isCurrent(generation)) return;
+      _frameSubscription = _socket.frames.listen(
+        (frame) {
+          if (_isCurrent(generation)) _handleFrame(frame);
+        },
+        onError: (Object error) {
+          if (_isCurrent(generation)) _handleSocketError(error);
+        },
+      );
 
       final player = VoiceAudioPlayer();
       await player.open();
+      if (!_isCurrent(generation)) {
+        await player.close();
+        return;
+      }
       _player = player;
 
       // On web, record_web ignores RecordConfig.sampleRate and silently
@@ -142,15 +179,31 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
   Future<void> beginSpeaking() async {
     if (state.isRecording || _recorder == null) return;
     state = state.copyWith(isRecording: true);
-    _socket.sendSpeechStart();
+    final generation = _generation;
+    await _flushPlayback();
+    if (!_isCurrent(generation) || _recorder == null) return;
+    _speechGate = Pcm16SpeechGate(sampleRate: _kInputSampleRate);
+    _speechStarted = false;
     final stream = await _recorder!.startStream(RecordConfig(
       encoder: AudioEncoder.pcm16bits,
       sampleRate: _captureSampleRate,
       numChannels: 1,
     ));
     _micSubscription = stream.listen((chunk) {
+      if (!_isCurrent(generation) || !state.isRecording) return;
       final outbound = _micResampler?.convert(chunk) ?? chunk;
-      if (outbound.isNotEmpty) _socket.sendAudio(outbound);
+      if (outbound.isEmpty) return;
+      final gateResult = _speechGate?.add(outbound) ??
+          Pcm16SpeechGateResult(started: false, chunks: [outbound]);
+      if (gateResult.started && !_speechStarted) {
+        _speechStarted = true;
+        _socket.sendSpeechStart();
+      }
+      if (_speechStarted) {
+        for (final gatedChunk in gateResult.chunks) {
+          if (gatedChunk.isNotEmpty) _socket.sendAudio(gatedChunk);
+        }
+      }
     });
   }
 
@@ -167,7 +220,9 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
       // Best-effort — the activity_end marker below still tells Gemini the
       // turn ended even if the platform stop() call itself failed.
     }
-    _socket.sendSpeechEnd();
+    if (_speechStarted) _socket.sendSpeechEnd();
+    _speechStarted = false;
+    _speechGate = null;
   }
 
   /// Used by both the text input field and tapping a suggestion chip —
@@ -175,8 +230,19 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
   void sendText(String text) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
+    // Closing phrases only mean "review and save" in the preference flow —
+    // search mode has no review step, so "done"/"no" is just another turn.
+    if (_isOnboarding && _isClosingPhrase(trimmed)) {
+      state = state.copyWith(
+        transcript: [...state.transcript, VoiceTranscriptTurn(role: 'user', text: trimmed, seq: _nextSeq())],
+      );
+      finishNow();
+      return;
+    }
     _socket.sendText(trimmed);
-    state = state.copyWith(transcript: [...state.transcript, VoiceTranscriptTurn(role: 'user', text: trimmed)]);
+    state = state.copyWith(
+      transcript: [...state.transcript, VoiceTranscriptTurn(role: 'user', text: trimmed, seq: _nextSeq())],
+    );
   }
 
   /// Lets the user end the conversation on their own terms instead of
@@ -187,6 +253,7 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
   /// from it once a proposal exists — confirm()/cancel() still work
   /// unchanged, they just find the session already torn down.
   void finishNow() {
+    if (!_isOnboarding) return;
     if (state.status != VoiceStatus.listening && state.status != VoiceStatus.speaking) return;
     _speakingDebounce?.cancel();
     unawaited(_stopLiveAudio());
@@ -246,11 +313,17 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
         // API and can be visibly wrong even when the assistant understood the
         // audio. Typed user messages are already added locally in sendText().
         if (role == 'user') return;
-        state = state.copyWith(transcript: [...state.transcript, VoiceTranscriptTurn(role: role, text: text)]);
+        state = state.copyWith(
+          transcript: [...state.transcript, VoiceTranscriptTurn(role: role, text: text, seq: _nextSeq())],
+        );
         if (role == 'model') _markSpeaking();
       case 'preference_patch':
         state = state.copyWith(
           patch: VoiceProfilePatch.fromJson(json['patch'] as Map<String, dynamic>? ?? const {}),
+        );
+      case 'product_results':
+        state = state.copyWith(
+          searchResults: [...state.searchResults, VoiceSearchResult.fromJson(json, seq: _nextSeq())],
         );
       case 'finalize_proposal':
         _speakingDebounce?.cancel();
@@ -291,6 +364,8 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
     }
   }
 
+  bool _isCurrent(int generation) => generation == _generation;
+
   void _markSpeaking() {
     if (state.status == VoiceStatus.review ||
         state.status == VoiceStatus.saving ||
@@ -312,7 +387,8 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
   // deliberate close (confirm/cancel/finalize_proposal/finishNow) never gets
   // misread as a dropped connection by _handleFrame's VoiceSocketClosed
   // branch. Safe to call more than once — every step is already null-safe.
-  Future<void> _stopLiveAudio() async {
+  Future<void> _stopLiveAudio({bool invalidate = true}) async {
+    if (invalidate) _generation++;
     _speakingDebounce?.cancel();
     await _micSubscription?.cancel();
     _micSubscription = null;
@@ -324,6 +400,8 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
     } catch (_) {}
     _recorder = null;
     _micResampler = null;
+    _speechGate = null;
+    _speechStarted = false;
     try {
       await _player?.close();
     } catch (_) {}
@@ -347,4 +425,34 @@ class VoiceAssistantNotifier extends Notifier<VoiceAssistantState> {
 }
 
 final voiceAssistantProvider =
-    NotifierProvider<VoiceAssistantNotifier, VoiceAssistantState>(VoiceAssistantNotifier.new);
+    AutoDisposeNotifierProvider<VoiceAssistantNotifier, VoiceAssistantState>(VoiceAssistantNotifier.new);
+
+bool _isClosingPhrase(String text) {
+  final normalized = text
+      .trim()
+      .toLowerCase()
+      .replaceAll('’', "'")
+      .replaceAll(RegExp(r'[.!?]+$'), '');
+  return {
+    'no',
+    'nope',
+    'no thanks',
+    'nothing else',
+    'nothing more',
+    "that's all",
+    'thats all',
+    "that's it",
+    'thats it',
+    "i'm done",
+    'im done',
+    'done',
+    'save it',
+    'go ahead',
+    'looks good',
+    'save',
+    "that's everything",
+    'thats everything',
+    'yes save it',
+    'yes',
+  }.contains(normalized);
+}

@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,7 +17,15 @@ import 'presentation/screens/splash_screen.dart';
 // GoRouter is created once and stays stable — only the redirect re-runs.
 class _AuthChangeNotifier extends ChangeNotifier {
   _AuthChangeNotifier() {
-    _sub = FirebaseAuth.instance.authStateChanges().listen((_) => notifyListeners());
+    _sub = FirebaseAuth.instance.authStateChanges().listen((user) {
+      // Warms the cached Firebase ID token as soon as a user is known, on both
+      // fresh sign-in and session restore at launch — otherwise the first call
+      // to voice-assistant (the only backend that sends an Authorization
+      // header, see dio_client.dart's voiceDioProvider) pays for a real
+      // network round-trip to mint a token instead of reading the cache.
+      unawaited(user?.getIdToken());
+      notifyListeners();
+    });
   }
 
   late final StreamSubscription<User?> _sub;

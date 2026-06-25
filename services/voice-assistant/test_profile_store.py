@@ -83,6 +83,51 @@ def test_find_conflicts_empty_when_no_overlap():
     assert profile_store._find_conflicts(["minimalist"], ["leather"]) == []
 
 
+def test_normalize_reviewed_patch_lets_ignore_terms_win():
+    result = profile_store.normalize_reviewed_patch({
+        "shopping_categories": ["Clothing", "Electronics"],
+        "preference_terms": ["Cotton", "leather"],
+        "ignore_terms": ["Leather", "clothes"],
+    })
+
+    assert result == {
+        "shopping_categories": ["Electronics"],
+        "preference_terms": ["Cotton"],
+        "ignore_terms": ["Leather", "clothes"],
+        "conflicts": [],
+    }
+
+
+def test_save_reviewed_profile_replaces_voice_fields_exactly(monkeypatch):
+    fake_db = _FakeDb()
+    fake_db._collections["UserProfiles"] = {
+        "user-1": {
+            "shopping_categories": ["Clothing", "Home Decor"],
+            "preference_terms": ["Nike", "minimalist"],
+            "ignore_terms": ["leather"],
+            "country": "US",
+        }
+    }
+    monkeypatch.setattr(profile_store, "_get_db", lambda: fake_db)
+
+    result = profile_store.save_reviewed_profile(
+        "user-1",
+        {
+            "shopping_categories": ["Home Decor"],
+            "preference_terms": ["minimalist"],
+            "ignore_terms": [],
+        },
+    )
+
+    assert result["shopping_categories"] == ["Home Decor"]
+    assert result["preference_terms"] == ["minimalist"]
+    saved = fake_db._collections["UserProfiles"]["user-1"]
+    assert saved["shopping_categories"] == ["Home Decor"]
+    assert saved["preference_terms"] == ["minimalist"]
+    assert saved["ignore_terms"] == []
+    assert saved["country"] == "US"
+
+
 def test_merge_and_save_unions_categories_and_terms(monkeypatch):
     fake_db = _FakeDb()
     fake_db._collections["UserProfiles"] = {

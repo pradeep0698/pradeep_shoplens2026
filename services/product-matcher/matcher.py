@@ -22,6 +22,41 @@ _session = requests.Session()
 
 _cache: TTLCache = TTLCache(maxsize=500, ttl=1800)
 
+# Domains SerpAPI's "thumbnail" field actually points at (Google's own image
+# CDN, for both the google_shopping and google_lens engines) — used to scope
+# fetch_thumbnail() below so it can't be used as an arbitrary open proxy.
+_ALLOWED_THUMBNAIL_HOSTS = (".gstatic.com", ".googleusercontent.com", ".google.com")
+_THUMBNAIL_CACHE: TTLCache = TTLCache(maxsize=500, ttl=3600)
+
+
+def fetch_thumbnail(url: str) -> Optional[tuple[bytes, str]]:
+    """Fetches a product thumbnail server-side and returns (bytes, content_type)
+    — used by GET /thumbnail. Google's image CDN never sends Access-Control-
+    Allow-Origin, so a browser (Flutter web) silently blocks a direct
+    cross-origin fetch of these URLs; routing through our own origin instead
+    works because we control the CORS headers on the way back out."""
+    cache_key = url
+    if cache_key in _THUMBNAIL_CACHE:
+        return _THUMBNAIL_CACHE[cache_key]
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not any(
+        parsed.netloc.endswith(host) for host in _ALLOWED_THUMBNAIL_HOSTS
+    ):
+        logger.warning("Refusing to proxy thumbnail from disallowed host: %s", url)
+        return None
+
+    try:
+        resp = _session.get(url, timeout=10)
+        resp.raise_for_status()
+    except Exception as exc:
+        logger.warning("Thumbnail fetch failed for '%s': %s", url, exc)
+        return None
+
+    result = (resp.content, resp.headers.get("Content-Type", "image/jpeg"))
+    _THUMBNAIL_CACHE[cache_key] = result
+    return result
+
 _CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "Furniture":          ["chair", "sofa", "couch", "desk", "table", "shelf", "wardrobe", "ottoman", "stool", "bookcase", "dresser", "nightstand", "bed frame"],
     "Clothing":           ["shirt", "jacket", "jeans", "dress", "hoodie", "shoe", "boot", "sneaker", "hat", "scarf", "coat", "pants", "shorts", "sweater", "blouse"],
@@ -56,43 +91,8 @@ def _parse_price(raw: str) -> float:
         return 0.0
 
 
-def _search_product(item: str) -> Optional[dict]:
-    cache_key = item.lower().strip()
-    if cache_key in _cache:
-        logger.info("Cache hit for: %s", item)
-        return _cache[cache_key]
-
-    try:
-        resp = _session.get(
-            "https://serpapi.com/search",
-            params={
-                "engine":  "google_shopping",
-                "q":       item,
-                "api_key": _SERPAPI_KEY,
-                "num":     3,
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
-        logger.warning("SerpAPI request failed for '%s': %s", item, exc)
-        _cache[cache_key] = None
-        return None
-
-    if "error" in data:
-        logger.warning("SerpAPI error for '%s': %s", item, data["error"])
-        _cache[cache_key] = None
-        return None
-
-    results = data.get("shopping_results", [])
-    if not results:
-        logger.warning("No shopping results for '%s'", item)
-        _cache[cache_key] = None
-        return None
-
-    r = results[0]
-    name   = r.get("title", item)
+def _parse_shopping_result(r: dict, fallback_name: str) -> dict:
+    name   = r.get("title", fallback_name)
     seller = r.get("source", "")
     # SerpAPI often omits a direct retailer link; fall back to a Google Shopping
     # search URL for the exact product name so the button is always clickable.
@@ -101,7 +101,7 @@ def _search_product(item: str) -> Optional[dict]:
         or r.get("product_link")
         or "https://www.google.com/search?tbm=shop&q=" + urllib.parse.quote(name)
     )
-    product = {
+    return {
         "name":         name,
         "price":        r.get("extracted_price") or _parse_price(r.get("price", "0")),
         "image_url":    r.get("thumbnail", ""),
@@ -111,9 +111,71 @@ def _search_product(item: str) -> Optional[dict]:
         "category":     _infer_category(name, seller),
     }
 
-    logger.info("SerpAPI matched '%s' -> %s ($%.2f)", item, name, product["price"])
+
+def _shopping_search(query: str, num: int) -> list[dict]:
+    """Raw SerpAPI google_shopping call, parsed into our product shape.
+    Shared by _search_product (single best match, for the image pipeline)
+    and search_products (multiple results, for an explicit user search)."""
+    try:
+        resp = _session.get(
+            "https://serpapi.com/search",
+            params={
+                "engine":  "google_shopping",
+                "q":       query,
+                "api_key": _SERPAPI_KEY,
+                "num":     num,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("SerpAPI request failed for '%s': %s", query, exc)
+        return []
+
+    if "error" in data:
+        logger.warning("SerpAPI error for '%s': %s", query, data["error"])
+        return []
+
+    results = data.get("shopping_results", [])
+    if not results:
+        logger.warning("No shopping results for '%s'", query)
+        return []
+
+    return [_parse_shopping_result(r, query) for r in results[:num]]
+
+
+def _search_product(item: str) -> Optional[dict]:
+    cache_key = item.lower().strip()
+    if cache_key in _cache:
+        logger.info("Cache hit for: %s", item)
+        return _cache[cache_key]
+
+    results = _shopping_search(item, 3)
+    if not results:
+        _cache[cache_key] = None
+        return None
+
+    product = results[0]
+    logger.info("SerpAPI matched '%s' -> %s ($%.2f)", item, product["name"], product["price"])
     _cache[cache_key] = product
     return product
+
+
+def search_products(query: str, max_results: int = 5) -> list[dict]:
+    """Free-text Google Shopping search returning up to max_results distinct
+    products — unlike _search_product (single best match per detected item,
+    used by the image pipeline), this surfaces several options for an
+    explicit user search query to pick from."""
+    cache_key = f"q::{query.lower().strip()}::{max_results}"
+    if cache_key in _cache:
+        logger.info("Cache hit for query: %s", query)
+        return _cache[cache_key]
+
+    products = _shopping_search(query, max_results)
+    _cache[cache_key] = products
+    logger.info("SerpAPI search '%s' -> %d result(s)", query, len(products))
+    return products
 
 
 def _normalize_terms(terms: list[str] | None) -> list[str]:

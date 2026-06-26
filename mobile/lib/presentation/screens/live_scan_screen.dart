@@ -14,6 +14,7 @@ import '../../core/utils/tap_crop_utils.dart';
 import '../providers/pipeline_provider.dart';
 import '../widgets/info_tooltip_icon.dart';
 import '../widgets/object_glow_overlay.dart';
+import '../widgets/zoom_level_selector.dart';
 
 class LiveScanScreen extends ConsumerStatefulWidget {
   const LiveScanScreen({super.key});
@@ -30,6 +31,10 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
   bool _processing = false;
   bool _initialized = false;
   String? _error;
+  double _zoom = 1.0;
+  double _minZoom = 1.0;
+  double _maxZoom = 1.0;
+  double _baseZoom = 1.0;
 
   @override
   void initState() {
@@ -85,9 +90,15 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
       await ctrl.lockCaptureOrientation(DeviceOrientation.portraitUp);
       ctrl.startImageStream(_onFrame);
 
+      final minZoom = await ctrl.getMinZoomLevel();
+      final maxZoom = await ctrl.getMaxZoomLevel();
+
       setState(() {
         _cam = ctrl;
         _initialized = true;
+        _minZoom = minZoom;
+        _maxZoom = maxZoom;
+        _zoom = _zoom.clamp(minZoom, maxZoom);
       });
     } catch (e) {
       setState(() => _error = e.toString());
@@ -108,6 +119,15 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
     } finally {
       _processing = false;
     }
+  }
+
+  Future<void> _setZoom(double level) async {
+    final cam = _cam;
+    if (cam == null) return;
+    final clamped = level.clamp(_minZoom, _maxZoom);
+    if ((clamped - _zoom).abs() < 0.01) return;
+    await cam.setZoomLevel(clamped);
+    if (mounted) setState(() => _zoom = clamped);
   }
 
   InputImageRotation _sensorRotation(int sensorDegrees) {
@@ -231,8 +251,15 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // Camera preview
-          Center(child: CameraPreview(cam)),
+          // Camera preview (two-finger pinch to zoom)
+          GestureDetector(
+            onScaleStart: (_) => _baseZoom = _zoom,
+            onScaleUpdate: (details) {
+              if (details.pointerCount < 2) return;
+              _setZoom(_baseZoom * details.scale);
+            },
+            child: Center(child: CameraPreview(cam)),
+          ),
 
           // ML Kit real-time glow overlay
           if (_liveObjects.isNotEmpty)
@@ -285,6 +312,20 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
                 ),
               ),
             ),
+
+          // Zoom level presets
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 12),
+              child: ZoomLevelSelector(
+                currentZoom: _zoom,
+                minZoom: _minZoom,
+                maxZoom: _maxZoom,
+                onZoomSelected: _setZoom,
+              ),
+            ),
+          ),
 
           // Identify button
           Align(

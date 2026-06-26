@@ -1,4 +1,4 @@
-# shoplens-genai-mobile-chatbot-test-plan.md
+# shoplens-genai-mobile-chatbot-test-plan
 
 ## 1. Project Name
 

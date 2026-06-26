@@ -14,7 +14,7 @@ import '../../core/utils/tap_crop_utils.dart';
 import '../providers/pipeline_provider.dart';
 import '../widgets/info_tooltip_icon.dart';
 import '../widgets/object_glow_overlay.dart';
-import '../widgets/zoom_level_selector.dart';
+import '../widgets/zoom_slider.dart';
 
 class LiveScanScreen extends ConsumerStatefulWidget {
   const LiveScanScreen({super.key});
@@ -42,6 +42,11 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
   double _minZoom = 1.0;
   double _maxZoom = 1.0;
   double _baseZoom = 1.0;
+
+  // Hardware often reports an absolute digital-zoom ceiling well past the
+  // point of a usable image (some phones report >100x). Cap the UI/pinch
+  // range to something actually useful, like native camera apps do.
+  static const double _kMaxUsableZoom = 10.0;
 
   @override
   void initState() {
@@ -108,7 +113,7 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
         _minZoom = minZoom;
         _maxZoom = maxZoom;
         _logicalMinZoom = ultraWide != null ? 0.5 : minZoom;
-        _logicalMaxZoom = maxZoom;
+        _logicalMaxZoom = maxZoom > _kMaxUsableZoom ? _kMaxUsableZoom : maxZoom;
       });
     } catch (e) {
       setState(() => _error = e.toString());
@@ -387,16 +392,19 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
               ),
             ),
 
-          // Zoom level presets
+          // Zoom slider — docked low and away from the main preview area so
+          // it doesn't sit where a two-handed pinch gesture naturally lands.
           Align(
-            alignment: Alignment.centerRight,
-            child: Padding(
-              padding: const EdgeInsets.only(right: 12),
-              child: ZoomLevelSelector(
-                currentZoom: _zoom,
-                minZoom: _logicalMinZoom,
-                maxZoom: _logicalMaxZoom,
-                onZoomSelected: _setZoom,
+            alignment: Alignment.bottomCenter,
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: 110),
+                child: ZoomSlider(
+                  currentZoom: _zoom,
+                  minZoom: _logicalMinZoom,
+                  maxZoom: _logicalMaxZoom,
+                  onZoomChanged: _setZoom,
+                ),
               ),
             ),
           ),

@@ -35,3 +35,25 @@ workflows:
           cd build/ios/iphoneos && zip -r ShopLens.ipa Payload
     artifacts:
       - build/ios/iphoneos/ShopLens.ipa
+
+  android-apk:
+    name: Android APK
+    max_build_duration: 60
+    instance_type: linux_x2
+    environment:
+      flutter: stable
+      groups:
+        - firebase
+    working_directory: mobile
+    scripts:
+      - name: Inject secrets
+        script: |
+          echo $GOOGLE_SERVICES_JSON | base64 --decode > android/app/google-services.json
+          printf "ANALYZER_API_URL=%s\nMATCHER_API_URL=%s\nSTATE_API_URL=%s\nVOICE_ASSISTANT_API_URL=%s\n" \
+            "$ANALYZER_API_URL" "$MATCHER_API_URL" "$STATE_API_URL" "$VOICE_ASSISTANT_API_URL" > .env
+      - name: Flutter pub get
+        script: flutter pub get
+      - name: Build Android APK
+        script: flutter build apk --release
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk

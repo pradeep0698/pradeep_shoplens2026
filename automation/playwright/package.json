@@ -4,7 +4,7 @@
   "description": "Focused Playwright automation for the ShopLens image scan flow.",
   "main": "index.js",
   "scripts": {
-    "test": "playwright test tests/upload-analyze.spec.js",
+    "test": "playwright test upload-analyze.spec.js",
     "test:headed": "playwright test tests/upload-analyze.spec.js --headed",
     "test:debug": "playwright test tests/upload-analyze.spec.js --debug",
     "test:ui": "playwright test tests/upload-analyze.spec.js --ui",

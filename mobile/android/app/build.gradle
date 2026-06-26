@@ -24,11 +24,11 @@ android {
     }
 
     defaultConfig {
-        applicationId "com.shoplens.app"
+        applicationId "com.cookshop.mvp"
         minSdkVersion flutter.minSdkVersion
         targetSdk flutter.targetSdkVersion
         versionCode 1
-        versionName "1.0.0"
+        versionName "1.28.0"
     }
 
     buildTypes {

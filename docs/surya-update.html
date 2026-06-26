@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ShopLens — Engineering Update · June 2026</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #21262d;
+    --border: #30363d;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --accent3: #f78166;
+    --accent4: #d2a8ff;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --gold: #e3b341;
+  }
+
+  html, body {
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    overflow: hidden;
+  }
+
+  /* ── slide container ── */
+  .deck {
+    width: 100vw;
+    height: 100vh;
+    position: relative;
+  }
+
+  .slide {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    padding: 48px 64px 32px;
+    opacity: 0;
+    transition: opacity .4s ease;
+    overflow: hidden;
+  }
+  .slide.active {
+    display: flex;
+    opacity: 1;
+  }
+
+  /* ── header bar ── */
+  .slide-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 36px;
+    flex-shrink: 0;
+  }
+  .slide-header .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .slide-header .logo {
+    width: 36px; height: 36px;
+    background: linear-gradient(135deg, var(--accent), var(--accent4));
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 16px; color: #fff;
+  }
+  .slide-header .brand-name {
+    font-size: 18px; font-weight: 700; letter-spacing: -.3px;
+  }
+  .slide-header .date-tag {
+    font-size: 13px; color: var(--muted);
+    background: var(--surface2); border: 1px solid var(--border);
+    padding: 4px 12px; border-radius: 20px;
+  }
+
+  /* ── slide number ── */
+  .slide-num {
+    position: absolute;
+    bottom: 24px; right: 64px;
+    font-size: 13px; color: var(--muted);
+  }
+
+  /* ── navigation ── */
+  .nav {
+    position: fixed;
+    bottom: 24px; left: 50%;
+    transform: translateX(-50%);
+    display: flex; gap: 12px; align-items: center;
+    z-index: 100;
+  }
+  .nav button {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background .2s, border-color .2s;
+  }
+  .nav button:hover { background: var(--border); border-color: var(--accent); }
+  .nav .dots {
+    display: flex; gap: 8px; align-items: center;
+  }
+  .nav .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--border);
+    cursor: pointer; transition: background .2s, transform .2s;
+  }
+  .nav .dot.active { background: var(--accent); transform: scale(1.3); }
+
+  /* ── typography ── */
+  h1 {
+    font-size: 36px; font-weight: 800; letter-spacing: -.6px;
+    line-height: 1.15;
+    background: linear-gradient(90deg, var(--text) 60%, var(--accent));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 6px;
+  }
+  h2 { font-size: 13px; font-weight: 400; color: var(--muted); margin-bottom: 28px; text-transform: uppercase; letter-spacing: 1px; }
+  h3 { font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+
+  /* ── grid layouts ── */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; flex: 1; min-height: 0; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; flex: 1; min-height: 0; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; flex: 1; min-height: 0; }
+
+  /* ── cards ── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    display: flex; flex-direction: column;
+    gap: 8px;
+    transition: border-color .2s;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card .tag {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .8px;
+    padding: 3px 8px; border-radius: 4px;
+    width: fit-content;
+  }
+  .tag-green { background: rgba(63,185,80,.15); color: var(--accent2); border: 1px solid rgba(63,185,80,.3); }
+  .tag-blue  { background: rgba(88,166,255,.15); color: var(--accent);  border: 1px solid rgba(88,166,255,.3); }
+  .tag-red   { background: rgba(247,129,102,.15); color: var(--accent3); border: 1px solid rgba(247,129,102,.3); }
+  .tag-purple{ background: rgba(210,168,255,.15); color: var(--accent4); border: 1px solid rgba(210,168,255,.3); }
+  .tag-gold  { background: rgba(227,179,65,.15);  color: var(--gold);    border: 1px solid rgba(227,179,65,.3);  }
+
+  .card p { font-size: 13px; color: var(--muted); line-height: 1.55; }
+  .card .metric {
+    font-size: 28px; font-weight: 800; letter-spacing: -.5px;
+    margin: 4px 0;
+  }
+  .metric-green { color: var(--accent2); }
+  .metric-blue  { color: var(--accent); }
+  .metric-gold  { color: var(--gold); }
+
+  /* ── summary banner ── */
+  .summary-banner {
+    background: linear-gradient(135deg, rgba(63,185,80,.12), rgba(88,166,255,.12));
+    border: 1px solid rgba(63,185,80,.3);
+    border-radius: 12px;
+    padding: 16px 24px;
+    display: flex; align-items: center; gap: 24px;
+    margin-bottom: 16px;
+    flex-shrink: 0;
+  }
+  .summary-banner .stat { text-align: center; }
+  .summary-banner .stat-val { font-size: 26px; font-weight: 800; color: var(--accent2); }
+  .summary-banner .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .7px; }
+  .summary-banner .divider { width: 1px; height: 36px; background: var(--border); }
+  .summary-banner .note { font-size: 13px; color: var(--text); flex: 1; line-height: 1.5; }
+
+  /* ── pill list ── */
+  .pill-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+  .pill { font-size: 12px; padding: 4px 10px; border-radius: 20px; font-weight: 500; }
+
+  /* ── slide 2 specifics ── */
+  .roadmap-row {
+    display: flex; gap: 0;
+    flex: 1; min-height: 0;
+    position: relative;
+  }
+  .roadmap-row::before {
+    content: '';
+    position: absolute;
+    top: 50%; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--accent4), var(--accent), var(--accent2));
+    transform: translateY(-50%);
+    z-index: 0;
+  }
+  .roadmap-item {
+    flex: 1;
+    display: flex; flex-direction: column; align-items: center;
+    gap: 12px;
+    z-index: 1;
+    padding: 0 8px;
+  }
+  .roadmap-item.top { flex-direction: column; justify-content: flex-end; padding-bottom: 16px; }
+  .roadmap-item.bottom { flex-direction: column-reverse; justify-content: flex-end; padding-top: 16px; }
+  .road-dot {
+    width: 16px; height: 16px; border-radius: 50%;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .road-dot::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    opacity: .3;
+  }
+  .road-dot.purple { background: var(--accent4); }
+  .road-dot.purple::after { background: var(--accent4); }
+  .road-dot.blue { background: var(--accent); }
+  .road-dot.blue::after { background: var(--accent); }
+  .road-dot.green { background: var(--accent2); }
+  .road-dot.green::after { background: var(--accent2); }
+
+  .road-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    text-align: center;
+    width: 100%;
+  }
+  .road-card .road-phase { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .7px; margin-bottom: 4px; }
+  .road-card h3 { font-size: 14px; margin-bottom: 6px; }
+  .road-card p { font-size: 12px; color: var(--muted); line-height: 1.4; }
+
+  /* ── benefit grid (slide 2) ── */
+  .benefit-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-top: 16px;
+    flex-shrink: 0;
+  }
+  .benefit-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    text-align: center;
+  }
+  .benefit-card .icon { font-size: 24px; margin-bottom: 8px; }
+  .benefit-card h4 { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+  .benefit-card p { font-size: 12px; color: var(--muted); line-height: 1.4; }
+
+  /* ── slide 3 pricing ── */
+  .pricing-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+    flex: 1;
+    min-height: 0;
+    align-items: start;
+  }
+  .plan-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 16px;
+    display: flex; flex-direction: column; gap: 10px;
+    height: 100%;
+    position: relative;
+    transition: border-color .2s, transform .2s;
+  }
+  .plan-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+  .plan-card.featured {
+    border-color: var(--accent);
+    background: linear-gradient(160deg, rgba(88,166,255,.08) 0%, var(--surface) 60%);
+  }
+  .plan-card.ludicrous {
+    border-color: var(--gold);
+    background: linear-gradient(160deg, rgba(227,179,65,.12) 0%, var(--surface) 60%);
+  }
+  .plan-card .badge {
+    position: absolute; top: -10px; left: 50%; transform: translateX(-50%);
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px;
+    padding: 3px 10px; border-radius: 20px; white-space: nowrap;
+  }
+  .badge-blue  { background: var(--accent); color: #000; }
+  .badge-gold  { background: var(--gold); color: #000; }
+  .plan-name { font-size: 14px; font-weight: 700; }
+  .plan-price { font-size: 26px; font-weight: 800; }
+  .plan-price span { font-size: 13px; font-weight: 400; color: var(--muted); }
+  .plan-searches { font-size: 20px; font-weight: 700; color: var(--accent2); }
+  .plan-searches span { font-size: 12px; font-weight: 400; color: var(--muted); }
+  .plan-throughput { font-size: 12px; color: var(--muted); }
+  .plan-divider { height: 1px; background: var(--border); }
+  .plan-feature { font-size: 12px; color: var(--text); display: flex; align-items: flex-start; gap: 6px; }
+  .plan-feature::before { content: '✓'; color: var(--accent2); font-weight: 700; flex-shrink: 0; margin-top: 1px; }
+  .plan-feature.special::before { content: '⚡'; color: var(--gold); }
+  .plan-feature.neg::before { content: '—'; color: var(--border); }
+
+  /* ── big highlight box ── */
+  .highlight-row {
+    display: flex; gap: 14px; margin-top: 14px; flex-shrink: 0;
+  }
+  .highlight-box {
+    flex: 1;
+    border-radius: 12px;
+    padding: 16px 20px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .hl-gold { background: rgba(227,179,65,.1); border: 1px solid rgba(227,179,65,.4); }
+  .hl-blue { background: rgba(88,166,255,.1); border: 1px solid rgba(88,166,255,.4); }
+  .hl-green { background: rgba(63,185,80,.1); border: 1px solid rgba(63,185,80,.4); }
+  .hl-icon { font-size: 28px; flex-shrink: 0; }
+  .hl-text h4 { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+  .hl-text p  { font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+  /* keyboard hint */
+  .key-hint {
+    position: fixed; top: 16px; right: 24px;
+    font-size: 12px; color: var(--muted);
+  }
+  .key-hint kbd {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 6px; font-size: 11px;
+  }
+</style>
+</head>
+<body>
+
+<div class="key-hint">Navigate: <kbd>←</kbd> <kbd>→</kbd> or click below</div>
+
+<div class="deck" id="deck">
+
+  <!-- ══════════════════════════════════════════════
+       SLIDE 1 — API Performance Improvements
+  ══════════════════════════════════════════════ -->
+  <div class="slide active" id="s1">
+    <div class="slide-header">
+      <div class="brand">
+        <div class="logo">SL</div>
+        <div class="brand-name">ShopLens AI</div>
+      </div>
+      <div class="date-tag">Engineering Update · June 21, 2026</div>
+    </div>
+
+    <h1>API Performance Improvements</h1>
+    <h2>ai-analyzer · /analyze &amp; /identify endpoints</h2>
+
+    <!-- summary banner -->
+    <div class="summary-banner">
+      <div class="stat"><div class="stat-val">~37%</div><div class="stat-label">End-to-End Speedup</div></div>
+      <div class="divider"></div>
+      <div class="stat"><div class="stat-val">50%</div><div class="stat-label">SerpAPI Calls Saved</div></div>
+      <div class="divider"></div>
+      <div class="stat"><div class="stat-val">2×+</div><div class="stat-label">Faster AI Detection</div></div>
+      <div class="divider"></div>
+      <div class="note">All improvements were validated in production, not just on a test harness. Results are measured as median response time across 5+ real-world runs per change.</div>
+    </div>
+
+    <!-- cards grid -->
+    <div style="display:grid; grid-template-columns: repeat(4,1fr); gap:12px; flex:1; min-height:0; overflow:hidden;">
+
+      <div class="card">
+        <div class="tag tag-green">Shipped · +37% e2e</div>
+        <h3>Dropped Dead Lens Tab</h3>
+        <div class="metric metric-green">47s → 30s</div>
+        <p>Google Lens "products" pass was returning 0 results on every sampled production call (50/50 checks). Removed entirely — cutting SerpAPI quota in half with no loss of results.</p>
+      </div>
+
+      <div class="card">
+        <div class="tag tag-green">Shipped · 2× faster</div>
+        <h3>Faster AI Model (Flash)</h3>
+        <div class="metric metric-green">50s → 23s</div>
+        <p>Switched object detection from Gemini 2.5 Pro to Gemini 2.5 Flash. Validated across 5 runs — all prominent items still correctly identified with no hallucinations. Slightly fewer minor items detected, but accuracy on key products is maintained.</p>
+      </div>
+
+      <div class="card">
+        <div class="tag tag-green">Shipped · ~16% faster</div>
+        <h3>Smarter Image Sizing</h3>
+        <div class="metric metric-green">47s → 39s</div>
+        <p>Images sent to Gemini now capped at 1280 px — per Google's own recommendation. Crop quality is unaffected (uses original bytes). Reduces AI token cost and processing time.</p>
+      </div>
+
+      <div class="card">
+        <div class="tag tag-green">Shipped · ~9.5% faster</div>
+        <h3>Connection Reuse</h3>
+        <div class="metric metric-green">68s → 61s</div>
+        <p>SerpAPI calls now share a persistent HTTP session. Previously each of up to 20 concurrent calls opened a fresh TCP/TLS handshake — eliminating that overhead for every request.</p>
+      </div>
+
+      <div class="card">
+        <div class="tag tag-blue">Shipped · Concurrency</div>
+        <h3>Fixed Request Blocking</h3>
+        <div class="metric metric-blue">1 → ∞</div>
+        <p>Blocking code inside async handlers was silently limiting throughput to 1 request at a time per server instance. Fixed with proper async threading — removes the hard concurrency ceiling under load.</p>
+      </div>
+
+      <div class="card">
+        <div class="tag tag-blue">Shipped · Efficiency</div>
+        <h3>Removed Redundant Cleanup</h3>
+        <p style="margin-top:4px;">Eliminated synchronous GCS file deletions from the response critical path on both /analyze and /identify. The storage bucket already auto-deletes via a 1-day lifecycle rule — these were blocking calls for no benefit.</p>
+      </div>
+
+      <div class="card">
+        <div class="tag tag-purple">Shipped · Observability</div>
+        <h3>Structured Timing Logs</h3>
+        <p style="margin-top:4px;">Added per-stage TIMING logs (AI detection / Lens / Shopping / crop / items) to all endpoints. Future performance work no longer requires manual log digging — every bottleneck is now measured automatically.</p>
+      </div>
+
+      <div class="card">
+        <div class="tag tag-red">Tested &amp; Reverted</div>
+        <h3>What We Tried &amp; Why We Rolled Back</h3>
+        <p style="margin-top:4px;"><strong style="color:var(--text)">Conditional Lens skip:</strong> Added +25% latency — Pass 1 always ran anyway, sequentially.<br><br><strong style="color:var(--text)">Flash for descriptions:</strong> 44% speedup but misidentified crops 5/6 times. Accuracy wins over speed here.</p>
+      </div>
+
+    </div>
+
+    <div class="slide-num">1 / 3</div>
+  </div><!-- /slide 1 -->
+
+
+  <!-- ══════════════════════════════════════════════
+       SLIDE 2 — ML Edge: Local Object Detection
+  ══════════════════════════════════════════════ -->
+  <div class="slide" id="s2">
+    <div class="slide-header">
+      <div class="brand">
+        <div class="logo">SL</div>
+        <div class="brand-name">ShopLens AI</div>
+      </div>
+      <div class="date-tag">Engineering Update · June 21, 2026</div>
+    </div>
+
+    <h1>Next Frontier: On-Device ML</h1>
+    <h2>Planning · Local Object Detection to Replace Cloud Round-Trips</h2>
+
+    <!-- current vs future -->
+    <div style="display:grid; grid-template-columns:1fr 60px 1fr; gap:0; margin-bottom:16px; flex-shrink:0;">
+      <div class="card" style="border-color: rgba(247,129,102,.4);">
+        <div class="tag tag-red">Current Architecture</div>
+        <h3 style="margin-top:4px;">Cloud-Only Detection</h3>
+        <div style="margin-top:8px; display:flex; flex-direction:column; gap:8px;">
+          <div class="plan-feature neg" style="font-size:13px;">Image uploaded to Google Cloud</div>
+          <div class="plan-feature neg" style="font-size:13px;">Gemini AI processes detection remotely</div>
+          <div class="plan-feature neg" style="font-size:13px;">20–50 s round-trip per request</div>
+          <div class="plan-feature neg" style="font-size:13px;">Every request burns cloud + SerpAPI quota</div>
+          <div class="plan-feature neg" style="font-size:13px;">No offline capability</div>
+        </div>
+      </div>
+
+      <div style="display:flex; align-items:center; justify-content:center; font-size:28px; color:var(--accent);">→</div>
+
+      <div class="card" style="border-color: rgba(63,185,80,.4); background: linear-gradient(160deg,rgba(63,185,80,.06),var(--surface));">
+        <div class="tag tag-green">Target Architecture</div>
+        <h3 style="margin-top:4px;">Edge + Cloud Hybrid</h3>
+        <div style="margin-top:8px; display:flex; flex-direction:column; gap:8px;">
+          <div class="plan-feature" style="font-size:13px;">Lightweight model runs directly on device</div>
+          <div class="plan-feature" style="font-size:13px;">Objects detected in &lt;1 s locally, no cloud call</div>
+          <div class="plan-feature" style="font-size:13px;">Cloud only invoked for complex / ambiguous items</div>
+          <div class="plan-feature" style="font-size:13px;">Dramatically lower API cost per scan</div>
+          <div class="plan-feature" style="font-size:13px;">Works offline or on slow connections</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- roadmap timeline -->
+    <div style="margin-bottom:4px; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.8px; flex-shrink:0;">Implementation Roadmap</div>
+    <div style="display:grid; grid-template-columns: repeat(4,1fr); gap:12px; flex:1; min-height:0;">
+
+      <div class="card" style="border-color: rgba(210,168,255,.35);">
+        <div class="tag tag-purple">Phase 1 · Research</div>
+        <h3 style="margin-top:4px;">Model Selection</h3>
+        <p>Evaluate lightweight on-device models (YOLOv8-nano, MobileNetV4, MediaPipe) against ShopLens product category distribution. Target: &lt;50 MB model size, &gt;85% accuracy on top 20 categories.</p>
+      </div>
+
+      <div class="card" style="border-color: rgba(88,166,255,.35);">
+        <div class="tag tag-blue">Phase 2 · Prototype</div>
+        <h3 style="margin-top:4px;">Fine-Tuning &amp; Benchmarking</h3>
+        <p>Fine-tune selected model on ShopLens image dataset. Benchmark latency on mid-range Android and iOS. Establish confidence threshold for "local is good enough vs. escalate to cloud."</p>
+      </div>
+
+      <div class="card" style="border-color: rgba(88,166,255,.35);">
+        <div class="tag tag-blue">Phase 3 · Integration</div>
+        <h3 style="margin-top:4px;">App Integration &amp; A/B Test</h3>
+        <p>Bundle model into Flutter app via TFLite / Core ML. Implement confidence-based fallback to cloud. A/B test speed perception and result quality against current cloud-only baseline.</p>
+      </div>
+
+      <div class="card" style="border-color: rgba(63,185,80,.35);">
+        <div class="tag tag-green">Phase 4 · Launch</div>
+        <h3 style="margin-top:4px;">Rollout &amp; Iteration</h3>
+        <p>Gradual rollout starting with highest-traffic categories. Monitor cloud fallback rate as the KPI — goal is &gt;70% of scans handled fully on-device with no quality degradation.</p>
+      </div>
+
+    </div>
+
+    <!-- benefit row -->
+    <div class="highlight-row" style="margin-top:14px; flex-shrink:0;">
+      <div class="highlight-box hl-green">
+        <div class="hl-icon">⚡</div>
+        <div class="hl-text"><h4>Sub-second Detection</h4><p>Local inference avoids all network round-trips — first results appear before the user lifts their finger.</p></div>
+      </div>
+      <div class="highlight-box hl-blue">
+        <div class="hl-icon">💰</div>
+        <div class="hl-text"><h4>Lower API Costs</h4><p>70%+ of scans handled on-device means a proportional reduction in Gemini and SerpAPI spend per MAU.</p></div>
+      </div>
+      <div class="highlight-box hl-gold">
+        <div class="hl-icon">🔒</div>
+        <div class="hl-text"><h4>Privacy &amp; Resilience</h4><p>No image leaves the device for routine scans. Works on poor connectivity — opens emerging-market use cases.</p></div>
+      </div>
+    </div>
+
+    <div class="slide-num">2 / 3</div>
+  </div><!-- /slide 2 -->
+
+
+  <!-- ══════════════════════════════════════════════
+       SLIDE 3 — SerpAPI Pricing Plans
+  ══════════════════════════════════════════════ -->
+  <div class="slide" id="s3">
+    <div class="slide-header">
+      <div class="brand">
+        <div class="logo">SL</div>
+        <div class="brand-name">ShopLens AI</div>
+      </div>
+      <div class="date-tag">Engineering Update · June 21, 2026</div>
+    </div>
+
+    <h1>SerpAPI: Scaling Our Search Capacity</h1>
+    <h2>Pricing Plans &amp; Upgrade Considerations — serpapi.com/pricing</h2>
+
+    <div class="pricing-grid">
+
+      <!-- Free -->
+      <div class="plan-card">
+        <div class="plan-name">Free</div>
+        <div class="plan-price">$0 <span>/ month</span></div>
+        <div class="plan-searches">250 <span>searches/mo</span></div>
+        <div class="plan-throughput">50 / hour throughput</div>
+        <div class="plan-divider"></div>
+        <div class="plan-feature">U.S. Legal Shield</div>
+        <div class="plan-feature neg">Low volume only</div>
+        <div class="plan-feature neg">Not for production</div>
+      </div>
+
+      <!-- Starter -->
+      <div class="plan-card">
+        <div class="plan-name">Starter</div>
+        <div class="plan-price">$25 <span>/ month</span></div>
+        <div class="plan-searches">1,000 <span>searches/mo</span></div>
+        <div class="plan-throughput">200 / hour throughput</div>
+        <div class="plan-divider"></div>
+        <div class="plan-feature">U.S. Legal Shield</div>
+        <div class="plan-feature">Month-to-month</div>
+        <div class="plan-feature neg">Light internal use</div>
+      </div>
+
+      <!-- Developer -->
+      <div class="plan-card">
+        <div class="plan-name">Developer</div>
+        <div class="plan-price">$75 <span>/ month</span></div>
+        <div class="plan-searches">5,000 <span>searches/mo</span></div>
+        <div class="plan-throughput">1,000 / hour throughput</div>
+        <div class="plan-divider"></div>
+        <div class="plan-feature">U.S. Legal Shield</div>
+        <div class="plan-feature">Month-to-month</div>
+        <div class="plan-feature">Good for early growth</div>
+      </div>
+
+      <!-- Production (featured) -->
+      <div class="plan-card featured">
+        <div class="badge badge-blue">Most Popular</div>
+        <div class="plan-name" style="color:var(--accent);">Production</div>
+        <div class="plan-price" style="color:var(--accent);">$150 <span>/ month</span></div>
+        <div class="plan-searches">15,000 <span>searches/mo</span></div>
+        <div class="plan-throughput">3,000 / hour throughput</div>
+        <div class="plan-divider"></div>
+        <div class="plan-feature">U.S. Legal Shield</div>
+        <div class="plan-feature">Month-to-month</div>
+        <div class="plan-feature">High throughput</div>
+        <div class="plan-feature">Current recommendation</div>
+      </div>
+
+      <!-- Ludicrous Speed Max -->
+      <div class="plan-card ludicrous">
+        <div class="badge badge-gold">⚡ Max Speed</div>
+        <div class="plan-name" style="color:var(--gold);">Ludicrous Speed Max</div>
+        <div class="plan-price" style="color:var(--gold);">Custom <span>/ month</span></div>
+        <div class="plan-searches">Unlimited <span>/ enterprise</span></div>
+        <div class="plan-throughput">Maximum throughput tier</div>
+        <div class="plan-divider"></div>
+        <div class="plan-feature special">Highest throughput available</div>
+        <div class="plan-feature special">Enterprise-grade SLA</div>
+        <div class="plan-feature special">ZeroTrace Mode</div>
+        <div class="plan-feature special">Priority support</div>
+        <div class="plan-feature special">Custom search limits</div>
+      </div>
+
+    </div><!-- /pricing-grid -->
+
+    <!-- highlight row -->
+    <div class="highlight-row">
+      <div class="highlight-box hl-blue">
+        <div class="hl-icon">📊</div>
+        <div class="hl-text">
+          <h4>Current Situation</h4>
+          <p>Dropping the dead Lens tab halved our SerpAPI call volume (1 call/item instead of 2). This directly extends the life of our current plan tier and delays the need to upgrade.</p>
+        </div>
+      </div>
+      <div class="highlight-box hl-gold">
+        <div class="hl-icon">🚀</div>
+        <div class="hl-text">
+          <h4>Ludicrous Speed Max — When We Need It</h4>
+          <p>Enterprise plan with custom limits, maximum throughput, ZeroTrace privacy mode, and dedicated support. Ideal when ShopLens scales to hundreds of concurrent users and per-item scan volume outgrows the Production tier.</p>
+        </div>
+      </div>
+      <div class="highlight-box hl-green">
+        <div class="hl-icon">🎯</div>
+        <div class="hl-text">
+          <h4>Recommended Path</h4>
+          <p>Stay on Production ($150/mo, 15K searches) now. On-device ML (Slide 2) will further reduce cloud calls. Revisit Ludicrous Speed Max when MAU growth pushes past 15K searches/month.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="slide-num">3 / 3</div>
+  </div><!-- /slide 3 -->
+
+</div><!-- /deck -->
+
+<!-- nav -->
+<div class="nav">
+  <button id="btnPrev">← Prev</button>
+  <div class="dots">
+    <div class="dot active" onclick="goTo(0)"></div>
+    <div class="dot" onclick="goTo(1)"></div>
+    <div class="dot" onclick="goTo(2)"></div>
+  </div>
+  <button id="btnNext">Next →</button>
+</div>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  const dots   = document.querySelectorAll('.dot');
+  let current  = 0;
+
+  function goTo(n) {
+    slides[current].classList.remove('active');
+    dots[current].classList.remove('active');
+    current = Math.max(0, Math.min(slides.length - 1, n));
+    slides[current].classList.add('active');
+    dots[current].classList.add('active');
+  }
+
+  document.getElementById('btnPrev').addEventListener('click', () => goTo(current - 1));
+  document.getElementById('btnNext').addEventListener('click', () => goTo(current + 1));
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown')  goTo(current + 1);
+    if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')    goTo(current - 1);
+  });
+</script>
+</body>
+</html>

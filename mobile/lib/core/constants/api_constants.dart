@@ -1,11 +1,28 @@
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class ApiConstants {
-  static String get analyzerBaseUrl => dotenv.env['ANALYZER_API_URL']!;
-  static String get matcherBaseUrl => dotenv.env['MATCHER_API_URL']!;
-  static String get stateBaseUrl => dotenv.env['STATE_API_URL']!;
+  // Prefer compile-time dart-define (set via --dart-define-from-file) so that
+  // environment-specific builds (e.g. cookshop-dev) don't require swapping .env.
+  // Falls back to the runtime .env file for local development.
+  static String get analyzerBaseUrl =>
+      const String.fromEnvironment('ANALYZER_API_URL').isNotEmpty
+          ? const String.fromEnvironment('ANALYZER_API_URL')
+          : dotenv.env['ANALYZER_API_URL']!;
 
-  static String get voiceAssistantBaseUrl => dotenv.env['VOICE_ASSISTANT_API_URL']!;
+  static String get matcherBaseUrl =>
+      const String.fromEnvironment('MATCHER_API_URL').isNotEmpty
+          ? const String.fromEnvironment('MATCHER_API_URL')
+          : dotenv.env['MATCHER_API_URL']!;
+
+  static String get stateBaseUrl =>
+      const String.fromEnvironment('STATE_API_URL').isNotEmpty
+          ? const String.fromEnvironment('STATE_API_URL')
+          : dotenv.env['STATE_API_URL']!;
+
+  static String get voiceAssistantBaseUrl =>
+      const String.fromEnvironment('VOICE_ASSISTANT_API_URL').isNotEmpty
+          ? const String.fromEnvironment('VOICE_ASSISTANT_API_URL')
+          : dotenv.env['VOICE_ASSISTANT_API_URL']!;
 
   // The backend returns a relative ws_url (e.g. "/voice/session/{id}/stream");
   // combine it with the host here rather than hardcoding it server-side.

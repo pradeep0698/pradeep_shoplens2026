@@ -10,6 +10,12 @@ test('ShopLens image scan flow', async ({ page }, testInfo) => {
   await loginPage.open();
   await loginPage.login(credentials.regularUser.userId, credentials.regularUser.password);
 
+  // Attach input image to Playwright report so it shows correctly in GitHub Actions report
+  await testInfo.attach('uploaded-test-image', {
+    path: files.imagePath,
+    contentType: 'image/png',
+  });
+
   await shopLensPage.uploadImageFromGallery(files.imagePath);
   await shopLensPage.scanImage();
   await shopLensPage.checkMatchedProducts();

@@ -1,7 +1,7 @@
 const { test } = require('@playwright/test');
 const { LoginPage } = require('../pages/LoginPage');
 const { ShopLensPage } = require('../pages/ShopLensPage');
-const { credentials, files } = require('../utils/testData');
+const { credentials, files } = require('../testData/testData');
 
 test('ShopLens image scan flow', async ({ page }, testInfo) => {
   const loginPage = new LoginPage(page);

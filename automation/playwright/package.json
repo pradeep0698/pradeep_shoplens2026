@@ -1,0 +1,24 @@
+{
+  "name": "shoplens-playwright-e2e",
+  "version": "1.0.0",
+  "description": "Focused Playwright automation for the ShopLens image scan flow.",
+  "main": "index.js",
+  "scripts": {
+    "test": "playwright test tests/upload-analyze.spec.js",
+    "test:headed": "playwright test tests/upload-analyze.spec.js --headed",
+    "test:debug": "playwright test tests/upload-analyze.spec.js --debug",
+    "test:ui": "playwright test tests/upload-analyze.spec.js --ui",
+    "report": "playwright show-report"
+  },
+  "keywords": [
+    "playwright",
+    "e2e",
+    "shoplens",
+    "image-scan"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.53.0"
+  }
+}

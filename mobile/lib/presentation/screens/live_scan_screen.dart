@@ -392,19 +392,17 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
               ),
             ),
 
-          // Zoom slider — docked low and away from the main preview area so
-          // it doesn't sit where a two-handed pinch gesture naturally lands.
+          // Zoom slider — a small vertical bar docked on the side rather
+          // than a bar spanning the camera preview.
           Align(
-            alignment: Alignment.bottomCenter,
-            child: SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 110),
-                child: ZoomSlider(
-                  currentZoom: _zoom,
-                  minZoom: _logicalMinZoom,
-                  maxZoom: _logicalMaxZoom,
-                  onZoomChanged: _setZoom,
-                ),
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 10),
+              child: ZoomSlider(
+                currentZoom: _zoom,
+                minZoom: _logicalMinZoom,
+                maxZoom: _logicalMaxZoom,
+                onZoomChanged: _setZoom,
               ),
             ),
           ),

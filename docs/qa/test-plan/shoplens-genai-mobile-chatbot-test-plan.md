@@ -1,4 +1,4 @@
-# ShopLens GenAI Mobile Voice Chatbot Test Plan
+# shoplens-genai-mobile-chatbot-test-plan.md
 
 ## 1. Project Name
 

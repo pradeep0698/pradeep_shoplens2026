@@ -9,7 +9,7 @@ const credentials = {
 
 const files = {
   imageFileName: 'Nikeshoe.png',
-  imagePath: path.join(__dirname, '..', 'test-data', 'images', 'Nikeshoe.png'),
+  imagePath: path.join(__dirname, 'Nikeshoe.png'),
 };
 
 module.exports = {

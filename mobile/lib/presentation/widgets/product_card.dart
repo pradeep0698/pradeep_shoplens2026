@@ -1,8 +1,18 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../core/constants/api_constants.dart';
 import '../../core/utils/product_ranker.dart';
 import '../../data/models/product.dart';
+
+// Google's image CDN (where every thumbnail we're handed points) never sends
+// Access-Control-Allow-Origin, so on Flutter web the browser silently blocks
+// a direct cross-origin fetch of it regardless of any headers we set
+// client-side. Routing through product-matcher's GET /thumbnail proxy
+// (services/product-matcher/main.py) instead works because that response
+// comes from our own CORS-enabled origin.
+String _proxiedThumbnailUrl(String rawUrl) =>
+    '${ApiConstants.matcherBaseUrl}/thumbnail?url=${Uri.encodeQueryComponent(rawUrl)}';
 
 class ProductCard extends StatelessWidget {
   const ProductCard({
@@ -34,11 +44,7 @@ class ProductCard extends StatelessWidget {
               borderRadius: BorderRadius.circular(10),
               child: product.imageUrl.isNotEmpty
                   ? CachedNetworkImage(
-                      imageUrl:    product.imageUrl,
-                      httpHeaders: const {
-                        'Referer': 'https://www.google.com/',
-                        'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-                      },
+                      imageUrl:    _proxiedThumbnailUrl(product.imageUrl),
                       placeholder: (_, __) => _placeholder(),
                       errorWidget: (_, __, ___) => _placeholder(),
                       width:       64,

@@ -1,6 +1,6 @@
 workflows:
-  ios-unsigned:
-    name: iOS Unsigned IPA
+  mobile-dual-build:
+    name: Flutter Android & iOS Build
     max_build_duration: 60
     environment:
       flutter: stable
@@ -16,10 +16,13 @@ workflows:
       - name: Inject secrets
         script: |
           echo $GOOGLE_SERVICE_INFO_PLIST | base64 --decode > ios/Runner/GoogleService-Info.plist
+          echo $GOOGLE_SERVICES_JSON | base64 --decode > android/app/google-services.json
           printf "ANALYZER_API_URL=%s\nMATCHER_API_URL=%s\nSTATE_API_URL=%s\nVOICE_ASSISTANT_API_URL=%s\n" \
             "$ANALYZER_API_URL" "$MATCHER_API_URL" "$STATE_API_URL" "$VOICE_ASSISTANT_API_URL" > .env
       - name: Flutter pub get
         script: flutter pub get
+      - name: Build Android APK
+        script: flutter build apk --release
       - name: Install CocoaPods
         script: cd ios && pod install
       - name: Patch Xcode signing
@@ -34,4 +37,5 @@ workflows:
           cp -r build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/
           cd build/ios/iphoneos && zip -r ShopLens.ipa Payload
     artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
       - build/ios/iphoneos/ShopLens.ipa

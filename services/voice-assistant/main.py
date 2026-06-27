@@ -92,6 +92,14 @@ def _require_uid(request: Request) -> str:
         raise HTTPException(status_code=401, detail=str(exc))
 
 
+class SessionStartRequest(BaseModel):
+    # "preferences" (forced first-run onboarding) or "search" (every other
+    # voice session) — see live_session.py's SessionState.mode. Defaults to
+    # "preferences" so a stale client that never sends a body keeps the old
+    # behavior.
+    mode: str = "preferences"
+
+
 class SessionStartResponse(BaseModel):
     session_id: str
     ws_url: str
@@ -99,14 +107,15 @@ class SessionStartResponse(BaseModel):
 
 
 @app.post("/voice/session/start")
-async def start_session(http_request: Request) -> JSONResponse:
+async def start_session(http_request: Request, body: SessionStartRequest = SessionStartRequest()) -> JSONResponse:
     req_id = uuid.uuid4().hex[:8]
     _request_id_ctx.set(req_id)
     start = time.monotonic()
 
     uid = _require_uid(http_request)
     existing_profile = profile_store.get_profile(uid)
-    session = await session_registry.create(uid=uid, existing_profile=existing_profile)
+    mode = body.mode if body.mode == "search" else "preferences"
+    session = await session_registry.create(uid=uid, existing_profile=existing_profile, mode=mode)
 
     elapsed = time.monotonic() - start
     logger.info("voice session start uid=%s session_id=%s in %.2fs", uid, session.session_id, elapsed)
@@ -149,7 +158,7 @@ async def finalize_session(request: SessionFinalizeRequest, http_request: Reques
 
     uid = _require_uid(http_request)
     try:
-        result = profile_store.merge_and_save(uid, request.confirmed_patch)
+        result = profile_store.save_reviewed_profile(uid, request.confirmed_patch)
     except Exception as exc:
         elapsed = time.monotonic() - start
         logger.exception(

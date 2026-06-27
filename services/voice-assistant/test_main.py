@@ -38,11 +38,11 @@ def test_finalize_session_requires_authorization_header(client):
     assert response.status_code == 401
 
 
-def test_finalize_session_merges_and_returns_result(client, monkeypatch):
+def test_finalize_session_saves_reviewed_patch_and_returns_result(client, monkeypatch):
     monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
     monkeypatch.setattr(
         profile_store,
-        "merge_and_save",
+        "save_reviewed_profile",
         lambda uid, patch: {
             "shopping_categories": patch.get("shopping_categories", []),
             "preference_terms": patch.get("preference_terms", []),
@@ -61,6 +61,43 @@ def test_finalize_session_merges_and_returns_result(client, monkeypatch):
     body = response.json()
     assert body["shopping_categories"] == ["Electronics"]
     assert body["conflicts"] == []
+
+
+def test_start_session_defaults_to_preferences_mode_without_a_body(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+
+    response = client.post("/voice/session/start", headers={"Authorization": "Bearer faketoken"})
+
+    assert response.status_code == 200
+    session = main.session_registry._sessions[response.json()["session_id"]]
+    assert session.mode == "preferences"
+
+
+def test_start_session_threads_search_mode_into_the_created_session(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+
+    response = client.post(
+        "/voice/session/start", json={"mode": "search"}, headers={"Authorization": "Bearer faketoken"}
+    )
+
+    assert response.status_code == 200
+    session = main.session_registry._sessions[response.json()["session_id"]]
+    assert session.mode == "search"
+
+
+def test_start_session_rejects_unknown_mode_value_by_falling_back_to_preferences(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+
+    response = client.post(
+        "/voice/session/start", json={"mode": "not-a-real-mode"}, headers={"Authorization": "Bearer faketoken"}
+    )
+
+    assert response.status_code == 200
+    session = main.session_registry._sessions[response.json()["session_id"]]
+    assert session.mode == "preferences"
 
 
 def test_session_event_requires_authorization_header(client):

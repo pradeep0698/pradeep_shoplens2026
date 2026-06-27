@@ -9,9 +9,14 @@ class VoiceApi {
   VoiceApi(this._dio);
 
   // Calls POST /voice/session/start on the voice-assistant Cloud Run service.
-  Future<VoiceSessionStartResponse> startSession() async {
+  // mode "preferences" is the forced first-run onboarding conversation that
+  // learns/saves shopping preferences; "search" (every other session) is a
+  // conversational product search instead — see live_session.py's SessionState.mode.
+  Future<VoiceSessionStartResponse> startSession({required bool isOnboarding}) async {
     try {
-      final response = await _dio.post('/voice/session/start');
+      final response = await _dio.post('/voice/session/start', data: {
+        'mode': isOnboarding ? 'preferences' : 'search',
+      });
       return VoiceSessionStartResponse.fromJson(response.data as Map<String, dynamic>);
     } on DioException catch (e) {
       throw AnalyzerException.fromDioException(e);

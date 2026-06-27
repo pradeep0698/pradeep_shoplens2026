@@ -8,6 +8,7 @@ import pytest
 import live_session
 import profile_store
 from live_session import (
+    SEARCH_PRODUCTS,
     SessionRegistry,
     SessionState,
     VOICE_CATEGORIES,
@@ -178,6 +179,11 @@ def test_filter_categories_handles_none_and_empty():
     assert _filter_categories([]) == []
 
 
+def test_filter_categories_requires_evidence_when_text_is_available():
+    assert _filter_categories(["Sports & Outdoors"], "I like cotton materials") == []
+    assert _filter_categories(["Clothing"], "I shop for clothes") == ["Clothing"]
+
+
 def test_voice_categories_has_exactly_the_eight_fixed_values():
     assert VOICE_CATEGORIES == [
         "Furniture",
@@ -235,7 +241,9 @@ def test_profile_note_summarizes_existing_data():
 
 
 def test_system_prompt_embeds_profile_note():
-    prompt = _system_prompt({"shopping_categories": ["Electronics"], "preference_terms": [], "ignore_terms": []})
+    prompt = _system_prompt(
+        {"shopping_categories": ["Electronics"], "preference_terms": [], "ignore_terms": []}, "preferences"
+    )
     assert "shops for Electronics" in prompt
     assert "ready_to_finalize" in prompt
 
@@ -245,18 +253,43 @@ def test_system_prompt_tells_model_to_mention_finishing_in_greeting():
     deciding to wrap up — the opening greeting should tell them they can say
     "I'm done" (or tap the done button) any time, mirroring the mock
     greeting in _run_mock_session."""
-    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []})
+    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences")
     assert "i'm done" in prompt.lower()
 
 
+def test_system_prompt_search_mode_uses_search_template_and_tool():
+    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search")
+    assert "search_products" in prompt
+    assert "ready_to_finalize" not in prompt
+
+
+def test_system_prompt_search_mode_asks_follow_up_before_searching_vague_request():
+    """Every search_products call costs a real SerpAPI request — the prompt
+    should steer the model to narrow down a bare/vague request with a
+    follow-up before searching, instead of searching on the first mention."""
+    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search")
+    assert "follow-up" in prompt.lower()
+    assert "distinguishing detail" in prompt.lower()
+
+
+def test_system_prompt_search_mode_avoids_repeat_searches_for_rephrasing():
+    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search")
+    assert "rephrased" in prompt.lower()
+
+
+def test_system_prompt_preferences_mode_follows_up_on_same_category_before_moving_on():
+    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences")
+    assert "same category" in prompt.lower()
+
+
 def test_live_config_defaults_to_puck_voice():
-    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []})
+    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences")
     assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Puck"
 
 
 def test_live_config_respects_voice_name_env_override(monkeypatch):
     monkeypatch.setattr(live_session, "_VOICE_NAME", "Kore")
-    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []})
+    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences")
     assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Kore"
 
 
@@ -264,8 +297,26 @@ def test_live_config_disables_automatic_activity_detection():
     """Turn boundaries are now driven by the client's hold-to-talk button
     (speech_start/speech_end -> activity_start/activity_end), not Gemini's
     own VAD over the resampled mic audio."""
-    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []})
+    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences")
     assert config.realtime_input_config.automatic_activity_detection.disabled is True
+
+
+def test_live_config_preferences_mode_uses_preference_tools():
+    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences")
+    names = {fn.name for tool in config.tools for fn in tool.function_declarations}
+    assert names == {"ready_to_finalize", "record_preference"}
+
+
+def test_live_config_search_mode_uses_search_tool():
+    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search")
+    names = {fn.name for tool in config.tools for fn in tool.function_declarations}
+    assert names == {"search_products"}
+
+
+def test_search_products_tool_description_requires_a_distinguishing_detail():
+    description = SEARCH_PRODUCTS.description.lower()
+    assert "distinguishing detail" in description
+    assert "bare category" in description
 
 
 @pytest.mark.asyncio
@@ -328,6 +379,70 @@ async def test_dispatch_record_preference_accumulates_and_dedupes_across_calls()
     assert session.latest_patch["shopping_categories"] == ["Clothing"]
     # "nike" deduped case-insensitively against the already-recorded "Nike".
     assert session.latest_patch["preference_terms"] == ["Nike", "Adidas"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_record_preference_ignore_term_removes_matching_category():
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+    session.transcript.append({"role": "user", "text": "I shop for clothes"})
+
+    await _dispatch_tool_call("record_preference", {"shopping_categories": ["Clothing"]}, session)
+    await _dispatch_tool_call("record_preference", {"ignore_terms": ["clothes"]}, session)
+
+    assert session.latest_patch["shopping_categories"] == []
+    assert session.latest_patch["ignore_terms"] == ["clothes"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_search_products_calls_search_and_returns_products(monkeypatch):
+    captured = {}
+
+    async def fake_search(query, max_results):
+        captured["query"] = query
+        captured["max_results"] = max_results
+        return [{"name": "Wireless Headphones", "price": 29.99}]
+
+    monkeypatch.setattr(live_session, "_search_shopping", fake_search)
+    session = SessionState(
+        session_id="s1", uid="user-1", existing_profile={"max_searches_per_run": 3}, mode="search"
+    )
+
+    result = await _dispatch_tool_call("search_products", {"query": "wireless headphones"}, session)
+
+    assert captured == {"query": "wireless headphones", "max_results": 3}
+    assert result == {
+        "status": "found",
+        "query": "wireless headphones",
+        "products": [{"name": "Wireless Headphones", "price": 29.99}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_dispatch_search_products_clamps_max_results_to_ceiling(monkeypatch):
+    captured = {}
+
+    async def fake_search(query, max_results):
+        captured["max_results"] = max_results
+        return []
+
+    monkeypatch.setattr(live_session, "_search_shopping", fake_search)
+    session = SessionState(
+        session_id="s1", uid="user-1", existing_profile={"max_searches_per_run": 99}, mode="search"
+    )
+
+    result = await _dispatch_tool_call("search_products", {"query": "lamp"}, session)
+
+    assert captured["max_results"] == 5
+    assert result["status"] == "no_results"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_search_products_ignores_blank_query():
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={}, mode="search")
+
+    result = await _dispatch_tool_call("search_products", {"query": "   "}, session)
+
+    assert result == {"status": "error", "query": "", "products": []}
 
 
 @pytest.mark.asyncio
@@ -417,6 +532,48 @@ async def test_pump_client_to_gemini_ignores_blank_text():
 
     assert gemini.text_calls == []
     assert session.transcript == []
+
+
+@pytest.mark.asyncio
+async def test_pump_client_to_gemini_closing_text_sends_finalize_proposal_without_model_turn():
+    ws = _FakeWebSocket([{"bytes": None, "text": json.dumps({"type": "text", "text": "I'm done"})}])
+    gemini = _FakeGeminiSession()
+    session = SessionState(
+        session_id="s1",
+        uid="user-1",
+        existing_profile={"shopping_categories": ["Clothing"], "preference_terms": [], "ignore_terms": []},
+    )
+
+    await _pump_client_to_gemini(ws, gemini, session)
+
+    assert gemini.text_calls == []
+    assert gemini.activity_calls == []
+    assert session.finalize_proposal["shopping_categories"] == ["Clothing"]
+    finalize_frames = [m for m in ws.sent_json if m.get("type") == "finalize_proposal"]
+    assert len(finalize_frames) == 1
+
+
+@pytest.mark.asyncio
+async def test_pump_client_to_gemini_search_mode_ignores_closing_phrase_and_skips_extraction(monkeypatch):
+    """Search mode has no review/save step — "I'm done" should just be sent
+    to the model like any other turn, and typed text should never trigger
+    the preference-extraction call or a preference_patch frame."""
+    extraction_calls = []
+    monkeypatch.setattr(
+        live_session, "_extract_patch_from_transcript",
+        lambda transcript, existing_profile: extraction_calls.append(1),
+    )
+    ws = _FakeWebSocket([{"bytes": None, "text": json.dumps({"type": "text", "text": "I'm done"})}])
+    gemini = _FakeGeminiSession()
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={}, mode="search")
+
+    await _pump_client_to_gemini(ws, gemini, session)
+
+    assert gemini.text_calls == ["I'm done"]
+    assert gemini.activity_calls == ["start", "end"]
+    assert session.finalize_proposal is None
+    assert extraction_calls == []
+    assert not any(m.get("type") == "preference_patch" for m in ws.sent_json)
 
 
 @pytest.mark.asyncio
@@ -678,6 +835,37 @@ async def test_pump_gemini_to_client_input_transcription_records_without_extract
 
 
 @pytest.mark.asyncio
+async def test_pump_gemini_to_client_closing_voice_transcript_sends_finalize_proposal():
+    ws = _FakeWebSocket([])
+    session = SessionState(
+        session_id="s1",
+        uid="user-1",
+        existing_profile={"shopping_categories": ["Clothing"], "preference_terms": [], "ignore_terms": []},
+    )
+    gemini = _FakeGeminiLiveSession([_server_content_response(input_text="I'm done")])
+
+    with pytest.raises(_FakeSessionClosed):
+        await _pump_gemini_to_client(ws, gemini, session)
+
+    assert session.finalize_proposal["shopping_categories"] == ["Clothing"]
+    finalize_frames = [m for m in ws.sent_json if m.get("type") == "finalize_proposal"]
+    assert len(finalize_frames) == 1
+
+
+@pytest.mark.asyncio
+async def test_pump_gemini_to_client_search_mode_closing_voice_transcript_does_not_finalize():
+    ws = _FakeWebSocket([])
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={}, mode="search")
+    gemini = _FakeGeminiLiveSession([_server_content_response(input_text="I'm done")])
+
+    with pytest.raises(_FakeSessionClosed):
+        await _pump_gemini_to_client(ws, gemini, session)
+
+    assert session.finalize_proposal is None
+    assert not any(m.get("type") == "finalize_proposal" for m in ws.sent_json)
+
+
+@pytest.mark.asyncio
 async def test_pump_gemini_to_client_ready_to_finalize_tool_call_sends_proposal():
     ws = _FakeWebSocket([])
     session = SessionState(session_id="s1", uid="user-1", existing_profile={})
@@ -707,6 +895,26 @@ async def test_pump_gemini_to_client_record_preference_tool_call_sends_patch():
     patch_frames = [m for m in ws.sent_json if m.get("type") == "preference_patch"]
     assert len(patch_frames) == 1
     assert patch_frames[0]["patch"]["preference_terms"] == ["Nike"]
+
+
+@pytest.mark.asyncio
+async def test_pump_gemini_to_client_search_products_tool_call_sends_product_results(monkeypatch):
+    async def fake_search(query, max_results):
+        return [{"name": "Wireless Headphones", "price": 29.99}]
+
+    monkeypatch.setattr(live_session, "_search_shopping", fake_search)
+    ws = _FakeWebSocket([])
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={}, mode="search")
+    gemini = _FakeGeminiLiveSession([_tool_call_response("search_products", {"query": "wireless headphones"})])
+
+    with pytest.raises(_FakeSessionClosed):
+        await _pump_gemini_to_client(ws, gemini, session)
+
+    result_frames = [m for m in ws.sent_json if m.get("type") == "product_results"]
+    assert len(result_frames) == 1
+    assert result_frames[0]["query"] == "wireless headphones"
+    assert result_frames[0]["products"] == [{"name": "Wireless Headphones", "price": 29.99}]
+    assert len(gemini.tool_responses) == 1
 
 
 @pytest.mark.asyncio
@@ -929,78 +1137,36 @@ async def test_send_timeout_nudge_sends_activity_bracketed_text():
 
 
 @pytest.mark.asyncio
-async def test_auto_save_and_close_prefers_finalize_proposal_when_present(monkeypatch):
-    saved = {}
-
-    def _fake_merge_and_save(uid, patch):
-        saved["uid"] = uid
-        saved["patch"] = patch
-        return {"shopping_categories": ["Clothing"], "preference_terms": [], "ignore_terms": [], "conflicts": []}
-
-    monkeypatch.setattr(profile_store, "merge_and_save", _fake_merge_and_save)
+async def test_auto_save_and_close_sends_timeout_without_saving(monkeypatch):
+    calls = []
+    monkeypatch.setattr(profile_store, "merge_and_save", lambda uid, patch: calls.append((uid, patch)))
+    monkeypatch.setattr(profile_store, "save_reviewed_profile", lambda uid, patch: calls.append((uid, patch)))
     ws = _FakeWebSocket([])
     session = SessionState(session_id="s1", uid="user-1", existing_profile={})
     session.finalize_proposal = {
-        "shopping_categories": ["Clothing"], "preference_terms": [], "ignore_terms": [], "summary": "Saving clothing.",
+        "shopping_categories": ["Clothing"],
+        "preference_terms": [],
+        "ignore_terms": [],
+        "summary": "Saving clothing.",
     }
-    session.latest_patch = {"shopping_categories": [], "preference_terms": ["should not be used"], "ignore_terms": []}
 
     await _auto_save_and_close(ws, session)
 
-    assert saved["uid"] == "user-1"
-    assert saved["patch"] == session.finalize_proposal
-    assert ws.sent_json == [
-        {"type": "auto_saved", "shopping_categories": ["Clothing"], "preference_terms": [], "ignore_terms": [], "conflicts": []}
-    ]
-
-
-@pytest.mark.asyncio
-async def test_auto_save_and_close_falls_back_to_latest_patch_without_proposal(monkeypatch):
-    captured = {}
-
-    def _fake_merge_and_save(uid, patch):
-        captured["patch"] = patch
-        return {"shopping_categories": [], "preference_terms": [], "ignore_terms": [], "conflicts": []}
-
-    monkeypatch.setattr(profile_store, "merge_and_save", _fake_merge_and_save)
-    ws = _FakeWebSocket([])
-    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
-    session.latest_patch = {"shopping_categories": ["Electronics"], "preference_terms": [], "ignore_terms": []}
-
-    await _auto_save_and_close(ws, session)
-
-    assert captured["patch"] == session.latest_patch
-
-
-@pytest.mark.asyncio
-async def test_auto_save_and_close_falls_back_to_session_timeout_on_save_failure(monkeypatch):
-    def _raise(uid, patch):
-        raise RuntimeError("firestore down")
-
-    monkeypatch.setattr(profile_store, "merge_and_save", _raise)
-    ws = _FakeWebSocket([])
-    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
-
-    await _auto_save_and_close(ws, session)
-
+    assert calls == []
     assert ws.sent_json == [{"type": "session_timeout"}]
 
 
 @pytest.mark.asyncio
-async def test_auto_save_and_close_is_idempotent(monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        profile_store, "merge_and_save",
-        lambda uid, patch: (calls.append(1), {"shopping_categories": [], "preference_terms": [], "ignore_terms": [], "conflicts": []})[1],
-    )
+async def test_auto_save_and_close_timeout_is_idempotent(monkeypatch):
+    monkeypatch.setattr(profile_store, "merge_and_save", lambda uid, patch: pytest.fail("must not save"))
+    monkeypatch.setattr(profile_store, "save_reviewed_profile", lambda uid, patch: pytest.fail("must not save"))
     ws = _FakeWebSocket([])
     session = SessionState(session_id="s1", uid="user-1", existing_profile={})
 
     await _auto_save_and_close(ws, session)
     await _auto_save_and_close(ws, session)
 
-    assert len(calls) == 1
-    assert len([m for m in ws.sent_json if m.get("type") == "auto_saved"]) == 1
+    assert ws.sent_json == [{"type": "session_timeout"}]
 
 
 # --- _watch_inactivity --------------------------------------------------------
@@ -1046,14 +1212,12 @@ async def test_watch_inactivity_does_not_nudge_while_activity_keeps_resetting_cl
 
 
 @pytest.mark.asyncio
-async def test_watch_inactivity_auto_saves_after_nudge_grace_period(monkeypatch):
+async def test_watch_inactivity_times_out_after_nudge_grace_period_without_saving(monkeypatch):
     monkeypatch.setattr(live_session, "_INACTIVITY_NUDGE_SECONDS", 0.02)
     monkeypatch.setattr(live_session, "_INACTIVITY_CLOSE_GRACE_SECONDS", 0.02)
     monkeypatch.setattr(live_session, "_INACTIVITY_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(
-        profile_store, "merge_and_save",
-        lambda uid, patch: {"shopping_categories": [], "preference_terms": [], "ignore_terms": [], "conflicts": []},
-    )
+    monkeypatch.setattr(profile_store, "merge_and_save", lambda uid, patch: pytest.fail("must not save"))
+    monkeypatch.setattr(profile_store, "save_reviewed_profile", lambda uid, patch: pytest.fail("must not save"))
     ws = _FakeWebSocket([])
     gemini = _FakeGeminiSession()
     session = SessionState(session_id="s1", uid="user-1", existing_profile={})
@@ -1062,19 +1226,17 @@ async def test_watch_inactivity_auto_saves_after_nudge_grace_period(monkeypatch)
 
     assert session.auto_saved is True
     assert gemini.activity_calls == ["start", "end"]  # nudged once before giving up
-    assert any(m.get("type") == "auto_saved" for m in ws.sent_json)
+    assert ws.sent_json == [{"type": "session_timeout"}]
 
 
 @pytest.mark.asyncio
-async def test_watch_inactivity_auto_saves_immediately_when_already_confirmed(monkeypatch):
+async def test_watch_inactivity_does_not_save_when_proposal_exists(monkeypatch):
     """If the user already verbally confirmed (finalize_proposal set), there's
     nothing left to nudge for — auto-save right away, skipping the nudge."""
     monkeypatch.setattr(live_session, "_INACTIVITY_NUDGE_SECONDS", 10)
     monkeypatch.setattr(live_session, "_INACTIVITY_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(
-        profile_store, "merge_and_save",
-        lambda uid, patch: {"shopping_categories": [], "preference_terms": [], "ignore_terms": [], "conflicts": []},
-    )
+    monkeypatch.setattr(profile_store, "merge_and_save", lambda uid, patch: pytest.fail("must not save"))
+    monkeypatch.setattr(profile_store, "save_reviewed_profile", lambda uid, patch: pytest.fail("must not save"))
     ws = _FakeWebSocket([])
     gemini = _FakeGeminiSession()
     session = SessionState(session_id="s1", uid="user-1", existing_profile={})
@@ -1082,7 +1244,9 @@ async def test_watch_inactivity_auto_saves_immediately_when_already_confirmed(mo
         "shopping_categories": [], "preference_terms": [], "ignore_terms": [], "summary": "done",
     }
 
-    await asyncio.wait_for(_watch_inactivity(ws, gemini, session), timeout=1.0)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(_watch_inactivity(ws, gemini, session), timeout=0.05)
 
     assert gemini.activity_calls == []
-    assert session.auto_saved is True
+    assert session.auto_saved is False
+    assert ws.sent_json == []

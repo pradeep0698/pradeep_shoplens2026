@@ -3,7 +3,7 @@ description: ShopLens Flutter app — connects to existing GCP backend
 
 publish_to: 'none'
 
-version: 1.28.0
+version: 1.29.0
 
 environment:
   sdk: '>=3.4.0 <4.0.0'

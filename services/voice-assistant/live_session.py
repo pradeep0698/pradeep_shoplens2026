@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
+import httpx
 from fastapi import WebSocket
 from google import genai
 from google.genai import types
@@ -43,6 +44,11 @@ _INACTIVITY_CLOSE_GRACE_SECONDS = int(os.environ.get("INACTIVITY_CLOSE_GRACE_SEC
 # Internal poll granularity for the inactivity watchdog — not worth exposing
 # as an env var.
 _INACTIVITY_POLL_SECONDS = 1.0
+# Backend for the search_products tool (non-onboarding sessions) — see
+# services/product-matcher/main.py's POST /search.
+_PRODUCT_MATCHER_URL = os.environ.get("PRODUCT_MATCHER_URL", "")
+_DEFAULT_MAX_SEARCH_RESULTS = 2
+_MAX_SEARCH_RESULTS_CEILING = 5
 
 # TEMPORARY: scripted fake conversation, used while no billed GCP project is
 # reachable for the real Vertex AI Live API call. Exercises the full WS
@@ -62,23 +68,16 @@ VOICE_CATEGORIES = [
     "Books & Stationery",
 ]
 
-SYSTEM_PROMPT_TEMPLATE = (
-    "You are a friendly shopping preference coach having a natural spoken "
-    "conversation with the user to learn their shopping preferences. Your ONLY "
-    "job is to be a good conversational partner — a separate system handles "
-    "extracting structured data from the transcript, so you never need to report "
-    "categories or terms yourself. Always respond out loud on every turn — never "
-    "go silent, even when you're also calling a tool. Ask ONE follow-up question "
-    "at a time. Prioritize stable, durable preferences over one-off intents — "
-    "e.g. \"I'm shopping for a gift\" is transient, while \"I always avoid "
-    "leather\" is durable. {profile_note} Once the user has shared at least one "
-    "stable category, brand/style preference, or exclusion, and seems satisfied, "
-    "summarize what you heard in one or two sentences and ask them to confirm "
-    "out loud. Only after they confirm, call ready_to_finalize with that summary "
-    "— do not call it before the user has verbally confirmed. If the user "
-    "mentions a budget or price ceiling, acknowledge it verbally but mention "
-    "that budgets aren't supported yet."
-)
+_CATEGORY_KEYWORDS: dict[str, list[str]] = {
+    "Furniture": ["furniture", "chair", "chairs", "sofa", "sofas", "couch", "couches", "desk", "desks", "table", "tables", "shelf", "shelves", "wardrobe"],
+    "Clothing": ["clothing", "clothes", "apparel", "shirt", "shirts", "jacket", "jackets", "jeans", "dress", "dresses", "shoe", "shoes", "sneaker", "sneakers"],
+    "Kitchen & Cookware": ["kitchen", "cookware", "cooking", "appliance", "appliances", "pan", "pans", "pot", "pots", "cook"],
+    "Accessories": ["accessory", "accessories", "watch", "watches", "bag", "bags", "jewelry", "jewellery", "wallet", "wallets"],
+    "Electronics": ["electronics", "electronic", "phone", "phones", "laptop", "laptops", "tablet", "tablets", "headphone", "headphones", "gadget", "gadgets", "tech"],
+    "Home Decor": ["home decor", "decor", "decoration", "decorations", "candle", "candles", "vase", "vases", "rug", "rugs", "lamp", "lamps", "pillow", "pillows"],
+    "Sports & Outdoors": ["sports", "sport", "outdoor", "outdoors", "gym", "fitness", "camping", "hiking", "yoga"],
+    "Books & Stationery": ["book", "books", "stationery", "notebook", "notebooks", "pen", "pens", "journal", "journals", "planner", "planners"],
+}
 
 SYSTEM_PROMPT_TEMPLATE = (
     "You are ShopLens AI, a warm shopping assistant having a natural spoken "
@@ -87,7 +86,11 @@ SYSTEM_PROMPT_TEMPLATE = (
     "brief and human: acknowledge what they said in a few words, then ask one "
     "specific follow-up that naturally fits the last answer. Vary your "
     "phrasing and avoid checklist language like 'anything else' on repeated "
-    "turns. Prefer stable preferences over one-off shopping errands: 'I avoid "
+    "turns. When the user mentions a shopping category, don't move to a "
+    "different topic right away — ask one follow-up about that same category "
+    "first (a brand, style, material, or color they favor) so you come away "
+    "with more than just a bare category, then move on once they've "
+    "answered. Prefer stable preferences over one-off shopping errands: 'I avoid "
     "leather' is stable; 'a gift for my mom' is transient. {profile_note} "
     "Whenever the user states a shopping category, a brand/style/material "
     "preference, or something to exclude, call record_preference right away "
@@ -110,6 +113,34 @@ SYSTEM_PROMPT_TEMPLATE = (
     "greeting only, briefly mention they can say 'I'm done' (or tap the done "
     "button) any time they want to stop and review what's been captured — "
     "keep it to a short phrase, not a separate sentence."
+)
+
+
+SEARCH_SYSTEM_PROMPT_TEMPLATE = (
+    "You are ShopLens AI, a friendly shopping assistant having a natural spoken "
+    "conversation to help the user find products to buy. Always respond out "
+    "loud on every turn, even when you call a tool. Keep replies brief and "
+    "conversational. Before searching, make sure you actually know what to "
+    "look for: if the request is vague — just a bare product category with no "
+    "distinguishing detail, e.g. 'show me some headphones' — ask ONE quick "
+    "follow-up (style, brand, color, material, or budget) instead of "
+    "searching right away; every search costs a real API call, so don't burn "
+    "one on a query too broad to be useful. Once the request already has a "
+    "distinguishing detail, or the user has answered your follow-up, call "
+    "search_products with a concise, well-formed shopping query that captures "
+    "the product type plus whatever detail you have (fold a budget straight "
+    "into the query text, e.g. 'wireless headphones under $50' — there is no "
+    "separate price filter). Don't call search_products more than once per "
+    "turn, and don't search again just because the user rephrased the same "
+    "request — only search again when they've actually refined or changed "
+    "what they want. After results come back, briefly acknowledge what was "
+    "found in a sentence or two without listing every item back to them (they "
+    "can see the results on screen) and ask if they'd like to refine the "
+    "search or look for something else. {profile_note} The very first message "
+    "you receive each session is a hidden cue telling you the user just "
+    "opened the conversation and hasn't said anything yet — when you see it, "
+    "speak first with a short warm greeting and ask what they're shopping "
+    "for; never read that cue back to the user."
 )
 
 
@@ -140,8 +171,9 @@ def _profile_note(existing_profile: dict) -> str:
     )
 
 
-def _system_prompt(existing_profile: dict) -> str:
-    return SYSTEM_PROMPT_TEMPLATE.format(profile_note=_profile_note(existing_profile))
+def _system_prompt(existing_profile: dict, mode: str) -> str:
+    template = SEARCH_SYSTEM_PROMPT_TEMPLATE if mode == "search" else SYSTEM_PROMPT_TEMPLATE
+    return template.format(profile_note=_profile_note(existing_profile))
 
 
 def _category_schema() -> types.Schema:
@@ -197,16 +229,57 @@ RECORD_PREFERENCE = types.FunctionDeclaration(
     ),
 )
 
-VOICE_TOOLS = [types.Tool(function_declarations=[READY_TO_FINALIZE, RECORD_PREFERENCE])]
+SEARCH_PRODUCTS = types.FunctionDeclaration(
+    name="search_products",
+    description=(
+        "Call this once you know enough to run a useful search — the product "
+        "type plus at least one distinguishing detail (brand, color, "
+        "material, style, or price) that the user stated or just confirmed "
+        "after your follow-up. If the request is still just a bare category "
+        "with nothing else, ask a clarifying question instead of calling "
+        "this — every call costs a real API search. Call again whenever the "
+        "user refines or changes what they're looking for, but not for "
+        "trivial rephrasing of the same request. Pass one focused shopping "
+        "search query capturing the product type plus any brand/color/"
+        "material/price the user mentioned."
+    ),
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "query": types.Schema(type="STRING", description="The shopping search query."),
+        },
+        required=["query"],
+    ),
+)
+
+PREFERENCE_TOOLS = [types.Tool(function_declarations=[READY_TO_FINALIZE, RECORD_PREFERENCE])]
+SEARCH_TOOLS = [types.Tool(function_declarations=[SEARCH_PRODUCTS])]
 
 
-def _filter_categories(values: list[str] | None) -> list[str]:
+def _tools_for_mode(mode: str) -> list[types.Tool]:
+    return SEARCH_TOOLS if mode == "search" else PREFERENCE_TOOLS
+
+
+def _category_has_evidence(category: str, evidence_text: str | None) -> bool:
+    if evidence_text is None or not evidence_text.strip():
+        return True
+    lowered = evidence_text.lower()
+    return any(keyword in lowered for keyword in _CATEGORY_KEYWORDS.get(category, []))
+
+
+def _filter_categories(values: list[str] | None, evidence_text: str | None = None) -> list[str]:
     """Defense in depth: drop any category the model returns outside the fixed
-    8-value enum, in case structured-output constraints are ever bypassed."""
+    8-value enum, in case structured-output constraints are ever bypassed.
+    When evidence text is available, require a category keyword in the latest
+    user text/transcript so material/style phrases are not forced into a broad
+    category."""
     if not values:
         return []
     allowed = set(VOICE_CATEGORIES)
-    return [v for v in values if v in allowed]
+    return [
+        v for v in values
+        if v in allowed and _category_has_evidence(v, evidence_text)
+    ]
 
 
 @dataclass
@@ -214,6 +287,11 @@ class SessionState:
     session_id: str
     uid: str
     existing_profile: dict
+    # "preferences" (forced first-run onboarding — learns/saves shopping
+    # preferences) or "search" (every other session — conversational product
+    # search via search_products). Drives which system prompt/tools the
+    # Gemini Live session gets and gates the preference-only logic below.
+    mode: str = "preferences"
     created_at: float = field(default_factory=time.monotonic)
     latest_patch: dict = field(default_factory=lambda: {"shopping_categories": [], "preference_terms": [], "ignore_terms": []})
     finalize_proposal: Optional[dict] = None
@@ -242,6 +320,20 @@ class SessionState:
     # watchdog and the hard SESSION_MAX_SECONDS ceiling race independently).
     auto_saved: bool = False
 
+    def __post_init__(self) -> None:
+        normalized = profile_store.normalize_reviewed_patch(self.existing_profile)
+        self.latest_patch = {
+            "shopping_categories": normalized["shopping_categories"],
+            "preference_terms": normalized["preference_terms"],
+            "ignore_terms": normalized["ignore_terms"],
+        }
+
+    def latest_user_text(self) -> str:
+        for turn in reversed(self.transcript):
+            if turn.get("role") == "user":
+                return str(turn.get("text", ""))
+        return self.pending_input_transcript
+
     def is_expired(self) -> bool:
         return (time.monotonic() - self.created_at) > _SESSION_MAX_SECONDS
 
@@ -255,9 +347,9 @@ class SessionRegistry:
         self._sessions: dict[str, SessionState] = {}
         self._lock = asyncio.Lock()
 
-    async def create(self, uid: str, existing_profile: dict) -> SessionState:
+    async def create(self, uid: str, existing_profile: dict, mode: str = "preferences") -> SessionState:
         session_id = uuid.uuid4().hex
-        state = SessionState(session_id=session_id, uid=uid, existing_profile=existing_profile)
+        state = SessionState(session_id=session_id, uid=uid, existing_profile=existing_profile, mode=mode)
         async with self._lock:
             self._sessions[session_id] = state
         return state
@@ -289,11 +381,11 @@ def _get_client() -> genai.Client:
     return _genai_client
 
 
-def _live_config(existing_profile: dict) -> types.LiveConnectConfig:
+def _live_config(existing_profile: dict, mode: str) -> types.LiveConnectConfig:
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
-        tools=VOICE_TOOLS,
-        system_instruction=types.Content(parts=[types.Part(text=_system_prompt(existing_profile))]),
+        tools=_tools_for_mode(mode),
+        system_instruction=types.Content(parts=[types.Part(text=_system_prompt(existing_profile, mode))]),
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=_VOICE_NAME)
@@ -400,13 +492,48 @@ def _extract_patch_from_transcript(transcript: list[dict], existing_profile: dic
         logger.warning("Extraction call failed, keeping existing profile: %s", exc)
         return dict(existing_profile)
     return {
-        "shopping_categories": _filter_categories(data.get("shopping_categories")),
+        "shopping_categories": _filter_categories(data.get("shopping_categories"), transcript_text),
         "preference_terms": list(data.get("preference_terms") or []),
         "ignore_terms": list(data.get("ignore_terms") or []),
     }
 
 
+def _clamp_max_results(value) -> int:
+    try:
+        return max(1, min(int(value), _MAX_SEARCH_RESULTS_CEILING))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_SEARCH_RESULTS
+
+
+async def _search_shopping(query: str, max_results: int) -> list[dict]:
+    """Calls product-matcher's POST /search (free-text Google Shopping search
+    via SerpAPI) for the search_products tool — see services/product-matcher/
+    main.py. Returns an empty list on any failure so a flaky search never
+    crashes the live session; the model just tells the user nothing was found."""
+    if not _PRODUCT_MATCHER_URL:
+        logger.warning("PRODUCT_MATCHER_URL not set — cannot run product search")
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{_PRODUCT_MATCHER_URL}/search", json={"query": query, "max_results": max_results}
+            )
+            resp.raise_for_status()
+            return resp.json().get("products", [])
+    except Exception as exc:
+        logger.warning("product-matcher search failed for '%s': %s", query, exc)
+        return []
+
+
 async def _dispatch_tool_call(name: str, args: dict, session: SessionState) -> dict:
+    if name == "search_products":
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return {"status": "error", "query": "", "products": []}
+        max_results = _clamp_max_results(session.existing_profile.get("max_searches_per_run"))
+        products = await _search_shopping(query, max_results)
+        return {"status": "found" if products else "no_results", "query": query, "products": products}
+
     if name == "ready_to_finalize":
         summary = str(args.get("summary", "")).strip()
         # Package up whatever record_preference has already accumulated —
@@ -415,14 +542,14 @@ async def _dispatch_tool_call(name: str, args: dict, session: SessionState) -> d
         # than Gemini's own understanding, and would re-introduce exactly the
         # kind of caption error record_preference exists to avoid, right at
         # the last moment before saving.
-        session.finalize_proposal = {**session.latest_patch, "summary": summary}
+        session.finalize_proposal = {**session.latest_patch, "summary": summary or _summary_from_patch(session.latest_patch)}
         return {"status": "proposal_ready"}
 
     if name == "record_preference":
         # Uses Gemini's own real-time audio understanding, not the separately
         # transcribed caption — see RECORD_PREFERENCE's description. Same
-        # dedup logic as the final Firestore merge (profile_store.merge_and_save).
-        categories = _filter_categories(args.get("shopping_categories"))
+        # dedup logic as the final reviewed save.
+        categories = _filter_categories(args.get("shopping_categories"), session.latest_user_text())
         session.latest_patch["shopping_categories"] = sorted({*session.latest_patch["shopping_categories"], *categories})
         session.latest_patch["preference_terms"] = profile_store._dedup_case_insensitive(
             session.latest_patch["preference_terms"], [str(t) for t in (args.get("preference_terms") or [])]
@@ -430,10 +557,36 @@ async def _dispatch_tool_call(name: str, args: dict, session: SessionState) -> d
         session.latest_patch["ignore_terms"] = profile_store._dedup_case_insensitive(
             session.latest_patch["ignore_terms"], [str(t) for t in (args.get("ignore_terms") or [])]
         )
+        normalized = profile_store.normalize_reviewed_patch(session.latest_patch)
+        session.latest_patch = {
+            "shopping_categories": normalized["shopping_categories"],
+            "preference_terms": normalized["preference_terms"],
+            "ignore_terms": normalized["ignore_terms"],
+        }
         return {"status": "recorded"}
 
     logger.warning("Unknown tool call from Gemini Live session: %s", name)
     return {"status": "unknown_tool"}
+
+
+def _summary_from_patch(patch: dict) -> str:
+    parts = []
+    if patch.get("shopping_categories"):
+        parts.append("categories: " + ", ".join(patch["shopping_categories"]))
+    if patch.get("preference_terms"):
+        parts.append("preferences: " + ", ".join(patch["preference_terms"]))
+    if patch.get("ignore_terms"):
+        parts.append("avoiding: " + ", ".join(patch["ignore_terms"]))
+    body = "; ".join(parts) if parts else "nothing specific yet"
+    return f"Here's what I'll save — {body}."
+
+
+async def _send_finalize_proposal(websocket: WebSocket, session: SessionState, summary: str | None = None) -> None:
+    session.finalize_proposal = {
+        **session.latest_patch,
+        "summary": summary or _summary_from_patch(session.latest_patch),
+    }
+    await websocket.send_json({"type": "finalize_proposal", "patch": session.finalize_proposal})
 
 
 async def _on_user_turn(websocket: WebSocket, session: SessionState, text: str) -> None:
@@ -473,6 +626,15 @@ async def _pump_client_to_gemini(websocket: WebSocket, gemini_session, session: 
             if frame.get("type") == "text":
                 text = str(frame.get("text", "")).strip()
                 if text:
+                    # Closing phrases ("no", "that's all", ...) and structured
+                    # extraction only mean something in the preference flow —
+                    # search mode has no review/save step, so "done" is just
+                    # another turn the model responds to naturally.
+                    if session.mode == "preferences" and _is_closing_phrase(text):
+                        session.last_activity_at = time.monotonic()
+                        await _on_user_turn(websocket, session, text)
+                        await _send_finalize_proposal(websocket, session)
+                        continue
                     # send_realtime_input, not send_client_content — see
                     # _send_greeting_trigger's docstring for why mixing the two
                     # APIs in one session silently breaks both.
@@ -481,13 +643,19 @@ async def _pump_client_to_gemini(websocket: WebSocket, gemini_session, session: 
                     await gemini_session.send_realtime_input(activity_end=types.ActivityEnd())
                     session.last_activity_at = time.monotonic()
                     await _on_user_turn(websocket, session, text)
-                    # Typed text is verbatim (no STT step), unlike voice
-                    # turns — safe to extract structured data from it directly.
-                    patch = await asyncio.to_thread(
-                        _extract_patch_from_transcript, session.transcript, session.existing_profile
-                    )
-                    session.latest_patch = patch
-                    await websocket.send_json({"type": "preference_patch", "patch": patch})
+                    if session.mode == "preferences":
+                        # Typed text is verbatim (no STT step), unlike voice
+                        # turns — safe to extract structured data from it directly.
+                        patch = await asyncio.to_thread(
+                            _extract_patch_from_transcript, session.transcript, session.existing_profile
+                        )
+                        normalized = profile_store.normalize_reviewed_patch(patch)
+                        session.latest_patch = {
+                            "shopping_categories": normalized["shopping_categories"],
+                            "preference_terms": normalized["preference_terms"],
+                            "ignore_terms": normalized["ignore_terms"],
+                        }
+                        await websocket.send_json({"type": "preference_patch", "patch": session.latest_patch})
             elif frame.get("type") == "audio_format":
                 try:
                     session.input_sample_rate = int(frame.get("sample_rate", 16000))
@@ -513,6 +681,8 @@ async def _flush_pending_input(websocket: WebSocket, session: SessionState) -> N
     # Voice path — text sent via send_realtime_input(text=...) is recorded in
     # _on_user_turn instead, since this event never fires for that case.
     await _on_user_turn(websocket, session, text)
+    if session.mode == "preferences" and _is_closing_phrase(text):
+        await _send_finalize_proposal(websocket, session)
 
 
 async def _flush_pending_output(websocket: WebSocket, session: SessionState) -> None:
@@ -595,6 +765,14 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
                         await websocket.send_json(
                             {"type": "preference_patch", "patch": session.latest_patch}
                         )
+                    elif call.name == "search_products":
+                        await websocket.send_json(
+                            {
+                                "type": "product_results",
+                                "query": result.get("query", ""),
+                                "products": result.get("products", []),
+                            }
+                        )
                 await gemini_session.send_tool_response(function_responses=function_responses)
 
 
@@ -625,20 +803,12 @@ _EXCLUSION_PATTERN = re.compile(
     r"^(?:no|not|avoid|don'?t want|don'?t like|exclude|skip)\s+(.+)$", re.IGNORECASE
 )
 
-_MOCK_CATEGORY_KEYWORDS: dict[str, list[str]] = {
-    "Furniture": ["furniture", "chair", "sofa", "couch", "desk", "table", "shelf", "wardrobe"],
-    "Clothing": ["clothing", "clothes", "shirt", "jacket", "jeans", "dress", "shoe", "apparel"],
-    "Kitchen & Cookware": ["kitchen", "cookware", "cooking", "appliance", "pan", "pot", "cook"],
-    "Accessories": ["accessory", "accessories", "watch", "bag", "jewelry", "jewellery", "wallet"],
-    "Electronics": ["electronics", "phone", "laptop", "tablet", "headphone", "gadget", "tech"],
-    "Home Decor": ["home decor", "decor", "candle", "vase", "rug", "lamp", "pillow"],
-    "Sports & Outdoors": ["sports", "outdoor", "gym", "fitness", "camping", "hiking", "yoga"],
-    "Books & Stationery": ["book", "stationery", "notebook", "pen", "journal", "planner"],
-}
+_MOCK_CATEGORY_KEYWORDS = _CATEGORY_KEYWORDS
 
 
 def _is_closing_phrase(text: str) -> bool:
-    return text.strip().lower().rstrip(".!") in _CLOSING_PHRASES
+    normalized = text.strip().lower().replace("’", "'").rstrip(".!?")
+    return normalized in _CLOSING_PHRASES
 
 
 def _split_clauses(text: str) -> list[str]:
@@ -844,16 +1014,10 @@ async def _auto_save_and_close(websocket: WebSocket, session: SessionState) -> N
     if session.auto_saved:
         return
     session.auto_saved = True
-    patch = session.finalize_proposal or session.latest_patch
     try:
-        result = profile_store.merge_and_save(session.uid, patch)
-        await websocket.send_json({"type": "auto_saved", **result})
+        await websocket.send_json({"type": "session_timeout"})
     except Exception:
-        logger.exception("voice session %s auto-save failed", session.session_id)
-        try:
-            await websocket.send_json({"type": "session_timeout"})
-        except Exception:
-            pass
+        logger.exception("voice session %s timeout notification failed", session.session_id)
 
 
 async def _watch_inactivity(websocket: WebSocket, gemini_session, session: SessionState) -> None:
@@ -869,7 +1033,7 @@ async def _watch_inactivity(websocket: WebSocket, gemini_session, session: Sessi
     nudged = False
     while True:
         await asyncio.sleep(_INACTIVITY_POLL_SECONDS)
-        if session.finalize_proposal is not None:
+        if False and session.finalize_proposal is not None:
             logger.info("voice session %s inactive after confirmation — auto-saving", session.session_id)
             await _auto_save_and_close(websocket, session)
             return
@@ -907,7 +1071,7 @@ async def run_voice_session(websocket: WebSocket, session: SessionState) -> None
 
     try:
         async with client.aio.live.connect(
-            model=_VOICE_MODEL, config=_live_config(session.existing_profile)
+            model=_VOICE_MODEL, config=_live_config(session.existing_profile, session.mode)
         ) as gemini_session:
             await _send_greeting_trigger(gemini_session)
             session.last_activity_at = time.monotonic()

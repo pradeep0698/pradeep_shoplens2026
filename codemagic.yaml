@@ -17,6 +17,11 @@ workflows:
         script: |
           echo $GOOGLE_SERVICE_INFO_PLIST | base64 --decode > ios/Runner/GoogleService-Info.plist
           echo $GOOGLE_SERVICES_JSON | base64 --decode > android/app/google-services.json
+          python3 -m json.tool android/app/google-services.json > /dev/null || {
+            echo "ERROR: android/app/google-services.json is not valid JSON after decoding GOOGLE_SERVICES_JSON.";
+            echo "Check that the GOOGLE_SERVICES_JSON env var in Codemagic is set and contains a clean base64 string (no surrounding quotes).";
+            exit 1;
+          }
           printf "ANALYZER_API_URL=%s\nMATCHER_API_URL=%s\nSTATE_API_URL=%s\nVOICE_ASSISTANT_API_URL=%s\n" \
             "$ANALYZER_API_URL" "$MATCHER_API_URL" "$STATE_API_URL" "$VOICE_ASSISTANT_API_URL" > .env
       - name: Flutter pub get

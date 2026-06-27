@@ -14,6 +14,7 @@ import '../../core/utils/tap_crop_utils.dart';
 import '../providers/pipeline_provider.dart';
 import '../widgets/info_tooltip_icon.dart';
 import '../widgets/object_glow_overlay.dart';
+import '../widgets/zoom_slider.dart';
 
 class LiveScanScreen extends ConsumerStatefulWidget {
   const LiveScanScreen({super.key});
@@ -30,6 +31,22 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
   bool _processing = false;
   bool _initialized = false;
   String? _error;
+  CameraDescription? _wideDescription;
+  CameraDescription? _ultraWideDescription;
+  bool _usingUltraWide = false;
+  bool _switchingLens = false;
+
+  double _zoom = 1.0;
+  double _logicalMinZoom = 1.0;
+  double _logicalMaxZoom = 1.0;
+  double _minZoom = 1.0;
+  double _maxZoom = 1.0;
+  double _baseZoom = 1.0;
+
+  // Hardware often reports an absolute digital-zoom ceiling well past the
+  // point of a usable image (some phones report >100x). Cap the UI/pinch
+  // range to something actually useful, like native camera apps do.
+  static const double _kMaxUsableZoom = 10.0;
 
   @override
   void initState() {
@@ -60,37 +77,85 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
   Future<void> _initCamera() async {
     try {
       final cameras = await availableCameras();
-      if (cameras.isEmpty) {
+      final backCameras = cameras
+          .where((c) => c.lensDirection == CameraLensDirection.back)
+          .toList();
+      if (backCameras.isEmpty) {
         setState(() => _error = 'No camera found on this device');
         return;
       }
 
-      final back = cameras.firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.back,
-        orElse: () => cameras.first,
+      final wide = backCameras.firstWhere(
+        (c) => c.lensType == CameraLensType.wide,
+        orElse: () => backCameras.first,
       );
+      CameraDescription? ultraWide;
+      for (final c in backCameras) {
+        if (c.lensType == CameraLensType.ultraWide) {
+          ultraWide = c;
+          break;
+        }
+      }
 
-      final ctrl = CameraController(
-        back,
-        ResolutionPreset.high,
-        enableAudio: false,
-        imageFormatGroup: Platform.isAndroid
-            ? ImageFormatGroup.nv21
-            : ImageFormatGroup.bgra8888,
-      );
-
-      await ctrl.initialize();
+      final ctrl = await _buildController(wide);
       if (!mounted) return;
 
-      await ctrl.lockCaptureOrientation(DeviceOrientation.portraitUp);
-      ctrl.startImageStream(_onFrame);
+      final minZoom = await ctrl.getMinZoomLevel();
+      final maxZoom = await ctrl.getMaxZoomLevel();
 
       setState(() {
         _cam = ctrl;
         _initialized = true;
+        _wideDescription = wide;
+        _ultraWideDescription = ultraWide;
+        _usingUltraWide = false;
+        _zoom = 1.0;
+        _minZoom = minZoom;
+        _maxZoom = maxZoom;
+        _logicalMinZoom = ultraWide != null ? 0.5 : minZoom;
+        _logicalMaxZoom = maxZoom > _kMaxUsableZoom ? _kMaxUsableZoom : maxZoom;
       });
     } catch (e) {
       setState(() => _error = e.toString());
+    }
+  }
+
+  Future<CameraController> _buildController(CameraDescription description) async {
+    final ctrl = CameraController(
+      description,
+      ResolutionPreset.high,
+      enableAudio: false,
+      imageFormatGroup: Platform.isAndroid
+          ? ImageFormatGroup.nv21
+          : ImageFormatGroup.bgra8888,
+    );
+    await ctrl.initialize();
+    await ctrl.lockCaptureOrientation(DeviceOrientation.portraitUp);
+    ctrl.startImageStream(_onFrame);
+    return ctrl;
+  }
+
+  Future<void> _switchLens(bool toUltraWide) async {
+    final cam = _cam;
+    final target = toUltraWide ? _ultraWideDescription : _wideDescription;
+    if (cam == null || target == null) return;
+    _switchingLens = true;
+    try {
+      if (cam.value.isStreamingImages) await cam.stopImageStream();
+      await cam.setDescription(target);
+      await cam.lockCaptureOrientation(DeviceOrientation.portraitUp);
+      final minZoom = await cam.getMinZoomLevel();
+      final maxZoom = await cam.getMaxZoomLevel();
+      cam.startImageStream(_onFrame);
+      if (mounted) {
+        setState(() {
+          _usingUltraWide = toUltraWide;
+          _minZoom = minZoom;
+          _maxZoom = maxZoom;
+        });
+      }
+    } finally {
+      _switchingLens = false;
     }
   }
 
@@ -108,6 +173,32 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
     } finally {
       _processing = false;
     }
+  }
+
+  bool _wantsUltraWide(double zoom) {
+    if (_ultraWideDescription == null) return false;
+    // Hysteresis band around the 1.0x boundary so pinch jitter doesn't
+    // repeatedly re-trigger a lens switch.
+    return _usingUltraWide ? zoom < 1.05 : zoom < 0.95;
+  }
+
+  Future<void> _setZoom(double level) async {
+    if (_cam == null || _switchingLens) return;
+    final clamped = level.clamp(_logicalMinZoom, _logicalMaxZoom);
+    if ((clamped - _zoom).abs() < 0.01) return;
+
+    final shouldUseUltraWide = _wantsUltraWide(clamped);
+    if (shouldUseUltraWide != _usingUltraWide) {
+      await _switchLens(shouldUseUltraWide);
+    }
+
+    final cam = _cam;
+    if (cam == null) return;
+    // Ultra-wide's own zoomFactor 1.0 == displayed 0.5x; displayed 1.0x ==
+    // ultra-wide factor 2.0 just before handing off to the wide lens.
+    final localFactor = shouldUseUltraWide ? clamped / 0.5 : clamped;
+    await cam.setZoomLevel(localFactor.clamp(_minZoom, _maxZoom));
+    if (mounted) setState(() => _zoom = clamped);
   }
 
   InputImageRotation _sensorRotation(int sensorDegrees) {
@@ -234,6 +325,21 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
           // Camera preview
           Center(child: CameraPreview(cam)),
 
+          // Full-screen pinch-to-zoom capture layer. Kept separate from
+          // CameraPreview because CameraPreview letterboxes to the sensor's
+          // aspect ratio, which would otherwise shrink the gesture hit area
+          // to less than the full screen.
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onScaleStart: (_) => _baseZoom = _zoom,
+              onScaleUpdate: (details) {
+                if (details.pointerCount < 2) return;
+                _setZoom(_baseZoom * details.scale);
+              },
+            ),
+          ),
+
           // ML Kit real-time glow overlay
           if (_liveObjects.isNotEmpty)
             LayoutBuilder(
@@ -285,6 +391,21 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
                 ),
               ),
             ),
+
+          // Zoom slider — a small vertical bar docked on the side rather
+          // than a bar spanning the camera preview.
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 10),
+              child: ZoomSlider(
+                currentZoom: _zoom,
+                minZoom: _logicalMinZoom,
+                maxZoom: _logicalMaxZoom,
+                onZoomChanged: _setZoom,
+              ),
+            ),
+          ),
 
           // Identify button
           Align(

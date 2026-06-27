@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import profile_store
-from live_session import _SESSION_MAX_SECONDS, run_voice_session, session_registry
+from live_session import SUPPORTED_LANGUAGES, _SESSION_MAX_SECONDS, run_voice_session, session_registry
 
 _request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 
@@ -98,6 +98,11 @@ class SessionStartRequest(BaseModel):
     # "preferences" so a stale client that never sends a body keeps the old
     # behavior.
     mode: str = "preferences"
+    # Display name from live_session.SUPPORTED_LANGUAGES (e.g. "Spanish") —
+    # steers the system-instruction directive in live_session._system_prompt.
+    # Unknown values fall back to "English", same as an unknown mode falls
+    # back to "preferences" below.
+    language: str = "English"
 
 
 class SessionStartResponse(BaseModel):
@@ -115,7 +120,8 @@ async def start_session(http_request: Request, body: SessionStartRequest = Sessi
     uid = _require_uid(http_request)
     existing_profile = profile_store.get_profile(uid)
     mode = body.mode if body.mode == "search" else "preferences"
-    session = await session_registry.create(uid=uid, existing_profile=existing_profile, mode=mode)
+    language = body.language if body.language in SUPPORTED_LANGUAGES else "English"
+    session = await session_registry.create(uid=uid, existing_profile=existing_profile, mode=mode, language=language)
 
     elapsed = time.monotonic() - start
     logger.info("voice session start uid=%s session_id=%s in %.2fs", uid, session.session_id, elapsed)

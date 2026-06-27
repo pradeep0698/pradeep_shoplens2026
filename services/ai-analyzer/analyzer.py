@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
+from cachetools import TTLCache
 from google.cloud import storage as gcs
 
 import requests as _req
@@ -50,6 +51,11 @@ def _is_serp_quota_error(data: dict) -> bool:
 
 
 _session = _req.Session()
+
+# Cache for /identify results — keyed on SHA-256(image bytes) + country.
+# 30-minute TTL matches product-matcher's cache. maxsize=200 keeps memory
+# bounded (~200 crops in flight at once is well above realistic concurrency).
+_identify_cache: TTLCache = TTLCache(maxsize=200, ttl=1800)
 
 _gcs_client: Optional[gcs.Client] = None
 
@@ -570,11 +576,22 @@ def identify_crop(
     """Identify a pre-cropped image via Gemini description → GCS → Google Lens.
     Skips Gemini bounding-box detection (region already selected), but uses Gemini
     to produce a rich product description (color, material, brand, style) that
-    improves Lens recall. Falls back to the caller-supplied query if Gemini fails."""
+    improves Lens recall. Falls back to the caller-supplied query if Gemini fails.
+    Results are cached for 30 minutes by image hash + country — repeat taps on
+    the same object return instantly without re-running Gemini or Lens."""
     _t_total_start = time.monotonic()
     _warnings: list[str] = []
     _tls.serp_quota_exhausted = False
     img_bytes = base64.b64decode(image_data)
+
+    cache_key = hashlib.sha256(img_bytes).hexdigest() + ":" + (country or "us")
+    if cache_key in _identify_cache:
+        cached_products, cached_warnings = _identify_cache[cache_key]
+        logger.info(
+            "identify_crop cache hit | key=%s products=%d elapsed=0.00s",
+            cache_key[:12], len(cached_products),
+        )
+        return cached_products, cached_warnings
 
     # Ensure JPEG (GCS / Lens work best with JPEG; PNG may be RGBA)
     img = Image.open(io.BytesIO(img_bytes))
@@ -632,6 +649,7 @@ def identify_crop(
         "TIMING | total=%.2fs describe_and_upload=%.2fs lens=%.2fs shopping=%.2fs",
         time.monotonic() - _t_total_start, _t_describe_upload, _t_lens, _t_shopping,
     )
+    _identify_cache[cache_key] = (products, _warnings)
     return products, _warnings
 
 

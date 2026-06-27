@@ -70,9 +70,35 @@ curl -s https://ai-analyzer-935092313069.us-central1.run.app/config   # current 
   "ignore_terms": [],         // case-insensitive substrings; matching detected items are dropped
   "query": "",                // identify only — fallback text query if Gemini's description fails
   "country": "us",            // passed through to SerpAPI's gl param
-  "max_searches": 5           // analyze only — hard cap is 5 regardless of what's requested (MAX_SEARCHES_PER_RUN)
+  "max_searches": 5,          // analyze only — hard cap is 5 regardless of what's requested (MAX_SEARCHES_PER_RUN)
+  "mlkit_context": null       // optional — populated by the mobile app when the request originated
+                              // from the live scan screen (never set for gallery/main-screen images)
 }
 ```
+
+**`mlkit_context` shape** (when present):
+
+```jsonc
+{
+  "from_live_scan": true,
+  "trigger": "tap",           // "tap" (user tapped a detected object) or "scan_all" (Scan All button)
+  "route": "identify",        // "identify" or "analyze" — which endpoint was chosen
+  "on_device_confidence": 0.87,   // ML Kit label confidence (0.0 if ML Kit detected no labels)
+  "detected_objects_count": 3,    // total objects ML Kit had in the frame at capture time
+  "detected_labels": [            // only present when trigger=tap
+    {"text": "Chair", "confidence": 0.87}
+  ]
+}
+```
+
+When `mlkit_context` is present, the backend logs a dedicated `MLKIT |` line **before** the normal `start` log line, correlated via the same `req=` ID:
+
+```
+INFO [req=a9ac4108] main: MLKIT | route=identify trigger=tap confidence=0.87 threshold=0.70 objects=3 labels=['Chair']
+INFO [req=a9ac4108] main: identify start | image_data_b64_len=84320 ...
+```
+
+Use this to verify routing decisions in log-based regression checks without a debuggable APK.
 
 Exactly one of `gcs_uri` / `image_url` / `image_data` must be provided to
 `/analyze`, or you get `400 {"error_code": "INVALID_REQUEST"}`. `/identify`
@@ -372,6 +398,14 @@ production undetected for a while:
 5. **Lens `products` tab call was pure waste** — see §5.4. No user-facing
    regression, but worth a backend test asserting `_google_lens` only ever
    makes one SerpAPI call per item now, not two.
+6. **Tap-to-identify was gated behind a 0.70 confidence threshold** (2026-06-26) —
+   ML Kit's confidence score was used to decide whether a tap went to `/identify`
+   or fell back to `/analyze`. In practice, ML Kit often detected a bounding box
+   with 0.00 confidence / empty labels, causing taps to go through the full
+   Gemini detection pass unnecessarily. Fixed: any tap now always goes to
+   `/identify` with the ML Kit crop; only "Scan All" uses `/analyze`. Regression
+   test: send a live-scan-style request with `mlkit_context.trigger=tap` and
+   assert the backend receives it at `/identify`, not `/analyze`.
 
 ---
 

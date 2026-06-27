@@ -22,11 +22,6 @@ class LiveScanScreen extends ConsumerStatefulWidget {
 
 class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
     with WidgetsBindingObserver {
-  // Below this, ML Kit's on-device classification is too unsure of what the
-  // object is — escalate to the full cloud pipeline so Gemini gets a fresh
-  // look instead of risking a wrong /identify search query.
-  static const double _kOnDeviceConfidenceThreshold = 0.70;
-
   CameraController? _cam;
   final _detector = MlKitDetectorService();
   List<DetectedObject> _liveObjects = [];
@@ -156,18 +151,35 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
       if (mounted) context.go('/main');
 
       // Auto-start analysis so the user doesn't need to press Scan Image.
-      // A confidently-classified tapped object skips straight to the cheap
-      // single-item /identify lookup; "Scan All" and low-confidence taps
-      // still get the full cloud Gemini detection pass.
+      // Any tap goes directly to /identify with the ML Kit crop — Gemini
+      // re-describes the crop regardless, so ML Kit's confidence label is
+      // irrelevant to the identify path. Only "Scan All" needs the full
+      // /analyze pass (no pre-selected bounding box to crop from).
       final confidence = _topConfidence(tappedObject);
-      if (confidence != null && confidence >= _kOnDeviceConfidenceThreshold) {
-        debugPrint('[MLKit] on-device confidence ${confidence.toStringAsFixed(2)} >= '
-            '$_kOnDeviceConfidenceThreshold -> /identify (skip Gemini)');
-        ref.read(pipelineProvider.notifier).identifyTappedObject(imageBytes);
+      final route = tappedObject != null ? 'identify' : 'analyze';
+
+      // Context forwarded to the backend so logs show exactly what ML Kit
+      // saw on-device for every request — confidence, labels, object count,
+      // and the routing decision — without needing a debuggable APK.
+      final mlkitContext = <String, dynamic>{
+        'from_live_scan': true,
+        'trigger': tappedObject != null ? 'tap' : 'scan_all',
+        'route': route,
+        'on_device_confidence': confidence,
+        'detected_objects_count': _liveObjects.length,
+        if (tappedObject != null)
+          'detected_labels': tappedObject.labels
+              .map((l) => {'text': l.text, 'confidence': l.confidence})
+              .toList(),
+      };
+
+      if (route == 'identify') {
+        debugPrint('[MLKit] tap -> /identify (confidence=${confidence?.toStringAsFixed(2) ?? "none"}, '
+            'labels=${tappedObject!.labels.map((l) => l.text).toList()})');
+        ref.read(pipelineProvider.notifier).identifyTappedObject(imageBytes, mlkitContext: mlkitContext);
       } else {
-        debugPrint('[MLKit] ${tappedObject == null ? "Scan All" : "confidence ${confidence?.toStringAsFixed(2) ?? "none"}"} '
-            '-> /analyze (full cloud detection)');
-        ref.read(pipelineProvider.notifier).analyzeLoaded();
+        debugPrint('[MLKit] scan_all -> /analyze (full cloud detection)');
+        ref.read(pipelineProvider.notifier).analyzeLoaded(mlkitContext: mlkitContext);
       }
     } catch (e) {
       if (mounted) {

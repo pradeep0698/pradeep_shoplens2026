@@ -116,6 +116,7 @@ class AnalyzeRequest(BaseModel):
     query: str = ""
     country: str = "us"
     max_searches: int = 5
+    mlkit_context: dict | None = None
 
 
 @app.post("/analyze")
@@ -130,6 +131,17 @@ async def analyze(request: AnalyzeRequest) -> JSONResponse:
             content={"detail": "Provide gcs_uri, image_url, or image_data.", "error_code": "INVALID_REQUEST"},
             status_code=400,
             headers={"X-Request-Id": req_id},
+        )
+
+    if request.mlkit_context:
+        ctx = request.mlkit_context
+        logger.info(
+            "MLKIT | route=%s trigger=%s confidence=%.2f objects=%d labels=%s",
+            ctx.get("route", "?"),
+            ctx.get("trigger", "?"),
+            ctx.get("on_device_confidence") or 0.0,
+            ctx.get("detected_objects_count", 0),
+            [l.get("text") for l in ctx.get("detected_labels", [])],
         )
 
     logger.info(
@@ -208,6 +220,17 @@ async def analyze_stream(request: AnalyzeRequest) -> StreamingResponse:
         logger.warning("Rejecting /analyze/stream: neither image_url nor image_data provided")
         raise HTTPException(status_code=400, detail="Provide image_url or image_data.")
 
+    if request.mlkit_context:
+        ctx = request.mlkit_context
+        logger.info(
+            "MLKIT | route=%s trigger=%s confidence=%.2f objects=%d labels=%s",
+            ctx.get("route", "?"),
+            ctx.get("trigger", "?"),
+            ctx.get("on_device_confidence") or 0.0,
+            ctx.get("detected_objects_count", 0),
+            [l.get("text") for l in ctx.get("detected_labels", [])],
+        )
+
     logger.info(
         "analyze/stream start | image_url=%s image_data_b64_len=%d ignore_terms=%d country=%s",
         request.image_url,
@@ -274,6 +297,17 @@ async def identify(request: AnalyzeRequest) -> JSONResponse:
             content={"detail": "Provide image_data.", "error_code": "INVALID_REQUEST"},
             status_code=400,
             headers={"X-Request-Id": req_id},
+        )
+
+    if request.mlkit_context:
+        ctx = request.mlkit_context
+        logger.info(
+            "MLKIT | route=%s trigger=%s confidence=%.2f objects=%d labels=%s",
+            ctx.get("route", "?"),
+            ctx.get("trigger", "?"),
+            ctx.get("on_device_confidence") or 0.0,
+            ctx.get("detected_objects_count", 0),
+            [l.get("text") for l in ctx.get("detected_labels", [])],
         )
 
     logger.info(

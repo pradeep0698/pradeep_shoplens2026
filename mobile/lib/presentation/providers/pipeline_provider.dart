@@ -30,6 +30,7 @@ class PipelineState with _$PipelineState {
 class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
   String? _mimeType;
   bool _fromLiveScan = false;
+  Map<String, dynamic>? _mlkitContext;
 
   @override PipelineState build() => const PipelineState();
 
@@ -50,14 +51,15 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
   }
 
   /// Run the full analyze pipeline on the image loaded by [setImage].
-  Future<void> analyzeLoaded() async {
+  Future<void> analyzeLoaded({Map<String, dynamic>? mlkitContext}) async {
     final bytes = state.imageBytes;
     final mime  = _mimeType;
     if (bytes == null || mime == null) return;
-    await analyzeImage(bytes, mime);
+    _mlkitContext = mlkitContext;
+    await analyzeImage(bytes, mime, mlkitContext: mlkitContext);
   }
 
-  Future<void> analyzeImage(Uint8List bytes, String mimeType) async {
+  Future<void> analyzeImage(Uint8List bytes, String mimeType, {Map<String, dynamic>? mlkitContext}) async {
     final user    = ref.read(authStateProvider).value;
     final profile = ref.read(profileProvider).value ?? const UserProfile();
     if (user == null) return;
@@ -77,6 +79,7 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
         shoppingCategories: profile.shoppingCategories,
         country:            profile.country.isEmpty ? null : profile.country,
         maxSearches:        profile.maxSearchesPerRun,
+        mlkitContext:       mlkitContext ?? _mlkitContext,
       )) {
         state = PipelineState(
           imageBytes: bytes,
@@ -106,12 +109,13 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
   /// Resolves a high-confidence on-device detection via the cheap /identify
   /// endpoint instead of the full cloud pipeline — skips Gemini re-detection
   /// entirely since ML Kit already localized and classified the object.
-  Future<void> identifyTappedObject(Uint8List bytes) async {
+  Future<void> identifyTappedObject(Uint8List bytes, {Map<String, dynamic>? mlkitContext}) async {
     final user    = ref.read(authStateProvider).value;
     final profile = ref.read(profileProvider).value ?? const UserProfile();
     if (user == null) return;
 
     final sessionId = getSessionId(user.uid);
+    _mlkitContext = mlkitContext;
     state = PipelineState(status: PipelineStatus.matching, imageBytes: bytes, fromLiveScan: _fromLiveScan);
 
     try {
@@ -122,6 +126,7 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
         preferenceTerms:    profile.preferenceTerms,
         shoppingCategories: profile.shoppingCategories,
         country:            profile.country.isEmpty ? null : profile.country,
+        mlkitContext:       mlkitContext,
       );
       state = PipelineState(status: PipelineStatus.success, imageBytes: bytes, fromLiveScan: _fromLiveScan);
     } catch (e) {
@@ -134,11 +139,13 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
     if (user == null) return;
     await _clearSession(getSessionId(user.uid));
     _fromLiveScan = false;
+    _mlkitContext = null;
     state = const PipelineState();
   }
 
   void resetImage() {
     _fromLiveScan = false;
+    _mlkitContext = null;
     state = const PipelineState();
   }
 }

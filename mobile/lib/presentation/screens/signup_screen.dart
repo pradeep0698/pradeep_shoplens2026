@@ -14,11 +14,13 @@ class SignUpScreen extends ConsumerStatefulWidget {
 }
 
 class _SignUpScreenState extends ConsumerState<SignUpScreen> {
-  final _username        = TextEditingController();
-  final _email           = TextEditingController();
-  final _password        = TextEditingController();
+  final _username = TextEditingController();
+  final _email = TextEditingController();
+  final _password = TextEditingController();
   final _confirmPassword = TextEditingController();
   String _localError = '';
+  bool _obscurePassword = true;
+  bool _obscureConfirm = true;
 
   @override
   void dispose() {
@@ -32,8 +34,10 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
   Future<void> _submit() async {
     setState(() => _localError = '');
 
-    if (_username.text.trim().isEmpty || _email.text.trim().isEmpty ||
-        _password.text.isEmpty || _confirmPassword.text.isEmpty) {
+    if (_username.text.trim().isEmpty ||
+        _email.text.trim().isEmpty ||
+        _password.text.isEmpty ||
+        _confirmPassword.text.isEmpty) {
       setState(() => _localError = 'Fill in all fields.');
       return;
     }
@@ -47,9 +51,9 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
     }
 
     await ref.read(authNotifierProvider.notifier).signUp(
-      _email.text.trim(),
-      _password.text,
-    );
+          _email.text.trim(),
+          _password.text,
+        );
 
     if (!mounted) return;
 
@@ -59,14 +63,14 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
       return;
     }
 
-    // Write initial username to Firestore UserProfiles after signup
     final user = ref.read(authStateProvider).value;
     if (user != null) {
       await FirebaseFirestore.instance
           .collection(FirestoreConstants.userProfiles)
           .doc(user.uid)
           .set(
-            UserProfile.toFirestore(UserProfile(username: _username.text.trim())),
+            UserProfile.toFirestore(
+                UserProfile(username: _username.text.trim())),
             SetOptions(merge: true),
           );
     }
@@ -103,19 +107,30 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
                 const SizedBox(height: 14),
                 _inputField('Email', _email, hint: 'user@shoplens.com'),
                 const SizedBox(height: 14),
-                _inputField('Password', _password, obscure: true, hint: 'At least 6 characters'),
+                _inputField('Password', _password,
+                    obscure: _obscurePassword,
+                    hint: 'At least 6 characters',
+                    onToggleObscure: () =>
+                        setState(() => _obscurePassword = !_obscurePassword)),
                 const SizedBox(height: 14),
-                _inputField('Confirm password', _confirmPassword, obscure: true, hint: 'Re-enter password'),
+                _inputField('Confirm password', _confirmPassword,
+                    obscure: _obscureConfirm,
+                    hint: 'Re-enter password',
+                    onToggleObscure: () =>
+                        setState(() => _obscureConfirm = !_obscureConfirm)),
                 if (_localError.isNotEmpty) ...[
                   const SizedBox(height: 12),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
                     decoration: BoxDecoration(
                       color: const Color(0xFF450A0A),
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(color: const Color(0xFF991B1B)),
                     ),
-                    child: Text(_localError, style: const TextStyle(color: Color(0xFFFCA5A5), fontSize: 13)),
+                    child: Text(_localError,
+                        style: const TextStyle(
+                            color: Color(0xFFFCA5A5), fontSize: 13)),
                   ),
                 ],
                 const SizedBox(height: 20),
@@ -128,7 +143,8 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
                       disabledBackgroundColor: const Color(0xFF334155),
                       foregroundColor: const Color(0xFF0F172A),
                       padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(24)),
                     ),
                     child: Text(
                       isLoading ? 'Creating account...' : 'Create account',
@@ -143,7 +159,8 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
                     const Flexible(
                       child: Text(
                         'Already have an account? ',
-                        style: TextStyle(color: Color(0xFFCBD5E1), fontSize: 13),
+                        style:
+                            TextStyle(color: Color(0xFFCBD5E1), fontSize: 13),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -168,16 +185,23 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
     );
   }
 
-  Widget _inputField(String label, TextEditingController ctrl, {bool obscure = false, String hint = ''}) =>
+  Widget _inputField(String label, TextEditingController ctrl,
+          {bool obscure = false,
+          String hint = '',
+          VoidCallback? onToggleObscure}) =>
       Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: const TextStyle(color: Color(0xFFCBD5E1), fontSize: 13, fontWeight: FontWeight.w500)),
+          Text(label,
+              style: const TextStyle(
+                  color: Color(0xFFCBD5E1),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500)),
           const SizedBox(height: 6),
           TextField(
-            controller:  ctrl,
+            controller: ctrl,
             obscureText: obscure,
-            style:       const TextStyle(color: Colors.white, fontSize: 14),
+            style: const TextStyle(color: Colors.white, fontSize: 14),
             decoration: InputDecoration(
               hintText: hint,
               hintStyle: const TextStyle(color: Color(0xFF64748B)),
@@ -185,17 +209,29 @@ class _SignUpScreenState extends ConsumerState<SignUpScreen> {
               fillColor: const Color(0xFF0F172A),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+                borderSide:
+                    BorderSide(color: Colors.white.withValues(alpha: 0.1)),
               ),
               enabledBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+                borderSide:
+                    BorderSide(color: Colors.white.withValues(alpha: 0.1)),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
                 borderSide: const BorderSide(color: Color(0xFF6EE7B7)),
               ),
-              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              suffixIcon: onToggleObscure != null
+                  ? IconButton(
+                      icon: Icon(
+                          obscure ? Icons.visibility_off : Icons.visibility,
+                          color: const Color(0xFF64748B),
+                          size: 20),
+                      onPressed: onToggleObscure,
+                    )
+                  : null,
             ),
           ),
         ],

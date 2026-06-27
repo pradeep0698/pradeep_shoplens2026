@@ -1,0 +1,766 @@
+{
+  "info": {
+    "_postman_id": "c3a7e2d1-4b5f-4e8a-9c1d-shoplens-all-svc",
+    "name": "ShopLens - All Services",
+    "description": "Complete API collection for all ShopLens backend services.\n\nServices covered:\n- AI Analyzer   → {{ai_analyzer_url}}\n- Product Matcher → {{product_matcher_url}}\n- State Manager  → {{state_manager_url}}\n- Voice Assistant → {{voice_assistant_url}}\n- Pub/Sub Worker  → {{pubsub_worker_url}} (internal)\n\nSelect an environment to switch between shop-lens-dev and cookshop-dev-rajan-prod.\n\nFor Voice Assistant endpoints, set the {{firebase_token}} collection variable to a valid Firebase ID token before running.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "session_id",
+      "value": "live-session-001",
+      "type": "default"
+    },
+    {
+      "key": "firebase_token",
+      "value": "",
+      "type": "secret",
+      "description": "Firebase ID token for voice assistant auth. Get via Firebase Auth SDK: user.getIdToken()"
+    },
+    {
+      "key": "voice_session_id",
+      "value": "",
+      "type": "default",
+      "description": "Set automatically by POST /voice/session/start test script"
+    },
+    {
+      "key": "test_item",
+      "value": "stand mixer",
+      "type": "default",
+      "description": "Item name used in product-matcher debug requests"
+    }
+  ],
+  "item": [
+    {
+      "name": "AI Analyzer",
+      "description": "Gemini-powered image/video analysis + product detection.\nBase URL: {{ai_analyzer_url}}",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ai_analyzer_url}}/health",
+              "host": ["{{ai_analyzer_url}}"],
+              "path": ["health"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Active Model",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (e) {}",
+                  "pm.collectionVariables.set('current_model', body.model || 'unknown');",
+                  "console.log('[CONFIG] active_model=' + body.model);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ai_analyzer_url}}/config",
+              "host": ["{{ai_analyzer_url}}"],
+              "path": ["config"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Set Active Model",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"gemini-2.5-flash\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{ai_analyzer_url}}/config",
+              "host": ["{{ai_analyzer_url}}"],
+              "path": ["config"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Analyze - Image URL",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (e) {}",
+                  "const timeMs = pm.response.responseTime;",
+                  "console.log('[ANALYZE] time_ms=' + timeMs + ' items=' + (body.items || []).length + ' products=' + (body.products || []).length);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"image_url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/320px-Cat03.jpg\",\n  \"transcript\": \"\",\n  \"ignore_terms\": [],\n  \"query\": \"\",\n  \"country\": \"us\",\n  \"max_searches\": 5\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{ai_analyzer_url}}/analyze",
+              "host": ["{{ai_analyzer_url}}"],
+              "path": ["analyze"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Analyze - Base64 Image",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (e) {}",
+                  "const timeMs = pm.response.responseTime;",
+                  "console.log('[ANALYZE] time_ms=' + timeMs + ' items=' + (body.items || []).length + ' products=' + (body.products || []).length);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"image_data\": \"{{image_base64}}\",\n  \"image_mime_type\": \"image/jpeg\",\n  \"transcript\": \"\",\n  \"ignore_terms\": [],\n  \"query\": \"\",\n  \"country\": \"us\",\n  \"max_searches\": 5\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{ai_analyzer_url}}/analyze",
+              "host": ["{{ai_analyzer_url}}"],
+              "path": ["analyze"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Analyze - GCS Video URI",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gcs_uri\": \"gs://shoplens-dev-hls-segments/live/segment001.ts\",\n  \"transcript\": \"And here you can see the stand mixer being used to knead the dough\",\n  \"ignore_terms\": [],\n  \"query\": \"\",\n  \"country\": \"us\",\n  \"max_searches\": 5\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{ai_analyzer_url}}/analyze",
+              "host": ["{{ai_analyzer_url}}"],
+              "path": ["analyze"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Analyze Stream (NDJSON)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Accept", "value": "application/x-ndjson" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"image_url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/320px-Cat03.jpg\",\n  \"transcript\": \"\",\n  \"ignore_terms\": [],\n  \"query\": \"\",\n  \"country\": \"us\",\n  \"max_searches\": 5\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{ai_analyzer_url}}/analyze/stream",
+              "host": ["{{ai_analyzer_url}}"],
+              "path": ["analyze", "stream"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Identify - Cropped Product Image",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (e) {}",
+                  "const timeMs = pm.response.responseTime;",
+                  "console.log('[IDENTIFY] time_ms=' + timeMs + ' items=' + (body.items || []).length + ' products=' + (body.products || []).length);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"image_data\": \"{{identify_crop_base64}}\",\n  \"image_mime_type\": \"image/jpeg\",\n  \"query\": \"\",\n  \"ignore_terms\": [],\n  \"country\": \"us\",\n  \"max_searches\": 5,\n  \"mlkit_context\": {\n    \"route\": \"on_device_confident\",\n    \"trigger\": \"tap\",\n    \"on_device_confidence\": 0.92,\n    \"detected_objects_count\": 1,\n    \"detected_labels\": [\n      { \"text\": \"Kitchen Appliance\" }\n    ]\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{ai_analyzer_url}}/identify",
+              "host": ["{{ai_analyzer_url}}"],
+              "path": ["identify"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Identify - Image URL",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"image_url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/320px-Cat03.jpg\",\n  \"query\": \"\",\n  \"ignore_terms\": [],\n  \"country\": \"us\",\n  \"max_searches\": 5\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{ai_analyzer_url}}/identify",
+              "host": ["{{ai_analyzer_url}}"],
+              "path": ["identify"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Product Matcher",
+      "description": "SerpAPI-powered product search and matching.\nBase URL: {{product_matcher_url}}",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{product_matcher_url}}/health",
+              "host": ["{{product_matcher_url}}"],
+              "path": ["health"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Match Items to Products",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (e) {}",
+                  "console.log('[MATCH] matched=' + (body.matched_products || []).length + ' unmatched=' + (body.unmatched || []).length);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\"stand mixer\", \"silicone spatula\"],\n  \"ignore_terms\": [],\n  \"max_searches\": 5\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{product_matcher_url}}/match",
+              "host": ["{{product_matcher_url}}"],
+              "path": ["match"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Debug - Match Single Item",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{product_matcher_url}}/debug/{{test_item}}",
+              "host": ["{{product_matcher_url}}"],
+              "path": ["debug", "{{test_item}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Debug Raw - SerpAPI Response",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{product_matcher_url}}/debug-raw/{{test_item}}",
+              "host": ["{{product_matcher_url}}"],
+              "path": ["debug-raw", "{{test_item}}"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "State Manager",
+      "description": "Firestore-backed session product store.\nBase URL: {{state_manager_url}}",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{state_manager_url}}/health",
+              "host": ["{{state_manager_url}}"],
+              "path": ["health"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Save Products to Session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (e) {}",
+                  "console.log('[STATE] status=' + body.status + ' session_id=' + body.session_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"products\": [\n    {\n      \"product_id\": \"test-001\",\n      \"name\": \"KitchenAid Stand Mixer\",\n      \"price\": 449.99,\n      \"image_url\": \"https://example.com/mixer.jpg\",\n      \"purchase_url\": \"https://example.com/buy/mixer\",\n      \"seller\": \"Best Buy\",\n      \"category\": \"Kitchen Appliances\"\n    }\n  ]\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{state_manager_url}}/session/{{session_id}}/products",
+              "host": ["{{state_manager_url}}"],
+              "path": ["session", "{{session_id}}", "products"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Session Products",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (e) {}",
+                  "console.log('[STATE] products=' + (body.products || []).length);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{state_manager_url}}/session/{{session_id}}",
+              "host": ["{{state_manager_url}}"],
+              "path": ["session", "{{session_id}}"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Clear Session",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{state_manager_url}}/session/{{session_id}}",
+              "host": ["{{state_manager_url}}"],
+              "path": ["session", "{{session_id}}"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Voice Assistant",
+      "description": "Gemini Live voice preference management.\nBase URL: {{voice_assistant_url}}\n\nAll endpoints require Firebase Authentication.\nSet {{firebase_token}} to a valid Firebase ID token before running.\n\nWebSocket stream: wss://{{voice_assistant_url}}/voice/session/{session_id}/stream\n(WebSocket cannot be tested in Postman REST client — use a WS client or the mobile app.)",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{voice_assistant_url}}/health",
+              "host": ["{{voice_assistant_url}}"],
+              "path": ["health"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Start Voice Session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "let body = {};",
+                  "try { body = pm.response.json(); } catch (e) {}",
+                  "if (body.session_id) {",
+                  "  pm.collectionVariables.set('voice_session_id', body.session_id);",
+                  "  console.log('[VOICE] session_id=' + body.session_id + ' ws_url=' + body.ws_url);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{firebase_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{voice_assistant_url}}/voice/session/start",
+              "host": ["{{voice_assistant_url}}"],
+              "path": ["voice", "session", "start"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Send Session Event",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{firebase_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"session_id\": \"{{voice_session_id}}\",\n  \"event_type\": \"user_message\",\n  \"payload\": {\n    \"text\": \"I am allergic to nuts\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{voice_assistant_url}}/voice/session/event",
+              "host": ["{{voice_assistant_url}}"],
+              "path": ["voice", "session", "event"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Finalize Voice Session",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{firebase_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"session_id\": \"{{voice_session_id}}\",\n  \"confirmed_patch\": {\n    \"preference_terms\": [\"organic\", \"non-stick\"],\n    \"ignore_terms\": [\"plastic\"],\n    \"allergies\": [\"nuts\", \"gluten\"],\n    \"dietary_restrictions\": [\"vegan\"],\n    \"max_searches_per_run\": 5\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{voice_assistant_url}}/voice/session/finalize",
+              "host": ["{{voice_assistant_url}}"],
+              "path": ["voice", "session", "finalize"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Pub/Sub Worker",
+      "description": "Internal Cloud Run service — receives Pub/Sub push messages for HLS segment processing.\nBase URL: {{pubsub_worker_url}}\n\nNote: This service is NOT publicly accessible in production. These requests are only useful when the service is deployed with allow-unauthenticated or when testing locally.",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{pubsub_worker_url}}/health",
+              "host": ["{{pubsub_worker_url}}"],
+              "path": ["health"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Simulate Pub/Sub Push Message",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": {\n    \"data\": \"eyJidWNrZXQiOiAic2hvcGxlbnMtZGV2LWhscy1zZWdtZW50cyIsICJuYW1lIjogImxpdmUvc2VnbWVudDAwMS50cyJ9\",\n    \"messageId\": \"test-message-001\",\n    \"publishTime\": \"2026-01-01T00:00:00Z\",\n    \"attributes\": {\n      \"eventType\": \"OBJECT_FINALIZE\",\n      \"objectId\": \"live/segment001.ts\"\n    }\n  },\n  \"subscription\": \"projects/shoplens-dev-499700/subscriptions/video-segments-sub\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{pubsub_worker_url}}/pubsub",
+              "host": ["{{pubsub_worker_url}}"],
+              "path": ["pubsub"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "_Flows",
+      "description": "End-to-end chained flows. Run these folders in sequence to test the full pipeline.",
+      "item": [
+        {
+          "name": "Full Analyze Pipeline",
+          "description": "Mirrors the live pipeline: analyze → match → save to session.\nRun requests in order.",
+          "item": [
+            {
+              "name": "1. Analyze Image",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                      "let body = {};",
+                      "try { body = pm.response.json(); } catch (e) {}",
+                      "pm.collectionVariables.set('detected_items', JSON.stringify(body.items || []));",
+                      "console.log('[FLOW:1] items=' + JSON.stringify(body.items));"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"image_url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/320px-Cat03.jpg\",\n  \"transcript\": \"\",\n  \"ignore_terms\": [],\n  \"query\": \"\",\n  \"country\": \"us\",\n  \"max_searches\": 3\n}",
+                  "options": { "raw": { "language": "json" } }
+                },
+                "url": {
+                  "raw": "{{ai_analyzer_url}}/analyze",
+                  "host": ["{{ai_analyzer_url}}"],
+                  "path": ["analyze"]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "2. Match Products",
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "const items = JSON.parse(pm.collectionVariables.get('detected_items') || '[]');",
+                      "const body = { items: items, ignore_terms: [], max_searches: 3 };",
+                      "pm.request.body.raw = JSON.stringify(body);"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                      "let body = {};",
+                      "try { body = pm.response.json(); } catch (e) {}",
+                      "pm.collectionVariables.set('matched_products', JSON.stringify(body.matched_products || []));",
+                      "console.log('[FLOW:2] matched=' + (body.matched_products || []).length);"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"items\": [], \"ignore_terms\": [], \"max_searches\": 3}",
+                  "options": { "raw": { "language": "json" } }
+                },
+                "url": {
+                  "raw": "{{product_matcher_url}}/match",
+                  "host": ["{{product_matcher_url}}"],
+                  "path": ["match"]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "3. Save to Session",
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "const products = JSON.parse(pm.collectionVariables.get('matched_products') || '[]');",
+                      "pm.request.body.raw = JSON.stringify({ products: products });"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                      "let body = {};",
+                      "try { body = pm.response.json(); } catch (e) {}",
+                      "console.log('[FLOW:3] status=' + body.status);"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\"products\": []}",
+                  "options": { "raw": { "language": "json" } }
+                },
+                "url": {
+                  "raw": "{{state_manager_url}}/session/{{session_id}}/products",
+                  "host": ["{{state_manager_url}}"],
+                  "path": ["session", "{{session_id}}", "products"]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "4. Verify Session State",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                      "let body = {};",
+                      "try { body = pm.response.json(); } catch (e) {}",
+                      "console.log('[FLOW:4] session products=' + (body.products || []).length);"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{state_manager_url}}/session/{{session_id}}",
+                  "host": ["{{state_manager_url}}"],
+                  "path": ["session", "{{session_id}}"]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "All Health Checks",
+          "description": "Quick smoke test — hit /health on every service.",
+          "item": [
+            {
+              "name": "ai-analyzer /health",
+              "request": { "method": "GET", "header": [], "url": { "raw": "{{ai_analyzer_url}}/health", "host": ["{{ai_analyzer_url}}"], "path": ["health"] } },
+              "response": []
+            },
+            {
+              "name": "product-matcher /health",
+              "request": { "method": "GET", "header": [], "url": { "raw": "{{product_matcher_url}}/health", "host": ["{{product_matcher_url}}"], "path": ["health"] } },
+              "response": []
+            },
+            {
+              "name": "state-manager /health",
+              "request": { "method": "GET", "header": [], "url": { "raw": "{{state_manager_url}}/health", "host": ["{{state_manager_url}}"], "path": ["health"] } },
+              "response": []
+            },
+            {
+              "name": "voice-assistant /health",
+              "request": { "method": "GET", "header": [], "url": { "raw": "{{voice_assistant_url}}/health", "host": ["{{voice_assistant_url}}"], "path": ["health"] } },
+              "response": []
+            },
+            {
+              "name": "pubsub-worker /health",
+              "request": { "method": "GET", "header": [], "url": { "raw": "{{pubsub_worker_url}}/health", "host": ["{{pubsub_worker_url}}"], "path": ["health"] } },
+              "response": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

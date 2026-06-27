@@ -6,7 +6,7 @@ from typing import List
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import requests as _requests
 from matcher import clamp_max_searches, fetch_thumbnail, match_products, search_products, _search_product, _SERPAPI_KEY
@@ -14,7 +14,23 @@ from matcher import clamp_max_searches, fetch_thumbnail, match_products, search_
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Product Matching Service")
+app = FastAPI(
+    title="Product Matcher",
+    description=(
+        "SerpAPI-powered Google Shopping search and product matching service.\n\n"
+        "Takes a list of detected item names and returns the best matching purchasable products. "
+        "Also exposes a thumbnail proxy endpoint that adds CORS headers to Google's CDN images "
+        "so the Flutter web client can render them.\n\n"
+        "**Auth:** none required — CORS is open (`*`)."
+    ),
+    version="1.0.0",
+    openapi_tags=[
+        {"name": "Matching", "description": "Batch item-to-product matching"},
+        {"name": "Search", "description": "Direct product search"},
+        {"name": "Debug", "description": "Single-item SerpAPI debugging"},
+        {"name": "System", "description": "Health and diagnostics"},
+    ],
+)
 
 _CORS = {"Access-Control-Allow-Origin": "*"}
 
@@ -39,13 +55,58 @@ app.add_middleware(
 )
 
 
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
 class MatchRequest(BaseModel):
-    items: List[str]
-    ignore_terms: List[str] = []
-    max_searches: int = 5
+    items: List[str] = Field(..., description="List of detected item/product names to search for")
+    ignore_terms: List[str] = Field(default_factory=list, description="Terms to exclude from search results")
+    max_searches: int = Field(5, ge=1, le=20, description="Maximum SerpAPI calls to make")
+
+    model_config = {"json_schema_extra": {
+        "examples": [{"items": ["stand mixer", "silicone spatula"], "ignore_terms": [], "max_searches": 5}]
+    }}
 
 
-@app.post("/match")
+class SearchRequest(BaseModel):
+    query: str = Field(..., description="Freetext product search query")
+    max_results: int = Field(5, ge=1, le=20, description="Maximum number of products to return")
+
+
+class ProductItem(BaseModel):
+    product_id: str
+    name: str
+    price: float | None = Field(None, description="Price in USD")
+    image_url: str | None
+    purchase_url: str | None
+    seller: str | None
+    category: str | None
+
+
+class MatchResponse(BaseModel):
+    matched_products: List[ProductItem]
+    unmatched: List[str] = Field(..., description="Item names for which no product was found")
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/match",
+    tags=["Matching"],
+    summary="Match items to products",
+    description=(
+        "For each item name in `items`, runs a Google Shopping search via SerpAPI and returns "
+        "the best matching product. Items with no results appear in `unmatched`.\n\n"
+        "This is the primary endpoint called by the AI Analyzer and Pub/Sub Worker."
+    ),
+    responses={
+        200: {"description": "Matching complete — check `unmatched` for items with no results"},
+        500: {"description": "SerpAPI error"},
+    },
+)
 async def match(request: MatchRequest) -> JSONResponse:
     result = await asyncio.to_thread(
         match_products, request.items, request.ignore_terms, request.max_searches
@@ -53,25 +114,33 @@ async def match(request: MatchRequest) -> JSONResponse:
     return JSONResponse(content=result)
 
 
-class SearchRequest(BaseModel):
-    query: str
-    max_results: int = 5
-
-
-@app.post("/search")
+@app.post(
+    "/search",
+    tags=["Search"],
+    summary="Search for products by query",
+    description="Direct Google Shopping search for a freetext query. Returns up to `max_results` products.",
+)
 async def search(request: SearchRequest) -> JSONResponse:
     max_results = clamp_max_searches(request.max_results)
     products = await asyncio.to_thread(search_products, request.query, max_results)
     return JSONResponse(content={"products": products})
 
 
-@app.get("/thumbnail")
-async def thumbnail(url: str) -> Response:
-    # Google's image CDN (where every product thumbnail we hand back points)
-    # never sends Access-Control-Allow-Origin, so the browser blocks Flutter
-    # web from fetching it directly. The mobile client routes thumbnails
-    # through us instead — CORSMiddleware above adds the header on our way
-    # back out, since this is now same-origin from the app's perspective.
+@app.get(
+    "/thumbnail",
+    tags=["Search"],
+    summary="Proxy a product thumbnail image",
+    description=(
+        "Fetches a product thumbnail from Google's image CDN and re-serves it with "
+        "`Access-Control-Allow-Origin: *`. Required because Google's CDN omits CORS headers, "
+        "which blocks Flutter web from fetching thumbnails directly."
+    ),
+    responses={
+        200: {"description": "Image bytes with CORS header"},
+        502: {"description": "Failed to fetch from upstream CDN"},
+    },
+)
+async def thumbnail(url: str = Field(..., description="Fully-qualified Google CDN image URL")) -> Response:
     result = await asyncio.to_thread(fetch_thumbnail, url)
     if result is None:
         return Response(status_code=502)
@@ -83,13 +152,23 @@ async def thumbnail(url: str) -> Response:
     )
 
 
-@app.get("/debug/{item}")
+@app.get(
+    "/debug/{item}",
+    tags=["Debug"],
+    summary="Debug — match single item",
+    description="Runs `_search_product` for a single item and returns the raw internal result. For development only.",
+)
 async def debug(item: str) -> JSONResponse:
     result = _search_product(item)
     return JSONResponse(content={"item": item, "result": result})
 
 
-@app.get("/debug-raw/{item}")
+@app.get(
+    "/debug-raw/{item}",
+    tags=["Debug"],
+    summary="Debug — raw SerpAPI response",
+    description="Calls SerpAPI directly for the given item and returns the first `shopping_results` entry with all keys. Useful for inspecting what SerpAPI returns before our parsing logic runs.",
+)
 async def debug_raw(item: str) -> JSONResponse:
     resp = _requests.get(
         "https://serpapi.com/search",
@@ -101,7 +180,16 @@ async def debug_raw(item: str) -> JSONResponse:
     return JSONResponse(content={"keys": list(first.keys()), "first_result": first})
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["System"],
+    summary="Health check",
+    description="Returns `ok` when SERPAPI_KEY is set, `degraded` (503) when it's missing.",
+    responses={
+        200: {"description": "Service healthy"},
+        503: {"description": "Missing required environment variable"},
+    },
+)
 async def health():
     missing = [v for v in ["SERPAPI_KEY"] if not os.environ.get(v)]
     if missing:

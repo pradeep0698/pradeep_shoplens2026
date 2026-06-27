@@ -7,23 +7,86 @@ import time
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Pub/Sub Segment Worker")
+app = FastAPI(
+    title="Pub/Sub Segment Worker",
+    description=(
+        "Internal Cloud Run service that processes GCS Pub/Sub push notifications for new HLS "
+        "video segments from the live stream.\n\n"
+        "**This service is not publicly accessible in production.** It is triggered exclusively "
+        "by Google Cloud Pub/Sub push delivery from the `video-segments-sub` subscription.\n\n"
+        "**Pipeline per segment:**\n"
+        "1. Decode the Pub/Sub message to extract the GCS object path\n"
+        "2. `POST ai-analyzer/analyze` — Gemini detects shoppable items in the video segment\n"
+        "3. `POST product-matcher/match` — SerpAPI finds matching purchasable products\n"
+        "4. `POST state-manager/session/{id}/products` — save results to the active session\n\n"
+        "**Testing:** Use the `/pubsub` endpoint with a simulated Pub/Sub push body (base64-encoded GCS event)."
+    ),
+    version="1.0.0",
+    openapi_tags=[
+        {"name": "Pub/Sub", "description": "Pub/Sub push webhook — internal use only"},
+        {"name": "System", "description": "Health and diagnostics"},
+    ],
+)
 
 AI_ANALYZER_URL = os.environ.get("AI_ANALYZER_URL", "")
 PRODUCT_MATCHER_URL = os.environ.get("PRODUCT_MATCHER_URL", "")
 STATE_MANAGER_URL = os.environ.get("STATE_MANAGER_URL", "")
 SESSION_ID = os.environ.get("SESSION_ID", "live-session-001")
 
-# Gemini video analysis on ai-analyzer routinely takes longer than the default
-# 30s HTTP timeout — give that call its own, longer budget.
 AI_ANALYZER_TIMEOUT = float(os.environ.get("AI_ANALYZER_TIMEOUT_SECONDS", "120"))
 
 _HLS_EXTENSIONS = {".m3u8", ".ts"}
 
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
+class PubSubAttributes(BaseModel):
+    eventType: str | None = Field(None, description="GCS event type (e.g. OBJECT_FINALIZE)")
+    bucketId: str | None = Field(None, description="GCS bucket name from notification attributes")
+    objectId: str | None = Field(None, description="GCS object path from notification attributes")
+
+
+class PubSubMessage(BaseModel):
+    data: str = Field(..., description="Base64-encoded GCS storage event JSON")
+    messageId: str | None = Field(None, description="Pub/Sub message ID")
+    publishTime: str | None = Field(None, description="ISO 8601 publish timestamp")
+    attributes: dict = Field(default_factory=dict, description="GCS notification attributes")
+
+
+class PubSubPushBody(BaseModel):
+    message: PubSubMessage
+    subscription: str = Field(..., description="Full Pub/Sub subscription name")
+
+    model_config = {"json_schema_extra": {
+        "examples": [{
+            "message": {
+                "data": "eyJidWNrZXQiOiAic2hvcGxlbnMtZGV2LWhscy1zZWdtZW50cyIsICJuYW1lIjogImxpdmUvc2VnbWVudDAwMS50cyJ9",
+                "messageId": "test-001",
+                "publishTime": "2026-01-01T00:00:00Z",
+                "attributes": {"eventType": "OBJECT_FINALIZE", "objectId": "live/segment001.ts"},
+            },
+            "subscription": "projects/shoplens-dev-499700/subscriptions/video-segments-sub",
+        }]
+    }}
+
+
+class PubSubResponse(BaseModel):
+    status: str = Field(..., description="'pipeline_complete' | 'skipped' | 'no_items_detected' | 'no_products_matched'")
+    segment_url: str | None = None
+    items_detected: int | None = None
+    products_matched: int | None = None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _decode_pubsub_message(body: dict) -> dict:
     message = body.get("message", {})
@@ -42,7 +105,26 @@ def _extract_segment_url(event: dict, attributes: dict) -> str:
     return f"gs://{bucket}/{name}"
 
 
-@app.post("/pubsub")
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/pubsub",
+    tags=["Pub/Sub"],
+    summary="Pub/Sub push webhook",
+    description=(
+        "Receives a Pub/Sub push message from the `video-segments-sub` subscription. "
+        "Decodes the base64 GCS event, extracts the segment URI, and runs the full "
+        "analyze → match → save pipeline.\n\n"
+        "Non-HLS files (not `.ts` or `.m3u8`) are skipped immediately with `status: skipped`."
+    ),
+    responses={
+        200: {"description": "Pipeline result or skip reason"},
+        400: {"description": "Malformed Pub/Sub message"},
+        502: {"description": "Upstream service (ai-analyzer or product-matcher) failed"},
+    },
+)
 async def pubsub_webhook(request: Request) -> JSONResponse:
     body = await request.json()
 
@@ -61,7 +143,6 @@ async def pubsub_webhook(request: Request) -> JSONResponse:
         logger.error("Segment URL extraction failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc))
 
-    # Filter out non-HLS files early
     object_name = event.get("name") or attributes.get("objectId", "")
     ext = os.path.splitext(object_name)[1].lower()
     if ext not in _HLS_EXTENSIONS:
@@ -71,7 +152,6 @@ async def pubsub_webhook(request: Request) -> JSONResponse:
     logger.info("New video segment ready: %s", segment_url)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        # Step 1: call ai-analyzer (longer timeout — Gemini video analysis can be slow)
         ai_start = time.monotonic()
         try:
             ai_response = await client.post(
@@ -97,7 +177,6 @@ async def pubsub_webhook(request: Request) -> JSONResponse:
             logger.warning("No items detected for segment: %s", segment_url)
             return JSONResponse(content={"status": "no_items_detected"})
 
-        # Step 2: call product-matcher
         try:
             match_response = await client.post(
                 f"{PRODUCT_MATCHER_URL}/match",
@@ -115,7 +194,6 @@ async def pubsub_webhook(request: Request) -> JSONResponse:
             logger.warning("No products matched for segment: %s", segment_url)
             return JSONResponse(content={"status": "no_products_matched"})
 
-        # Step 3: call state-manager
         try:
             state_response = await client.post(
                 f"{STATE_MANAGER_URL}/session/{SESSION_ID}/products",
@@ -134,7 +212,11 @@ async def pubsub_webhook(request: Request) -> JSONResponse:
     })
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["System"],
+    summary="Health check",
+)
 async def health():
     return {"status": "ok"}
 

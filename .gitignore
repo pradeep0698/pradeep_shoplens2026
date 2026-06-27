@@ -57,6 +57,7 @@ frontend/.eslintrc.json
 !services/*/catalog.json
 !postman/*.json
 !docs/postman/*.json
+!docs/api-specs/*.json
 !frontend/package.json
 !frontend/package-lock.json
 !frontend/tsconfig.json

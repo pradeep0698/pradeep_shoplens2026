@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -10,7 +9,6 @@ import 'package:google_mlkit_object_detection/google_mlkit_object_detection.dart
 
 import '../../core/services/mlkit_detector_service.dart';
 import '../../core/utils/image_utils.dart';
-import '../../core/utils/tap_crop_utils.dart';
 import '../providers/pipeline_provider.dart';
 import '../widgets/info_tooltip_icon.dart';
 import '../widgets/object_glow_overlay.dart';
@@ -242,8 +240,38 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
 
       await ref.read(pipelineProvider.notifier).setImage(imageBytes, mime, fromLiveScan: true);
       if (mounted) context.go('/main');
-      // Auto-start analysis so the user doesn't need to press Scan Image
-      ref.read(pipelineProvider.notifier).analyzeLoaded();
+
+      // Auto-start analysis so the user doesn't need to press Scan Image.
+      // Any tap goes directly to /identify with the ML Kit crop — Gemini
+      // re-describes the crop regardless, so ML Kit's confidence label is
+      // irrelevant to the identify path. Only "Scan All" needs the full
+      // /analyze pass (no pre-selected bounding box to crop from).
+      final confidence = _topConfidence(tappedObject);
+      final route = tappedObject != null ? 'identify' : 'analyze';
+
+      // Context forwarded to the backend so logs show exactly what ML Kit
+      // saw on-device for every request — confidence, labels, object count,
+      // and the routing decision — without needing a debuggable APK.
+      final mlkitContext = <String, dynamic>{
+        'from_live_scan': true,
+        'trigger': tappedObject != null ? 'tap' : 'scan_all',
+        'route': route,
+        'on_device_confidence': confidence,
+        'detected_objects_count': _liveObjects.length,
+        if (tappedObject != null)
+          'detected_labels': tappedObject.labels
+              .map((l) => {'text': l.text, 'confidence': l.confidence})
+              .toList(),
+      };
+
+      if (route == 'identify') {
+        debugPrint('[MLKit] tap -> /identify (confidence=${confidence?.toStringAsFixed(2) ?? "none"}, '
+            'labels=${tappedObject!.labels.map((l) => l.text).toList()})');
+        ref.read(pipelineProvider.notifier).identifyTappedObject(imageBytes, mlkitContext: mlkitContext);
+      } else {
+        debugPrint('[MLKit] scan_all -> /analyze (full cloud detection)');
+        ref.read(pipelineProvider.notifier).analyzeLoaded(mlkitContext: mlkitContext);
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -255,54 +283,8 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
     }
   }
 
-  Future<void> _freezeAndIdentifyObject(DetectedObject obj) async {
-    final cam = _cam;
-    if (cam == null || !cam.value.isInitialized) return;
-
-    try {
-      await cam.stopImageStream();
-      final file  = await cam.takePicture();
-      final bytes = await file.readAsBytes();
-
-      // Get the actual captured image dimensions
-      final codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      final imgW  = frame.image.width.toDouble();
-      final imgH  = frame.image.height.toDouble();
-      frame.image.dispose();
-
-      // ML Kit bbox is in portrait camera-stream space; scale to captured image
-      final preview = cam.value.previewSize ?? const Size(1080, 1920);
-      final streamW = preview.width  > preview.height ? preview.height : preview.width;
-      final streamH = preview.width  > preview.height ? preview.width  : preview.height;
-
-      final box = obj.boundingBox;
-      final scaledRect = Rect.fromLTRB(
-        box.left   * imgW / streamW,
-        box.top    * imgH / streamH,
-        box.right  * imgW / streamW,
-        box.bottom * imgH / streamH,
-      );
-
-      final cropped = await TapCropUtils.cropRect(
-        imageBytes: bytes,
-        rect:       scaledRect,
-        imageSize:  Size(imgW, imgH),
-      );
-
-      // analyzeImage sets state to `analyzing` synchronously before its first
-      // await, so the progress indicator is visible the moment /main renders.
-      ref.read(pipelineProvider.notifier).analyzeImage(cropped, 'image/png');
-      if (mounted) context.go('/main');
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Capture failed: $e')),
-        );
-      }
-      cam.startImageStream(_onFrame);
-    }
-  }
+  double? _topConfidence(DetectedObject? obj) =>
+      (obj == null || obj.labels.isEmpty) ? null : obj.labels.first.confidence;
 
   @override
   Widget build(BuildContext context) {

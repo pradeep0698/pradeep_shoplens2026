@@ -17,13 +17,14 @@ class TapIdentifyUseCase {
   /// then appends them to the existing session (load → merge → save).
   /// Returns the first matched product name, or null if nothing matched.
   Future<String?> identify({
-    required Uint8List    croppedBytes,
-    required String       sessionId,
-    required List<String> ignoreTerms,
-    required List<String> preferenceTerms,
-    List<String>          shoppingCategories = const [],
-    String?               query,
-    String?               country,
+    required Uint8List         croppedBytes,
+    required String            sessionId,
+    required List<String>      ignoreTerms,
+    required List<String>      preferenceTerms,
+    List<String>               shoppingCategories = const [],
+    String?                    query,
+    String?                    country,
+    Map<String, dynamic>?      mlkitContext,
   }) async {
     // Use /identify (not /analyze) — skips Gemini re-detection on the
     // already-cropped image, sending it directly to GCS → Google Lens.
@@ -34,6 +35,7 @@ class TapIdentifyUseCase {
       transcript:    '',
       query:         query,
       country:       country,
+      mlkitContext:  mlkitContext,
     ));
 
     if (analyzeResponse.products.isEmpty) return null;

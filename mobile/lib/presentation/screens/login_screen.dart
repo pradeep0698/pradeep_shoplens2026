@@ -74,6 +74,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         obscure: _obscurePassword,
                         hint: 'Enter your password',
                         onToggleObscure: () => setState(() => _obscurePassword = !_obscurePassword)),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: GestureDetector(
+                        onTap: () => context.go('/forgot-password'),
+                        child: const Text(
+                          'Forgot password?',
+                          style: TextStyle(color: Color(0xFF6EE7B7), fontSize: 12, fontWeight: FontWeight.w500),
+                        ),
+                      ),
+                    ),
                     if (_localError.isNotEmpty) ...[
                       const SizedBox(height: 12),
                       Container(

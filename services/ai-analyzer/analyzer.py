@@ -30,7 +30,7 @@ _LOCATION     = os.environ.get("LOCATION", "us-central1")
 _DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
 _GCS_LENS_BUCKET        = os.environ.get("GCS_LENS_BUCKET", "")
 _SERPAPI_KEY            = os.environ.get("SERPAPI_KEY", "")
-_LENS_TIMEOUT           = int(os.environ.get("LENS_TIMEOUT_SECONDS", "8"))
+_LENS_TIMEOUT           = int(os.environ.get("LENS_TIMEOUT_SECONDS", "12"))
 # Skip Gemini description on /identify by default — Lens works fine without it
 # and Gemini adds 3-6s to every tap. Set to "false" to re-enable.
 _IDENTIFY_SKIP_GEMINI   = os.environ.get("IDENTIFY_SKIP_GEMINI", "true").lower() not in ("0", "false", "no")
@@ -531,6 +531,10 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
 
     try:
         data = _fetch("visual_matches")
+    except _req.exceptions.Timeout as exc:
+        logger.warning("Lens visual_matches fetch failed: %s", exc)
+        _tls.lens_timed_out = True
+        data = {}
     except Exception as exc:
         logger.warning("Lens visual_matches fetch failed: %s", exc)
         data = {}
@@ -651,11 +655,27 @@ def identify_crop(
 
     # Cleanup handled by the bucket's 1-day lifecycle rule, not an explicit
     # delete here, so it's off the request's critical path.
+    _tls.lens_timed_out = False
     _t_lens_start = time.monotonic()
     products = _google_lens(gcs_url, query=effective_query, country=country)
     _t_lens = time.monotonic() - _t_lens_start
 
+    # If Lens timed out and Gemini was skipped (no query), run Gemini now as a
+    # recovery step so the Shopping fallback has something to search with.
+    # Only worth trying if quota isn't already known to be exhausted.
     _t_shopping = 0.0
+    if (not products
+            and not effective_query
+            and getattr(_tls, "lens_timed_out", False)
+            and not getattr(_tls, "serp_quota_exhausted", False)
+            and _SERPAPI_KEY):
+        logger.info("identify_crop: Lens timed out with no query — running Gemini as recovery")
+        _t_recovery_start = time.monotonic()
+        effective_query = _describe_crop(jpeg_bytes)
+        _t_describe_upload += time.monotonic() - _t_recovery_start
+        if effective_query:
+            logger.info("identify_crop: Gemini recovery → '%s', trying Shopping", effective_query)
+
     if not products and effective_query and _SERPAPI_KEY:
         logger.info("Lens found nothing — trying Shopping fallback for '%s'", effective_query)
         _t_shopping_start = time.monotonic()

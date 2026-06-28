@@ -10,19 +10,18 @@ from contextvars import ContextVar
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from analyzer import (
     analyze_media,
     analyze_media_stream,
+    clamp_max_searches,
     classify_exception,
     identify_crop,
     get_active_model,
     set_active_model,
 )
 
-# Per-request correlation id, propagated to every log line (including those
-# emitted from analyzer.py and from threads spawned via asyncio.to_thread).
 _request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 
 
@@ -41,7 +40,24 @@ for _handler in logging.getLogger().handlers:
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="AI Stream Analyzer")
+app = FastAPI(
+    title="AI Analyzer",
+    description=(
+        "Gemini-powered image and video analysis service. Accepts an image (base64 or URL) "
+        "or a GCS video segment URI, runs Gemini to detect shoppable items, searches Google "
+        "Shopping via SerpAPI, and returns structured product results.\n\n"
+        "**Auth:** none required — CORS is open (`*`).\n\n"
+        "**Typical flow:** `POST /analyze` → items + products in one call. "
+        "Use `POST /analyze/stream` for progressive results (one NDJSON line per item as it resolves). "
+        "Use `POST /identify` when the client has already cropped to a single product."
+    ),
+    version="1.0.0",
+    openapi_tags=[
+        {"name": "Analysis", "description": "Image and video analysis — detect items and match products"},
+        {"name": "Config", "description": "Active Gemini model management"},
+        {"name": "System", "description": "Health and diagnostics"},
+    ],
+)
 
 _CORS = {"Access-Control-Allow-Origin": "*"}
 
@@ -50,12 +66,14 @@ _CORS = {"Access-Control-Allow-Origin": "*"}
 async def _log_startup_config() -> None:
     logger.info(
         "ai-analyzer starting | project_id=%s location=%s model=%s "
-        "gcs_lens_bucket=%s serpapi_key=%s",
+        "gcs_lens_bucket=%s serpapi_key=%s lens_timeout=%ss skip_gemini=%s",
         os.environ.get("PROJECT_ID") or "(unset)",
         os.environ.get("LOCATION", "us-central1"),
         get_active_model(),
         os.environ.get("GCS_LENS_BUCKET") or "(unset)",
         "set" if os.environ.get("SERPAPI_KEY") else "(unset)",
+        os.environ.get("LENS_TIMEOUT_SECONDS", "8"),
+        os.environ.get("IDENTIFY_SKIP_GEMINI", "true"),
     )
 
 
@@ -90,35 +108,125 @@ app.add_middleware(
 )
 
 
+# ---------------------------------------------------------------------------
+# Shared models
+# ---------------------------------------------------------------------------
+
 class ConfigRequest(BaseModel):
-    model: str
+    model: str = Field(..., description="Gemini model ID to activate (e.g. gemini-2.5-flash, gemini-2.5-pro)")
 
 
-@app.get("/config")
+class MlKitLabel(BaseModel):
+    text: str = Field(..., description="Label text returned by ML Kit on-device classifier")
+
+
+class MlKitContext(BaseModel):
+    route: str = Field(..., description="Routing decision: 'on_device_confident' or 'gemini_fallback'")
+    trigger: str = Field(..., description="What triggered the request: 'tap' or 'auto'")
+    on_device_confidence: float | None = Field(None, ge=0.0, le=1.0, description="ML Kit confidence score (0.0–1.0)")
+    detected_objects_count: int | None = Field(None, ge=0, description="Number of objects detected on-device")
+    detected_labels: list[MlKitLabel] = Field(default_factory=list, description="Top labels from ML Kit on-device detection")
+
+
+class AnalyzeRequest(BaseModel):
+    gcs_uri: str | None = Field(
+        None,
+        description="GCS URI of a video segment to analyze (e.g. gs://bucket/live/seg001.ts). Mutually exclusive with image_url/image_data.",
+    )
+    image_url: str | None = Field(
+        None,
+        description="Publicly accessible image URL. Mutually exclusive with gcs_uri/image_data.",
+    )
+    image_data: str | None = Field(
+        None,
+        description="Base64-encoded image bytes. Required for /identify. Mutually exclusive with gcs_uri/image_url.",
+    )
+    image_mime_type: str | None = Field(
+        None,
+        description="MIME type for image_data (e.g. image/jpeg, image/webp, image/png).",
+    )
+    transcript: str = Field("", description="Optional transcript text to supplement Gemini's visual analysis")
+    ignore_terms: list[str] = Field(default_factory=list, description="Product names to exclude from matching results")
+    query: str = Field("", description="Optional freetext query to bias Google Shopping search")
+    country: str = Field("us", description="Two-letter ISO country code for regional product search")
+    max_searches: int = Field(5, ge=1, le=20, description="Maximum number of SerpAPI searches to execute")
+    mlkit_context: MlKitContext | None = Field(
+        None,
+        description="On-device ML Kit detection context forwarded from the mobile app. Used for log-based routing analysis only — does not affect Gemini behaviour.",
+    )
+
+    model_config = {"json_schema_extra": {
+        "examples": [{
+            "image_url": "https://example.com/product.jpg",
+            "transcript": "",
+            "ignore_terms": [],
+            "query": "",
+            "country": "us",
+            "max_searches": 5,
+        }]
+    }}
+
+
+class ProductItem(BaseModel):
+    product_id: str
+    name: str
+    price: float | None
+    image_url: str | None
+    purchase_url: str | None
+    seller: str | None
+    category: str | None
+
+
+class AnalyzeResponse(BaseModel):
+    items: list[str] = Field(..., description="Detected product/item names from Gemini")
+    products: list[ProductItem] = Field(..., description="Matched products from Google Shopping")
+    warnings: list[str] = Field(..., description="Non-fatal warnings (e.g. items with no search results)")
+    gcs_uri: str | None
+    image_url: str | None
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/config",
+    tags=["Config"],
+    summary="Get active Gemini model",
+    response_description="Currently active model ID",
+)
 async def get_config() -> JSONResponse:
     return JSONResponse(content={"model": get_active_model()})
 
 
-@app.post("/config")
+@app.post(
+    "/config",
+    tags=["Config"],
+    summary="Set active Gemini model",
+    response_description="Newly active model ID",
+)
 async def update_config(request: ConfigRequest) -> JSONResponse:
     set_active_model(request.model)
     logger.info("Model switched to: %s", request.model)
     return JSONResponse(content={"model": get_active_model()})
 
 
-class AnalyzeRequest(BaseModel):
-    gcs_uri: str | None = None
-    image_url: str | None = None
-    image_data: str | None = None
-    image_mime_type: str | None = None
-    transcript: str = ""
-    ignore_terms: list[str] = []
-    query: str = ""
-    country: str = "us"
-    max_searches: int = 5
-
-
-@app.post("/analyze")
+@app.post(
+    "/analyze",
+    tags=["Analysis"],
+    summary="Analyze image or video segment",
+    description=(
+        "Runs Gemini on the provided image or GCS video segment to detect shoppable items, "
+        "then searches Google Shopping for each detected item via SerpAPI.\n\n"
+        "Provide exactly one of: `gcs_uri`, `image_url`, or `image_data`.\n\n"
+        "Returns all results at once. For progressive streaming use `POST /analyze/stream`."
+    ),
+    responses={
+        200: {"description": "Detection and matching succeeded"},
+        400: {"description": "No media input provided"},
+        500: {"description": "Gemini or SerpAPI error"},
+    },
+)
 async def analyze(request: AnalyzeRequest) -> JSONResponse:
     req_id = uuid.uuid4().hex[:8]
     _request_id_ctx.set(req_id)
@@ -132,6 +240,17 @@ async def analyze(request: AnalyzeRequest) -> JSONResponse:
             headers={"X-Request-Id": req_id},
         )
 
+    if request.mlkit_context:
+        ctx = request.mlkit_context
+        logger.info(
+            "MLKIT | route=%s trigger=%s confidence=%.2f objects=%d labels=%s",
+            ctx.route,
+            ctx.trigger,
+            ctx.on_device_confidence or 0.0,
+            ctx.detected_objects_count or 0,
+            [l.text for l in ctx.detected_labels],
+        )
+
     logger.info(
         "analyze start | gcs_uri=%s image_url=%s image_data_b64_len=%d "
         "ignore_terms=%d country=%s",
@@ -142,9 +261,6 @@ async def analyze(request: AnalyzeRequest) -> JSONResponse:
         request.country,
     )
     try:
-        # Run on a worker thread — analyze_media is fully synchronous (Vertex AI,
-        # GCS, SerpAPI calls) and would otherwise block the entire event loop,
-        # starving every other concurrent request on this instance.
         items, products, warnings = await asyncio.to_thread(
             analyze_media,
             gcs_video_uri=request.gcs_uri,
@@ -185,28 +301,44 @@ async def analyze(request: AnalyzeRequest) -> JSONResponse:
     )
 
 
-@app.post("/analyze/stream")
+@app.post(
+    "/analyze/stream",
+    tags=["Analysis"],
+    summary="Analyze image — streaming NDJSON",
+    description=(
+        "Same detection + matching pipeline as `POST /analyze`, but streams one NDJSON line "
+        "per event as it completes rather than waiting for all items.\n\n"
+        "**Event types** (each line is a JSON object):\n"
+        "- `{\"type\": \"items\", \"items\": [...]}` — emitted once after Gemini detection\n"
+        "- `{\"type\": \"match\", \"name\": \"...\", \"products\": [...], \"warnings\": [...]}` — once per item\n"
+        "- `{\"type\": \"done\", \"warnings\": [...]}` — stream end\n"
+        "- `{\"type\": \"error\", \"detail\": \"...\", \"error_code\": \"...\"}` — on failure\n\n"
+        "**Does not support `gcs_uri`** — video segments have no per-item fan-out to stream. "
+        "Provide `image_url` or `image_data`."
+    ),
+    responses={
+        200: {"description": "NDJSON stream", "content": {"application/x-ndjson": {}}},
+        400: {"description": "No image input provided"},
+    },
+)
 async def analyze_stream(request: AnalyzeRequest) -> StreamingResponse:
-    """Same as /analyze, but streams one NDJSON line per item as its Lens
-    search completes, instead of waiting for the slowest item before
-    returning anything. The mobile "live camera dot" flow uses this so
-    matched products appear as they're found rather than all at once.
-
-    Each line is a JSON object with a "type" field:
-      {"type": "items", "items": [...]}                              — once, after Gemini detection
-      {"type": "match", "name": ..., "products": [...], "warnings": [...]} — once per item
-      {"type": "done", "warnings": [...]}                             — once, at the end
-      {"type": "error", "detail": ..., "error_code": ...}             — only on failure
-
-    Doesn't support gcs_video_uri (the video path has no per-item fan-out
-    to stream — use /analyze for that).
-    """
     req_id = uuid.uuid4().hex[:8]
     _request_id_ctx.set(req_id)
 
     if not request.image_url and not request.image_data:
         logger.warning("Rejecting /analyze/stream: neither image_url nor image_data provided")
         raise HTTPException(status_code=400, detail="Provide image_url or image_data.")
+
+    if request.mlkit_context:
+        ctx = request.mlkit_context
+        logger.info(
+            "MLKIT | route=%s trigger=%s confidence=%.2f objects=%d labels=%s",
+            ctx.route,
+            ctx.trigger,
+            ctx.on_device_confidence or 0.0,
+            ctx.detected_objects_count or 0,
+            [l.text for l in ctx.detected_labels],
+        )
 
     logger.info(
         "analyze/stream start | image_url=%s image_data_b64_len=%d ignore_terms=%d country=%s",
@@ -260,10 +392,23 @@ async def analyze_stream(request: AnalyzeRequest) -> StreamingResponse:
     )
 
 
-@app.post("/identify")
+@app.post(
+    "/identify",
+    tags=["Analysis"],
+    summary="Identify a cropped product image",
+    description=(
+        "Skips Gemini bounding-box detection — the crop is already selected by ML Kit on-device. "
+        "Still calls Gemini once to produce a rich text description (color, material, brand, style) "
+        "that improves Google Lens recall, then uploads to GCS and runs Lens. "
+        "Faster than /analyze because there is one Gemini call instead of N (one per detected object).\n\n"
+        "Requires `image_data` (base64). `image_url` is not supported."
+    ),
+    responses={
+        200: {"description": "Product identification succeeded"},
+        400: {"description": "image_data not provided"},
+    },
+)
 async def identify(request: AnalyzeRequest) -> JSONResponse:
-    """Identify a manually cropped product image. Skips Gemini — sends the
-    crop directly to GCS then Google Lens and returns the matched product."""
     req_id = uuid.uuid4().hex[:8]
     _request_id_ctx.set(req_id)
     start = time.monotonic()
@@ -274,6 +419,17 @@ async def identify(request: AnalyzeRequest) -> JSONResponse:
             content={"detail": "Provide image_data.", "error_code": "INVALID_REQUEST"},
             status_code=400,
             headers={"X-Request-Id": req_id},
+        )
+
+    if request.mlkit_context:
+        ctx = request.mlkit_context
+        logger.info(
+            "MLKIT | route=%s trigger=%s confidence=%.2f objects=%d labels=%s",
+            ctx.route,
+            ctx.trigger,
+            ctx.on_device_confidence or 0.0,
+            ctx.detected_objects_count or 0,
+            [l.text for l in ctx.detected_labels],
         )
 
     logger.info(
@@ -287,6 +443,7 @@ async def identify(request: AnalyzeRequest) -> JSONResponse:
             image_mime_type=request.image_mime_type,
             query=request.query,
             country=request.country,
+            max_results=clamp_max_searches(request.max_searches),
         )
     except Exception as exc:
         elapsed = time.monotonic() - start
@@ -317,7 +474,12 @@ async def identify(request: AnalyzeRequest) -> JSONResponse:
         )
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["System"],
+    summary="Health check",
+    response_description="Service liveness and env var presence",
+)
 async def health():
     import os
     return {

@@ -68,6 +68,31 @@ VOICE_CATEGORIES = [
     "Books & Stationery",
 ]
 
+# Gemini Live's native-audio output (the only mode VOICE_MODEL above
+# supports) auto-detects/switches spoken language and does not honor
+# SpeechConfig.language_code — Google's docs are explicit that native-audio
+# models "automatically choose the appropriate language and don't support
+# explicitly setting the language code." Language is steered via a
+# system-instruction directive instead (see _system_prompt). This is
+# Google's full documented list of native-audio languages.
+SUPPORTED_LANGUAGES = frozenset({
+    "Afrikaans", "Akan", "Albanian", "Amharic", "Arabic", "Armenian", "Assamese",
+    "Azerbaijani", "Basque", "Belarusian", "Bengali", "Bosnian", "Bulgarian",
+    "Burmese", "Catalan", "Cebuano", "Chinese", "Croatian", "Czech", "Danish",
+    "Dutch", "English", "Estonian", "Faroese", "Filipino", "Finnish", "French",
+    "Galician", "Georgian", "German", "Greek", "Gujarati", "Hausa", "Hebrew",
+    "Hindi", "Hungarian", "Icelandic", "Indonesian", "Irish", "Italian",
+    "Japanese", "Kannada", "Kazakh", "Khmer", "Kinyarwanda", "Korean", "Kurdish",
+    "Kyrgyz", "Lao", "Latvian", "Lithuanian", "Macedonian", "Malay", "Malayalam",
+    "Maltese", "Maori", "Marathi", "Mongolian", "Nepali", "Norwegian", "Odia",
+    "Oromo", "Pashto", "Persian", "Polish", "Portuguese", "Punjabi", "Quechua",
+    "Romanian", "Romansh", "Russian", "Serbian", "Sindhi", "Sinhala", "Slovak",
+    "Slovenian", "Somali", "Southern Sotho", "Spanish", "Swahili", "Swedish",
+    "Tajik", "Tamil", "Telugu", "Thai", "Tswana", "Turkish", "Turkmen",
+    "Ukrainian", "Urdu", "Uzbek", "Vietnamese", "Welsh", "Western Frisian",
+    "Wolof", "Yoruba", "Zulu",
+})
+
 _CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "Furniture": ["furniture", "chair", "chairs", "sofa", "sofas", "couch", "couches", "desk", "desks", "table", "tables", "shelf", "shelves", "wardrobe"],
     "Clothing": ["clothing", "clothes", "apparel", "shirt", "shirts", "jacket", "jackets", "jeans", "dress", "dresses", "shoe", "shoes", "sneaker", "sneakers"],
@@ -183,9 +208,16 @@ def _profile_note(existing_profile: dict) -> str:
     )
 
 
-def _system_prompt(existing_profile: dict, mode: str) -> str:
+def _system_prompt(existing_profile: dict, mode: str, language: str) -> str:
     template = SEARCH_SYSTEM_PROMPT_TEMPLATE if mode == "search" else SYSTEM_PROMPT_TEMPLATE
-    return template.format(profile_note=_profile_note(existing_profile))
+    prompt = template.format(profile_note=_profile_note(existing_profile))
+    if language != "English":
+        prompt += (
+            f" Conduct this entire conversation in {language} — speak and "
+            f"respond only in {language}, regardless of what language the "
+            "user uses."
+        )
+    return prompt
 
 
 def _category_schema() -> types.Schema:
@@ -304,6 +336,11 @@ class SessionState:
     # search via search_products). Drives which system prompt/tools the
     # Gemini Live session gets and gates the preference-only logic below.
     mode: str = "preferences"
+    # Display name from SUPPORTED_LANGUAGES (e.g. "Spanish") — "English" is
+    # the no-op default since the system prompts are already English. See
+    # _system_prompt for how this steers the conversation (speech_config.
+    # language_code does nothing on this native-audio model).
+    language: str = "English"
     created_at: float = field(default_factory=time.monotonic)
     latest_patch: dict = field(default_factory=lambda: {"shopping_categories": [], "preference_terms": [], "ignore_terms": []})
     finalize_proposal: Optional[dict] = None
@@ -359,9 +396,13 @@ class SessionRegistry:
         self._sessions: dict[str, SessionState] = {}
         self._lock = asyncio.Lock()
 
-    async def create(self, uid: str, existing_profile: dict, mode: str = "preferences") -> SessionState:
+    async def create(
+        self, uid: str, existing_profile: dict, mode: str = "preferences", language: str = "English"
+    ) -> SessionState:
         session_id = uuid.uuid4().hex
-        state = SessionState(session_id=session_id, uid=uid, existing_profile=existing_profile, mode=mode)
+        state = SessionState(
+            session_id=session_id, uid=uid, existing_profile=existing_profile, mode=mode, language=language
+        )
         async with self._lock:
             self._sessions[session_id] = state
         return state
@@ -393,11 +434,13 @@ def _get_client() -> genai.Client:
     return _genai_client
 
 
-def _live_config(existing_profile: dict, mode: str) -> types.LiveConnectConfig:
+def _live_config(existing_profile: dict, mode: str, language: str) -> types.LiveConnectConfig:
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
         tools=_tools_for_mode(mode),
-        system_instruction=types.Content(parts=[types.Part(text=_system_prompt(existing_profile, mode))]),
+        system_instruction=types.Content(
+            parts=[types.Part(text=_system_prompt(existing_profile, mode, language))]
+        ),
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=_VOICE_NAME)
@@ -1083,7 +1126,7 @@ async def run_voice_session(websocket: WebSocket, session: SessionState) -> None
 
     try:
         async with client.aio.live.connect(
-            model=_VOICE_MODEL, config=_live_config(session.existing_profile, session.mode)
+            model=_VOICE_MODEL, config=_live_config(session.existing_profile, session.mode, session.language)
         ) as gemini_session:
             await _send_greeting_trigger(gemini_session)
             session.last_activity_at = time.monotonic()

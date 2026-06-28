@@ -16,10 +16,10 @@ truststore.inject_into_ssl()
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import profile_store
-from live_session import _SESSION_MAX_SECONDS, run_voice_session, session_registry
+from live_session import SUPPORTED_LANGUAGES, _SESSION_MAX_SECONDS, run_voice_session, session_registry
 
 _request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 
@@ -39,7 +39,26 @@ for _handler in logging.getLogger().handlers:
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Voice Preference Assistant")
+app = FastAPI(
+    title="Voice Preference Assistant",
+    description=(
+        "Gemini Live-powered voice assistant for managing user shopping preferences.\n\n"
+        "**Authentication:** All `/voice/session/*` endpoints require a Firebase ID token in the "
+        "`Authorization: Bearer {token}` header. Obtain a token via `user.getIdToken()` in the "
+        "Firebase Auth SDK.\n\n"
+        "**Session flow:**\n"
+        "1. `POST /voice/session/start` — create session, get `session_id` and WebSocket URL\n"
+        "2. Connect to `wss://{host}/voice/session/{session_id}/stream` — real-time voice exchange\n"
+        "3. `POST /voice/session/finalize` — commit confirmed preference changes to Firestore\n\n"
+        "**WebSocket note:** The `/voice/session/{session_id}/stream` WebSocket endpoint is not "
+        "testable via HTTP clients. Use the mobile app or a WebSocket client."
+    ),
+    version="1.0.0",
+    openapi_tags=[
+        {"name": "Voice Session", "description": "Voice preference session lifecycle"},
+        {"name": "System", "description": "Health and diagnostics"},
+    ],
+)
 
 _CORS = {"Access-Control-Allow-Origin": "*"}
 
@@ -92,21 +111,91 @@ def _require_uid(request: Request) -> str:
         raise HTTPException(status_code=401, detail=str(exc))
 
 
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
 class SessionStartRequest(BaseModel):
-    # "preferences" (forced first-run onboarding) or "search" (every other
-    # voice session) — see live_session.py's SessionState.mode. Defaults to
-    # "preferences" so a stale client that never sends a body keeps the old
-    # behavior.
-    mode: str = "preferences"
+    mode: str = Field(
+        "preferences",
+        description=(
+            "Session mode: `'preferences'` for first-run onboarding or updating dietary restrictions/allergies; "
+            "`'search'` for voice-driven product search within an active shopping session."
+        ),
+    )
+    language: str = Field(
+        "English",
+        description="Display name from SUPPORTED_LANGUAGES (e.g. 'Spanish'). Unknown values fall back to 'English'.",
+    )
+
+
+class UserProfile(BaseModel):
+    username: str | None = None
+    allergies: list[str] = []
+    dietary_restrictions: list[str] = []
+    preference_terms: list[str] = []
+    ignore_terms: list[str] = []
 
 
 class SessionStartResponse(BaseModel):
-    session_id: str
-    ws_url: str
-    profile: dict
+    session_id: str = Field(..., description="Unique session identifier — use for WebSocket URL and finalize call")
+    ws_url: str = Field(..., description="Relative WebSocket path: /voice/session/{session_id}/stream")
+    profile: dict = Field(..., description="Current user profile from Firestore")
 
 
-@app.post("/voice/session/start")
+class SessionEventRequest(BaseModel):
+    session_id: str = Field(..., description="Session ID from /voice/session/start")
+    event_type: str = Field(..., description="Event type identifier (e.g. 'user_message', 'ui_action')")
+    payload: dict = Field(default_factory=dict, description="Arbitrary event payload")
+
+
+class PreferencePatch(BaseModel):
+    preference_terms: list[str] | None = Field(None, description="Product attributes the user prefers")
+    ignore_terms: list[str] | None = Field(None, description="Product names/terms to exclude from results")
+    allergies: list[str] | None = Field(None, description="Food allergies")
+    dietary_restrictions: list[str] | None = Field(None, description="Dietary restrictions (e.g. vegan, gluten-free)")
+    max_searches_per_run: int | None = Field(None, description="Maximum SerpAPI searches per analyze call")
+
+
+class SessionFinalizeRequest(BaseModel):
+    session_id: str = Field(..., description="Session ID from /voice/session/start")
+    confirmed_patch: PreferencePatch = Field(
+        ...,
+        description="The preference changes confirmed by the user during the voice session to persist to Firestore",
+    )
+
+    model_config = {"json_schema_extra": {
+        "examples": [{
+            "session_id": "abc12345",
+            "confirmed_patch": {
+                "preference_terms": ["organic", "non-stick"],
+                "ignore_terms": ["plastic"],
+                "allergies": ["nuts"],
+                "dietary_restrictions": ["vegan"],
+                "max_searches_per_run": 5,
+            }
+        }]
+    }}
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/voice/session/start",
+    tags=["Voice Session"],
+    summary="Start a voice preference session",
+    description=(
+        "Creates a new Gemini Live session for the authenticated user. Returns a `session_id` "
+        "and the relative WebSocket URL to connect to for real-time voice interaction.\n\n"
+        "**Requires:** `Authorization: Bearer {firebase_id_token}`"
+    ),
+    responses={
+        200: {"description": "Session created"},
+        401: {"description": "Missing or invalid Firebase ID token"},
+    },
+)
 async def start_session(http_request: Request, body: SessionStartRequest = SessionStartRequest()) -> JSONResponse:
     req_id = uuid.uuid4().hex[:8]
     _request_id_ctx.set(req_id)
@@ -115,7 +204,8 @@ async def start_session(http_request: Request, body: SessionStartRequest = Sessi
     uid = _require_uid(http_request)
     existing_profile = profile_store.get_profile(uid)
     mode = body.mode if body.mode == "search" else "preferences"
-    session = await session_registry.create(uid=uid, existing_profile=existing_profile, mode=mode)
+    language = body.language if body.language in SUPPORTED_LANGUAGES else "English"
+    session = await session_registry.create(uid=uid, existing_profile=existing_profile, mode=mode, language=language)
 
     elapsed = time.monotonic() - start
     logger.info("voice session start uid=%s session_id=%s in %.2fs", uid, session.session_id, elapsed)
@@ -128,13 +218,20 @@ async def start_session(http_request: Request, body: SessionStartRequest = Sessi
     return JSONResponse(content=response.model_dump(), headers={"X-Request-Id": req_id})
 
 
-class SessionEventRequest(BaseModel):
-    session_id: str
-    event_type: str
-    payload: dict = {}
-
-
-@app.post("/voice/session/event")
+@app.post(
+    "/voice/session/event",
+    tags=["Voice Session"],
+    summary="Send a session event",
+    description=(
+        "Posts a structured event to an active voice session. Currently logged but not "
+        "acted upon server-side — reserved for future UI-to-session signalling.\n\n"
+        "**Requires:** `Authorization: Bearer {firebase_id_token}`"
+    ),
+    responses={
+        200: {"description": "Event received"},
+        401: {"description": "Missing or invalid Firebase ID token"},
+    },
+)
 async def session_event(request: SessionEventRequest, http_request: Request) -> JSONResponse:
     req_id = uuid.uuid4().hex[:8]
     _request_id_ctx.set(req_id)
@@ -145,12 +242,22 @@ async def session_event(request: SessionEventRequest, http_request: Request) -> 
     return JSONResponse(content={"status": "received"}, headers={"X-Request-Id": req_id})
 
 
-class SessionFinalizeRequest(BaseModel):
-    session_id: str
-    confirmed_patch: dict
-
-
-@app.post("/voice/session/finalize")
+@app.post(
+    "/voice/session/finalize",
+    tags=["Voice Session"],
+    summary="Finalize session and save preferences",
+    description=(
+        "Commits the confirmed preference changes from the voice session to Firestore, "
+        "then closes the session. Call this after the WebSocket stream disconnects and the "
+        "user has reviewed the proposed changes.\n\n"
+        "**Requires:** `Authorization: Bearer {firebase_id_token}`"
+    ),
+    responses={
+        200: {"description": "Preferences saved and session closed"},
+        401: {"description": "Missing or invalid Firebase ID token"},
+        500: {"description": "Firestore write failed"},
+    },
+)
 async def finalize_session(request: SessionFinalizeRequest, http_request: Request) -> JSONResponse:
     req_id = uuid.uuid4().hex[:8]
     _request_id_ctx.set(req_id)
@@ -158,7 +265,7 @@ async def finalize_session(request: SessionFinalizeRequest, http_request: Reques
 
     uid = _require_uid(http_request)
     try:
-        result = profile_store.save_reviewed_profile(uid, request.confirmed_patch)
+        result = profile_store.save_reviewed_profile(uid, request.confirmed_patch.model_dump(exclude_none=True))
     except Exception as exc:
         elapsed = time.monotonic() - start
         logger.exception(
@@ -182,6 +289,12 @@ async def finalize_session(request: SessionFinalizeRequest, http_request: Reques
 
 @app.websocket("/voice/session/{session_id}/stream")
 async def voice_stream(websocket: WebSocket, session_id: str) -> None:
+    """Real-time bidirectional voice stream via Gemini Live.
+
+    Connect after calling POST /voice/session/start. The server sends audio
+    chunks and text transcripts; the client sends PCM16 audio frames.
+    Session closes automatically after inactivity or the configured max duration.
+    """
     session = await session_registry.get(session_id)
     if session is None:
         await websocket.close(code=4004)
@@ -197,7 +310,12 @@ async def voice_stream(websocket: WebSocket, session_id: str) -> None:
         logger.info("voice session %s stream closed", session_id)
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["System"],
+    summary="Health check",
+    response_description="Service liveness and active Gemini model",
+)
 async def health():
     return {
         "status": "ok",

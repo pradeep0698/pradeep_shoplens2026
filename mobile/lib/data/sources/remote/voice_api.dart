@@ -12,10 +12,14 @@ class VoiceApi {
   // mode "preferences" is the forced first-run onboarding conversation that
   // learns/saves shopping preferences; "search" (every other session) is a
   // conversational product search instead — see live_session.py's SessionState.mode.
-  Future<VoiceSessionStartResponse> startSession({required bool isOnboarding}) async {
+  // language is a display name from voice_languages.dart's kVoiceLanguages
+  // (e.g. "Spanish") — steers live_session.py's system-instruction directive;
+  // unrecognized values fall back to "English" server-side.
+  Future<VoiceSessionStartResponse> startSession({required bool isOnboarding, required String language}) async {
     try {
       final response = await _dio.post('/voice/session/start', data: {
         'mode': isOnboarding ? 'preferences' : 'search',
+        'language': language,
       });
       return VoiceSessionStartResponse.fromJson(response.data as Map<String, dynamic>);
     } on DioException catch (e) {

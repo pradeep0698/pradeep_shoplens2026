@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
+from cachetools import TTLCache
 from google.cloud import storage as gcs
 
 import requests as _req
@@ -27,8 +28,12 @@ logger = logging.getLogger(__name__)
 _PROJECT      = os.environ.get("PROJECT_ID", "")
 _LOCATION     = os.environ.get("LOCATION", "us-central1")
 _DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
-_GCS_LENS_BUCKET = os.environ.get("GCS_LENS_BUCKET", "")
-_SERPAPI_KEY     = os.environ.get("SERPAPI_KEY", "")
+_GCS_LENS_BUCKET        = os.environ.get("GCS_LENS_BUCKET", "")
+_SERPAPI_KEY            = os.environ.get("SERPAPI_KEY", "")
+_LENS_TIMEOUT           = int(os.environ.get("LENS_TIMEOUT_SECONDS", "12"))
+# Skip Gemini description on /identify by default — Lens works fine without it
+# and Gemini adds 3-6s to every tap. Set to "false" to re-enable.
+_IDENTIFY_SKIP_GEMINI   = os.environ.get("IDENTIFY_SKIP_GEMINI", "true").lower() not in ("0", "false", "no")
 
 # Hard ceiling on SerpAPI (Lens) calls per analyze_media() run, regardless of
 # what the caller requests — protects the shared SerpAPI quota from a single
@@ -49,7 +54,39 @@ def _is_serp_quota_error(data: dict) -> bool:
     return "run out of searches" in err or "ran out of searches" in err
 
 
+def _probe_serp_quota() -> bool:
+    """Check SerpAPI quota via the account endpoint (fast, no search cost).
+    Returns True if quota is available, False if exhausted.
+    Called after a Lens timeout to avoid chaining Gemini + Shopping hangs
+    when the real cause is quota exhaustion."""
+    try:
+        resp = _session.get(
+            "https://serpapi.com/account",
+            params={"api_key": _SERPAPI_KEY},
+            timeout=3,
+        )
+        data = resp.json()
+        remaining = data.get("total_searches_left", 1)
+        if remaining == 0:
+            logger.warning("SerpAPI quota exhausted — 0 searches left")
+            _tls.serp_quota_exhausted = True
+            return False
+        logger.info("SerpAPI quota probe OK — %d searches left", remaining)
+        return True
+    except Exception as exc:
+        logger.warning("SerpAPI quota probe failed: %s — assuming quota OK", exc)
+        return True
+
+
 _session = _req.Session()
+
+# Cache for /identify results — keyed on perceptual hash (8x8 avg hash) + country.
+# Perceptual hash is robust to minor crop/scale differences from live scan taps
+# (different camera frames of the same object hash identically). SHA-256 was
+# wrong here — each tap produced a different raw-byte hash even for the same object.
+# 30-minute TTL matches product-matcher's cache. maxsize=200 keeps memory
+# bounded (~200 crops in flight at once is well above realistic concurrency).
+_identify_cache: TTLCache = TTLCache(maxsize=200, ttl=1800)
 
 _gcs_client: Optional[gcs.Client] = None
 
@@ -492,7 +529,7 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
         resp = _session.get(
             "https://serpapi.com/search",
             params={**base_params, "type": type_value},
-            timeout=25,
+            timeout=_LENS_TIMEOUT,
         )
         data = resp.json()
         if "error" in data:
@@ -518,6 +555,10 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
 
     try:
         data = _fetch("visual_matches")
+    except _req.exceptions.Timeout as exc:
+        logger.warning("Lens visual_matches fetch failed: %s", exc)
+        _tls.lens_timed_out = True
+        data = {}
     except Exception as exc:
         logger.warning("Lens visual_matches fetch failed: %s", exc)
         data = {}
@@ -558,7 +599,20 @@ def classify_exception(exc: Exception) -> tuple[int, str]:
     return 500, "INTERNAL_ERROR"
 
 
-# ── Single-crop identification (tap-to-identify, no Gemini) ──────────────────
+# ── Single-crop identification (tap-to-identify, no Gemini *detection*) ──────
+# Gemini is still used here — but only to describe the crop (color, material,
+# brand, style) so Google Lens gets a richer query. What's skipped vs /analyze
+# is the full-image bounding-box detection pass.
+
+def _perceptual_cache_key(img_bytes: bytes, country: str) -> str:
+    """Average hash of an 8×8 grayscale thumbnail — identical for the same object
+    captured at slightly different crop positions, scales, or JPEG quality levels."""
+    img = Image.open(io.BytesIO(img_bytes)).convert("L").resize((8, 8), Image.LANCZOS)
+    pixels = list(img.getdata())
+    mean = sum(pixels) / 64
+    bits = "".join("1" if p >= mean else "0" for p in pixels)
+    return format(int(bits, 2), "016x") + ":" + country
+
 
 def identify_crop(
     *,
@@ -566,15 +620,27 @@ def identify_crop(
     image_mime_type: str | None = None,
     query: str = "",
     country: str = "us",
+    max_results: int = 5,
 ) -> tuple[list[dict], list[str]]:
     """Identify a pre-cropped image via Gemini description → GCS → Google Lens.
     Skips Gemini bounding-box detection (region already selected), but uses Gemini
     to produce a rich product description (color, material, brand, style) that
-    improves Lens recall. Falls back to the caller-supplied query if Gemini fails."""
+    improves Lens recall. Falls back to the caller-supplied query if Gemini fails.
+    Results are cached for 30 minutes by perceptual hash + country — repeat taps on
+    the same object return instantly without re-running Gemini or Lens."""
     _t_total_start = time.monotonic()
     _warnings: list[str] = []
     _tls.serp_quota_exhausted = False
     img_bytes = base64.b64decode(image_data)
+
+    cache_key = _perceptual_cache_key(img_bytes, country or "us")
+    if cache_key in _identify_cache:
+        cached_products, cached_warnings = _identify_cache[cache_key]
+        logger.info(
+            "identify_crop cache hit | key=%s products=%d elapsed=0.00s",
+            cache_key[:12], len(cached_products),
+        )
+        return cached_products, cached_warnings
 
     # Ensure JPEG (GCS / Lens work best with JPEG; PNG may be RGBA)
     img = Image.open(io.BytesIO(img_bytes))
@@ -584,14 +650,20 @@ def identify_crop(
     img.save(buf, format="JPEG", quality=85)
     jpeg_bytes = buf.getvalue()
 
-    # Gemini description and GCS upload are independent (the upload doesn't
-    # need the description) — run them concurrently instead of sequentially.
     _t_describe_upload_start = time.monotonic()
-    with ThreadPoolExecutor(max_workers=2) as _pool:
-        _describe_future = _pool.submit(_describe_crop, jpeg_bytes)
-        _upload_future = _pool.submit(_upload_gcs, jpeg_bytes)
-        gemini_query = _describe_future.result()
-        gcs_url = _upload_future.result()
+    if _IDENTIFY_SKIP_GEMINI:
+        # Skip Gemini description — saves 3-6s per tap. Lens still works well
+        # on the image alone; set IDENTIFY_SKIP_GEMINI=false to re-enable.
+        logger.info("identify_crop: Gemini description skipped (IDENTIFY_SKIP_GEMINI=true)")
+        gcs_url = _upload_gcs(jpeg_bytes)
+        gemini_query = ""
+    else:
+        # Gemini description and GCS upload are independent — run concurrently.
+        with ThreadPoolExecutor(max_workers=2) as _pool:
+            _describe_future = _pool.submit(_describe_crop, jpeg_bytes)
+            _upload_future = _pool.submit(_upload_gcs, jpeg_bytes)
+            gemini_query = _describe_future.result()
+            gcs_url = _upload_future.result()
     _t_describe_upload = time.monotonic() - _t_describe_upload_start
 
     effective_query = gemini_query or query
@@ -608,15 +680,35 @@ def identify_crop(
 
     # Cleanup handled by the bucket's 1-day lifecycle rule, not an explicit
     # delete here, so it's off the request's critical path.
+    _tls.lens_timed_out = False
     _t_lens_start = time.monotonic()
-    products = _google_lens(gcs_url, query=effective_query, country=country)
+    products = _google_lens(gcs_url, query=effective_query, country=country, max_results=max_results)
     _t_lens = time.monotonic() - _t_lens_start
 
+    # If Lens timed out and Gemini was skipped (no query), probe SerpAPI quota
+    # first — if exhausted, skip Gemini + Shopping entirely (both would hang).
+    # Only if quota is confirmed available, run Gemini to get a description and
+    # then fall through to the Shopping fallback below.
     _t_shopping = 0.0
+    if (not products
+            and not effective_query
+            and getattr(_tls, "lens_timed_out", False)
+            and not getattr(_tls, "serp_quota_exhausted", False)
+            and _SERPAPI_KEY):
+        if _probe_serp_quota():
+            logger.info("identify_crop: Lens timed out with no query — running Gemini as recovery")
+            _t_recovery_start = time.monotonic()
+            effective_query = _describe_crop(jpeg_bytes)
+            _t_describe_upload += time.monotonic() - _t_recovery_start
+            if effective_query:
+                logger.info("identify_crop: Gemini recovery → '%s', trying Shopping", effective_query)
+        else:
+            logger.warning("identify_crop: skipping Gemini + Shopping — SerpAPI quota exhausted")
+
     if not products and effective_query and _SERPAPI_KEY:
         logger.info("Lens found nothing — trying Shopping fallback for '%s'", effective_query)
         _t_shopping_start = time.monotonic()
-        products = _search_shopping(effective_query, country=country)
+        products = _search_shopping(effective_query, country=country, max_results=max_results)
         _t_shopping = time.monotonic() - _t_shopping_start
 
     if getattr(_tls, "serp_quota_exhausted", False):
@@ -632,6 +724,7 @@ def identify_crop(
         "TIMING | total=%.2fs describe_and_upload=%.2fs lens=%.2fs shopping=%.2fs",
         time.monotonic() - _t_total_start, _t_describe_upload, _t_lens, _t_shopping,
     )
+    _identify_cache[cache_key] = (products, _warnings)
     return products, _warnings
 
 

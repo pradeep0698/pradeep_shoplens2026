@@ -100,6 +100,43 @@ def test_start_session_rejects_unknown_mode_value_by_falling_back_to_preferences
     assert session.mode == "preferences"
 
 
+def test_start_session_defaults_to_english_without_a_language(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+
+    response = client.post("/voice/session/start", headers={"Authorization": "Bearer faketoken"})
+
+    assert response.status_code == 200
+    session = main.session_registry._sessions[response.json()["session_id"]]
+    assert session.language == "English"
+
+
+def test_start_session_threads_language_into_the_created_session(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+
+    response = client.post(
+        "/voice/session/start", json={"language": "Spanish"}, headers={"Authorization": "Bearer faketoken"}
+    )
+
+    assert response.status_code == 200
+    session = main.session_registry._sessions[response.json()["session_id"]]
+    assert session.language == "Spanish"
+
+
+def test_start_session_rejects_unknown_language_value_by_falling_back_to_english(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+
+    response = client.post(
+        "/voice/session/start", json={"language": "Klingon"}, headers={"Authorization": "Bearer faketoken"}
+    )
+
+    assert response.status_code == 200
+    session = main.session_registry._sessions[response.json()["session_id"]]
+    assert session.language == "English"
+
+
 def test_session_event_requires_authorization_header(client):
     response = client.post("/voice/session/event", json={"session_id": "abc", "event_type": "stop"})
     assert response.status_code == 401

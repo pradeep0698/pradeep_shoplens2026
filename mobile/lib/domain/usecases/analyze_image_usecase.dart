@@ -31,14 +31,15 @@ class AnalyzeImageUseCase {
   AnalyzeImageUseCase(this._analyzer, this._matcher, this._session);
 
   Stream<PipelineEvent> execute({
-    required Uint8List    imageBytes,
-    required String       mimeType,
-    required String       sessionId,
-    required List<String> ignoreTerms,
-    required List<String> preferenceTerms,
-    List<String>          shoppingCategories = const [],
-    String?               country,
-    int?                  maxSearches,
+    required Uint8List         imageBytes,
+    required String            mimeType,
+    required String            sessionId,
+    required List<String>      ignoreTerms,
+    required List<String>      preferenceTerms,
+    List<String>               shoppingCategories = const [],
+    String?                    country,
+    int?                       maxSearches,
+    Map<String, dynamic>?      mlkitContext,
   }) async* {
     yield const PipelineEvent(PipelineStep.analyzing);
 
@@ -59,6 +60,7 @@ class AnalyzeImageUseCase {
       transcript:    '',
       country:       country,
       maxSearches:   maxSearches,
+      mlkitContext:  mlkitContext,
     ))) {
       switch (event['type']) {
         case 'items':

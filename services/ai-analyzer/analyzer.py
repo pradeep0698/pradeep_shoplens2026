@@ -54,6 +54,30 @@ def _is_serp_quota_error(data: dict) -> bool:
     return "run out of searches" in err or "ran out of searches" in err
 
 
+def _probe_serp_quota() -> bool:
+    """Check SerpAPI quota via the account endpoint (fast, no search cost).
+    Returns True if quota is available, False if exhausted.
+    Called after a Lens timeout to avoid chaining Gemini + Shopping hangs
+    when the real cause is quota exhaustion."""
+    try:
+        resp = _session.get(
+            "https://serpapi.com/account",
+            params={"api_key": _SERPAPI_KEY},
+            timeout=3,
+        )
+        data = resp.json()
+        remaining = data.get("total_searches_left", 1)
+        if remaining == 0:
+            logger.warning("SerpAPI quota exhausted — 0 searches left")
+            _tls.serp_quota_exhausted = True
+            return False
+        logger.info("SerpAPI quota probe OK — %d searches left", remaining)
+        return True
+    except Exception as exc:
+        logger.warning("SerpAPI quota probe failed: %s — assuming quota OK", exc)
+        return True
+
+
 _session = _req.Session()
 
 # Cache for /identify results — keyed on perceptual hash (8x8 avg hash) + country.
@@ -660,21 +684,25 @@ def identify_crop(
     products = _google_lens(gcs_url, query=effective_query, country=country)
     _t_lens = time.monotonic() - _t_lens_start
 
-    # If Lens timed out and Gemini was skipped (no query), run Gemini now as a
-    # recovery step so the Shopping fallback has something to search with.
-    # Only worth trying if quota isn't already known to be exhausted.
+    # If Lens timed out and Gemini was skipped (no query), probe SerpAPI quota
+    # first — if exhausted, skip Gemini + Shopping entirely (both would hang).
+    # Only if quota is confirmed available, run Gemini to get a description and
+    # then fall through to the Shopping fallback below.
     _t_shopping = 0.0
     if (not products
             and not effective_query
             and getattr(_tls, "lens_timed_out", False)
             and not getattr(_tls, "serp_quota_exhausted", False)
             and _SERPAPI_KEY):
-        logger.info("identify_crop: Lens timed out with no query — running Gemini as recovery")
-        _t_recovery_start = time.monotonic()
-        effective_query = _describe_crop(jpeg_bytes)
-        _t_describe_upload += time.monotonic() - _t_recovery_start
-        if effective_query:
-            logger.info("identify_crop: Gemini recovery → '%s', trying Shopping", effective_query)
+        if _probe_serp_quota():
+            logger.info("identify_crop: Lens timed out with no query — running Gemini as recovery")
+            _t_recovery_start = time.monotonic()
+            effective_query = _describe_crop(jpeg_bytes)
+            _t_describe_upload += time.monotonic() - _t_recovery_start
+            if effective_query:
+                logger.info("identify_crop: Gemini recovery → '%s', trying Shopping", effective_query)
+        else:
+            logger.warning("identify_crop: skipping Gemini + Shopping — SerpAPI quota exhausted")
 
     if not products and effective_query and _SERPAPI_KEY:
         logger.info("Lens found nothing — trying Shopping fallback for '%s'", effective_query)

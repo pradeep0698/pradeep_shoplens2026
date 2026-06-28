@@ -242,7 +242,7 @@ def test_profile_note_summarizes_existing_data():
 
 def test_system_prompt_embeds_profile_note():
     prompt = _system_prompt(
-        {"shopping_categories": ["Electronics"], "preference_terms": [], "ignore_terms": []}, "preferences"
+        {"shopping_categories": ["Electronics"], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
     )
     assert "shops for Electronics" in prompt
     assert "ready_to_finalize" in prompt
@@ -253,12 +253,14 @@ def test_system_prompt_tells_model_to_mention_finishing_in_greeting():
     deciding to wrap up — the opening greeting should tell them they can say
     "I'm done" (or tap the done button) any time, mirroring the mock
     greeting in _run_mock_session."""
-    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences")
+    prompt = _system_prompt(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
+    )
     assert "i'm done" in prompt.lower()
 
 
 def test_system_prompt_search_mode_uses_search_template_and_tool():
-    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search")
+    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search", "English")
     assert "search_products" in prompt
     assert "ready_to_finalize" not in prompt
 
@@ -267,29 +269,49 @@ def test_system_prompt_search_mode_asks_follow_up_before_searching_vague_request
     """Every search_products call costs a real SerpAPI request — the prompt
     should steer the model to narrow down a bare/vague request with a
     follow-up before searching, instead of searching on the first mention."""
-    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search")
+    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search", "English")
     assert "follow-up" in prompt.lower()
     assert "distinguishing detail" in prompt.lower()
 
 
 def test_system_prompt_search_mode_avoids_repeat_searches_for_rephrasing():
-    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search")
+    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search", "English")
     assert "rephrased" in prompt.lower()
 
 
 def test_system_prompt_preferences_mode_follows_up_on_same_category_before_moving_on():
-    prompt = _system_prompt({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences")
+    prompt = _system_prompt(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
+    )
     assert "same category" in prompt.lower()
 
 
+def test_system_prompt_defaults_to_no_language_directive_for_english():
+    prompt = _system_prompt(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
+    )
+    assert "Conduct this entire conversation" not in prompt
+
+
+def test_system_prompt_appends_language_directive_for_non_english():
+    prompt = _system_prompt(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "Spanish"
+    )
+    assert "Conduct this entire conversation in Spanish" in prompt
+
+
 def test_live_config_defaults_to_puck_voice():
-    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences")
+    config = _live_config(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
+    )
     assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Puck"
 
 
 def test_live_config_respects_voice_name_env_override(monkeypatch):
     monkeypatch.setattr(live_session, "_VOICE_NAME", "Kore")
-    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences")
+    config = _live_config(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
+    )
     assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Kore"
 
 
@@ -297,20 +319,33 @@ def test_live_config_disables_automatic_activity_detection():
     """Turn boundaries are now driven by the client's hold-to-talk button
     (speech_start/speech_end -> activity_start/activity_end), not Gemini's
     own VAD over the resampled mic audio."""
-    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences")
+    config = _live_config(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
+    )
     assert config.realtime_input_config.automatic_activity_detection.disabled is True
 
 
 def test_live_config_preferences_mode_uses_preference_tools():
-    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences")
+    config = _live_config(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
+    )
     names = {fn.name for tool in config.tools for fn in tool.function_declarations}
     assert names == {"ready_to_finalize", "record_preference"}
 
 
 def test_live_config_search_mode_uses_search_tool():
-    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search")
+    config = _live_config(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search", "English"
+    )
     names = {fn.name for tool in config.tools for fn in tool.function_declarations}
     assert names == {"search_products"}
+
+
+def test_live_config_threads_language_into_system_instruction():
+    config = _live_config(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "French"
+    )
+    assert "Conduct this entire conversation in French" in config.system_instruction.parts[0].text
 
 
 def test_search_products_tool_description_requires_a_distinguishing_detail():

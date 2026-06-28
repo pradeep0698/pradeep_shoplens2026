@@ -3,7 +3,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/constants/voice_languages.dart';
 import '../../data/models/voice_session.dart';
+import '../../data/repositories/profile_repository.dart';
+import '../providers/auth_provider.dart';
+import '../providers/profile_provider.dart';
 import '../providers/voice_assistant_provider.dart';
 import 'product_card.dart';
 
@@ -13,11 +17,6 @@ const _kAccent = Color(0xFF34D399);
 const _kMuted = Color(0xFF94A3B8);
 const _kFaint = Color(0xFF64748B);
 const _kError = Color(0xFFF87171);
-
-// Language picker is a UI stub for v1 — selecting one only updates local
-// widget state. Not threaded into the backend's Gemini session config yet
-// (hook point is LiveConnectConfig.speech_config on the backend).
-const _languageOptions = ['English', 'Spanish', 'French', 'Hindi', 'German', 'Mandarin'];
 
 const _onboardingSuggestionChips = [
   'I like minimalist design',
@@ -64,8 +63,9 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
   @override
   void initState() {
     super.initState();
+    _language = ref.read(profileProvider).value?.voiceLanguage ?? 'English';
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding);
+      ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding, language: _language);
     });
   }
 
@@ -87,25 +87,85 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
     _textController.clear();
   }
 
+  // Changing language reconnects the live session (see _selectLanguage) —
+  // only meaningful while one could plausibly be active.
+  bool _canChangeLanguage(VoiceAssistantState state) =>
+      state.status != VoiceStatus.review &&
+      state.status != VoiceStatus.saving &&
+      state.status != VoiceStatus.done;
+
+  // Restarts the live session in the new language — Gemini Live's system
+  // instruction (see live_session.py's _system_prompt) is fixed for the life
+  // of a connection, so a language change can only take effect by
+  // reconnecting. Also persists the choice to the user's profile so it's
+  // remembered the next time they open the assistant.
+  void _selectLanguage(String lang) {
+    if (lang == _language) return;
+    setState(() => _language = lang);
+    final user = ref.read(authStateProvider).value;
+    final profile = ref.read(profileProvider).value;
+    if (user != null && profile != null) {
+      unawaited(ref.read(profileRepositoryProvider).save(user.uid, profile.copyWith(voiceLanguage: lang)));
+    }
+    ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding, language: lang);
+  }
+
   void _showLanguagePicker() {
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: _kSurface,
-      builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: _languageOptions
-              .map((lang) => ListTile(
-                    title: Text(lang, style: const TextStyle(color: Colors.white)),
-                    trailing: lang == _language ? const Icon(Icons.check, color: _kAccent) : null,
-                    onTap: () {
-                      setState(() => _language = lang);
-                      Navigator.of(context).pop();
-                    },
-                  ))
-              .toList(),
-        ),
-      ),
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        var query = '';
+        return StatefulBuilder(
+          builder: (sheetContext, setSheetState) {
+            final filtered = kVoiceLanguages.where((lang) => lang.toLowerCase().contains(query.toLowerCase())).toList();
+            return SafeArea(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: MediaQuery.of(sheetContext).size.height * 0.7),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                      child: TextField(
+                        autofocus: true,
+                        onChanged: (v) => setSheetState(() => query = v),
+                        style: const TextStyle(color: Colors.white),
+                        decoration: InputDecoration(
+                          hintText: 'Search languages...',
+                          hintStyle: const TextStyle(color: _kFaint),
+                          prefixIcon: const Icon(Icons.search, color: _kFaint),
+                          filled: true,
+                          fillColor: _kBg,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: filtered.length,
+                        itemBuilder: (_, i) {
+                          final lang = filtered[i];
+                          return ListTile(
+                            title: Text(lang, style: const TextStyle(color: Colors.white)),
+                            trailing: lang == _language ? const Icon(Icons.check, color: _kAccent) : null,
+                            onTap: () {
+                              Navigator.of(sheetContext).pop();
+                              _selectLanguage(lang);
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 
@@ -133,7 +193,7 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
           top: false,
           child: Column(
             children: [
-              _header(),
+              _header(state),
               Expanded(child: _body(state)),
               if (state.status != VoiceStatus.review &&
                   state.status != VoiceStatus.saving &&
@@ -146,7 +206,7 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
     );
   }
 
-  Widget _header() => Padding(
+  Widget _header(VoiceAssistantState state) => Padding(
         padding: const EdgeInsets.fromLTRB(20, 16, 8, 8),
         child: Row(
           children: [
@@ -159,9 +219,9 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
               ),
             ),
             IconButton(
-              icon: const Icon(Icons.language, color: _kMuted),
+              icon: Icon(Icons.language, color: _kMuted.withValues(alpha: _canChangeLanguage(state) ? 1 : 0.4)),
               tooltip: 'Language: $_language',
-              onPressed: _showLanguagePicker,
+              onPressed: _canChangeLanguage(state) ? _showLanguagePicker : null,
             ),
             IconButton(
               icon: const Icon(Icons.close, color: _kMuted),
@@ -280,7 +340,9 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
               ),
               const SizedBox(height: 16),
               ElevatedButton(
-                onPressed: () => ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding),
+                onPressed: () => ref
+                    .read(voiceAssistantProvider.notifier)
+                    .start(isOnboarding: widget.isOnboarding, language: _language),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _kAccent,
                   foregroundColor: _kBg,

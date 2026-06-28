@@ -103,7 +103,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
     return const VoiceAssistantState();
   }
 
-  Future<void> start({required bool isOnboarding}) async {
+  Future<void> start({required bool isOnboarding, required String language}) async {
     await _teardownSession();
     _isOnboarding = isOnboarding;
     _seq = 0;
@@ -120,7 +120,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         return;
       }
 
-      final startResponse = await ref.read(voiceApiProvider).startSession(isOnboarding: isOnboarding);
+      final startResponse = await ref.read(voiceApiProvider).startSession(isOnboarding: isOnboarding, language: language);
       if (!_isCurrent(generation)) return;
       _sessionId = startResponse.sessionId;
       state = state.copyWith(patch: startResponse.profile);

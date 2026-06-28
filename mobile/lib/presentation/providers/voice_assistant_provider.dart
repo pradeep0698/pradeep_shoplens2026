@@ -6,6 +6,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 
 import '../../core/constants/api_constants.dart';
+import '../../core/utils/mic_permission.dart';
 import '../../core/utils/pcm16_resampler.dart';
 import '../../core/utils/pcm16_speech_gate.dart';
 import '../../core/utils/voice_audio_player.dart';
@@ -110,7 +111,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
     final generation = ++_generation;
     state = const VoiceAssistantState(status: VoiceStatus.connecting);
     try {
-      final micStatus = await Permission.microphone.request();
+      final micStatus = await requestMicrophonePermission();
       if (!_isCurrent(generation)) return;
       if (!micStatus.isGranted) {
         state = state.copyWith(
@@ -284,6 +285,22 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
     state = const VoiceAssistantState();
   }
 
+  /// Called when the app is truly backgrounded (AppLifecycleState.paused)
+  /// while a live turn is in progress — stops mic/audio/socket like cancel(),
+  /// but uses copyWith (not a fresh VoiceAssistantState) so transcript and
+  /// searchResults survive and are still visible if the user returns to the
+  /// overlay. No-op outside listening/speaking (e.g. mid-save, in review, or
+  /// already torn down) so those flows aren't disturbed by backgrounding.
+  Future<void> pauseForBackground() async {
+    if (state.status != VoiceStatus.listening && state.status != VoiceStatus.speaking) return;
+    _speakingDebounce?.cancel();
+    await _stopLiveAudio();
+    state = state.copyWith(
+      status: VoiceStatus.error,
+      errorMessage: 'Paused — the assistant stopped listening while the app was in the background.',
+    );
+  }
+
   void _handleFrame(VoiceSocketFrame frame) {
     switch (frame) {
       case VoiceAudioFrame(data: final data):
@@ -298,7 +315,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       case VoiceSocketClosed():
         state = state.copyWith(
           status: VoiceStatus.error,
-          errorMessage: 'Connection lost — please start again.',
+          errorMessage: 'Connection lost — tap Reconnect to keep talking.',
         );
     }
   }

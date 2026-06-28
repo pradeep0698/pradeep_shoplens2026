@@ -57,21 +57,34 @@ class VoiceAssistantOverlay extends ConsumerStatefulWidget {
   ConsumerState<VoiceAssistantOverlay> createState() => _VoiceAssistantOverlayState();
 }
 
-class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
+class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> with WidgetsBindingObserver {
   final _textController = TextEditingController();
   String _language = 'English';
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding);
     });
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
+    // Only true backgrounding stops the live turn — AppLifecycleState.inactive
+    // fires the instant the window/tab loses focus even momentarily (e.g.
+    // url_launcher opening a product's Buy link), and must not be acted on
+    // here, or it reintroduces the bug described in dispose() below.
+    if (lifecycleState == AppLifecycleState.paused) {
+      unawaited(ref.read(voiceAssistantProvider.notifier).pauseForBackground());
+    }
+  }
+
+  @override
   void dispose() {
-    // The only teardown trigger now — previously a WidgetsBindingObserver
+    WidgetsBinding.instance.removeObserver(this);
+    // The only full-teardown trigger now — previously a WidgetsBindingObserver
     // also cancelled on AppLifecycleState.inactive, which fires the instant
     // the window/tab loses focus (e.g. url_launcher opening a product's Buy
     // link), wiping the whole conversation even though the user never
@@ -122,24 +135,30 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
       }
     });
 
-    return FractionallySizedBox(
-      heightFactor: 0.88,
-      child: Container(
-        decoration: const BoxDecoration(
-          color: _kBg,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-        ),
-        child: SafeArea(
-          top: false,
-          child: Column(
-            children: [
-              _header(),
-              Expanded(child: _body(state)),
-              if (state.status != VoiceStatus.review &&
-                  state.status != VoiceStatus.saving &&
-                  state.status != VoiceStatus.done)
-                _inputRow(state),
-            ],
+    // isScrollControlled: true (see showVoiceAssistantOverlay) opts this sheet
+    // out of Flutter's automatic keyboard-avoidance padding, so the bottom
+    // inset has to be applied here manually or the keyboard covers _inputRow.
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: FractionallySizedBox(
+        heightFactor: 0.88,
+        child: Container(
+          decoration: const BoxDecoration(
+            color: _kBg,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: SafeArea(
+            top: false,
+            child: Column(
+              children: [
+                _header(),
+                Expanded(child: _body(state)),
+                if (state.status != VoiceStatus.review &&
+                    state.status != VoiceStatus.saving &&
+                    state.status != VoiceStatus.done)
+                  _inputRow(state),
+              ],
+            ),
           ),
         ),
       ),
@@ -206,7 +225,13 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
           ),
         );
       case VoiceStatus.error:
-        return _errorBody(state);
+        // Keep the transcript/product results on screen instead of swapping
+        // to the generic error screen whenever there's something to show —
+        // covers both a dropped connection and pauseForBackground(), neither
+        // of which should hide a conversation the user already built up.
+        return (state.transcript.isNotEmpty || state.searchResults.isNotEmpty)
+            ? _conversationBody(state)
+            : _errorBody(state);
       case VoiceStatus.listening:
       case VoiceStatus.speaking:
         return _conversationBody(state);
@@ -234,6 +259,13 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
             const SizedBox(height: 24),
             _MicVisualizer(isSpeaking: state.status == VoiceStatus.speaking, isRecording: state.isRecording),
             const SizedBox(height: 24),
+            if (state.status == VoiceStatus.error) ...[
+              _ErrorBanner(
+                message: state.errorMessage ?? 'Connection lost.',
+                onReconnect: () => ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding),
+              ),
+              const SizedBox(height: 16),
+            ],
             if (state.transcript.length <= 1) ...[
               Wrap(
                 alignment: WrapAlignment.center,
@@ -451,7 +483,8 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
     final notifier = ref.read(voiceAssistantProvider.notifier);
     final disabled = state.status == VoiceStatus.review ||
         state.status == VoiceStatus.saving ||
-        state.status == VoiceStatus.done;
+        state.status == VoiceStatus.done ||
+        state.status == VoiceStatus.error;
     return Listener(
       onPointerDown: disabled ? null : (_) => notifier.beginSpeaking(),
       onPointerUp: disabled ? null : (_) => notifier.endSpeaking(),
@@ -482,6 +515,51 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Inline banner shown above the conversation when the live session has
+/// stopped (dropped connection or backgrounding) but there's already a
+/// transcript/results worth keeping on screen — see _body()'s error branch.
+class _ErrorBanner extends StatelessWidget {
+  const _ErrorBanner({required this.message, required this.onReconnect});
+  final String message;
+  final VoidCallback onReconnect;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _kError.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _kError.withValues(alpha: 0.4)),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.error_outline, color: _kError, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(message, style: const TextStyle(color: _kMuted, fontSize: 12.5)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton(
+            onPressed: onReconnect,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _kAccent,
+              side: const BorderSide(color: _kAccent),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            ),
+            child: const Text('Reconnect', style: TextStyle(fontWeight: FontWeight.w700)),
+          ),
+        ],
       ),
     );
   }

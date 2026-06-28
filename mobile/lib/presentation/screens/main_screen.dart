@@ -5,8 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:permission_handler/permission_handler.dart';
 import '../../core/services/vision_service.dart';
+import '../../core/utils/mic_permission.dart';
 import '../../core/utils/image_utils.dart';
 import '../../core/utils/product_ranker.dart';
 import '../../core/utils/session_id.dart';
@@ -111,7 +111,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     // the voice chat FAB. Guarded to run once per screen lifetime.
     if (!_micPrewarmed) {
       _micPrewarmed = true;
-      unawaited(Permission.microphone.request());
+      unawaited(requestMicrophonePermission());
     }
 
     final isBusy = pipeline.status == PipelineStatus.analyzing ||

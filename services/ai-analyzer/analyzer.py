@@ -52,7 +52,10 @@ def _is_serp_quota_error(data: dict) -> bool:
 
 _session = _req.Session()
 
-# Cache for /identify results — keyed on SHA-256(image bytes) + country.
+# Cache for /identify results — keyed on perceptual hash (8x8 avg hash) + country.
+# Perceptual hash is robust to minor crop/scale differences from live scan taps
+# (different camera frames of the same object hash identically). SHA-256 was
+# wrong here — each tap produced a different raw-byte hash even for the same object.
 # 30-minute TTL matches product-matcher's cache. maxsize=200 keeps memory
 # bounded (~200 crops in flight at once is well above realistic concurrency).
 _identify_cache: TTLCache = TTLCache(maxsize=200, ttl=1800)
@@ -566,6 +569,16 @@ def classify_exception(exc: Exception) -> tuple[int, str]:
 
 # ── Single-crop identification (tap-to-identify, no Gemini) ──────────────────
 
+def _perceptual_cache_key(img_bytes: bytes, country: str) -> str:
+    """Average hash of an 8×8 grayscale thumbnail — identical for the same object
+    captured at slightly different crop positions, scales, or JPEG quality levels."""
+    img = Image.open(io.BytesIO(img_bytes)).convert("L").resize((8, 8), Image.LANCZOS)
+    pixels = list(img.getdata())
+    mean = sum(pixels) / 64
+    bits = "".join("1" if p >= mean else "0" for p in pixels)
+    return format(int(bits, 2), "016x") + ":" + country
+
+
 def identify_crop(
     *,
     image_data: str,
@@ -577,14 +590,14 @@ def identify_crop(
     Skips Gemini bounding-box detection (region already selected), but uses Gemini
     to produce a rich product description (color, material, brand, style) that
     improves Lens recall. Falls back to the caller-supplied query if Gemini fails.
-    Results are cached for 30 minutes by image hash + country — repeat taps on
+    Results are cached for 30 minutes by perceptual hash + country — repeat taps on
     the same object return instantly without re-running Gemini or Lens."""
     _t_total_start = time.monotonic()
     _warnings: list[str] = []
     _tls.serp_quota_exhausted = False
     img_bytes = base64.b64decode(image_data)
 
-    cache_key = hashlib.sha256(img_bytes).hexdigest() + ":" + (country or "us")
+    cache_key = _perceptual_cache_key(img_bytes, country or "us")
     if cache_key in _identify_cache:
         cached_products, cached_warnings = _identify_cache[cache_key]
         logger.info(

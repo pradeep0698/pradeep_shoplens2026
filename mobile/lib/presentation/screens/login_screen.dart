@@ -14,6 +14,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _email    = TextEditingController();
   final _password = TextEditingController();
   String _localError = '';
+  bool _obscurePassword = true;
 
   @override
   void dispose() {
@@ -69,7 +70,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     const SizedBox(height: 28),
                     _inputField('Email', _email, hint: 'user@shoplens.com'),
                     const SizedBox(height: 14),
-                    _inputField('Password', _password, obscure: true, hint: 'Enter your password'),
+                    _inputField('Password', _password,
+                        obscure: _obscurePassword,
+                        hint: 'Enter your password',
+                        onToggleObscure: () => setState(() => _obscurePassword = !_obscurePassword)),
                     if (_localError.isNotEmpty) ...[
                       const SizedBox(height: 12),
                       Container(
@@ -155,17 +159,18 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     );
   }
 
-  Widget _inputField(String label, TextEditingController ctrl, {bool obscure = false, String hint = ''}) =>
+  Widget _inputField(String label, TextEditingController ctrl,
+      {bool obscure = false, String hint = '', VoidCallback? onToggleObscure}) =>
       Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(label, style: const TextStyle(color: Color(0xFFCBD5E1), fontSize: 13, fontWeight: FontWeight.w500)),
           const SizedBox(height: 6),
           TextField(
-            controller:     ctrl,
-            obscureText:    obscure,
-            style:          const TextStyle(color: Colors.white, fontSize: 14),
-            onSubmitted:    (_) => _submit(),
+            controller:  ctrl,
+            obscureText: obscure,
+            style:       const TextStyle(color: Colors.white, fontSize: 14),
+            onSubmitted: (_) => _submit(),
             decoration: InputDecoration(
               hintText: hint,
               hintStyle: const TextStyle(color: Color(0xFF64748B)),
@@ -184,6 +189,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 borderSide: const BorderSide(color: Color(0xFF6EE7B7)),
               ),
               contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              suffixIcon: onToggleObscure != null
+                  ? IconButton(
+                      icon: Icon(obscure ? Icons.visibility_off : Icons.visibility,
+                          color: const Color(0xFF64748B), size: 20),
+                      onPressed: onToggleObscure,
+                    )
+                  : null,
             ),
           ),
         ],

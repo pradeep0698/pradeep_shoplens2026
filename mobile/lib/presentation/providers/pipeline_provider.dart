@@ -126,6 +126,7 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
         preferenceTerms:    profile.preferenceTerms,
         shoppingCategories: profile.shoppingCategories,
         country:            profile.country.isEmpty ? null : profile.country,
+        maxSearches:        profile.maxSearchesPerRun,
         mlkitContext:       mlkitContext,
       );
       state = PipelineState(status: PipelineStatus.success, imageBytes: bytes, fromLiveScan: _fromLiveScan);

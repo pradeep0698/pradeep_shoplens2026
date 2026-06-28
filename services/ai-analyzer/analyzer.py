@@ -620,6 +620,7 @@ def identify_crop(
     image_mime_type: str | None = None,
     query: str = "",
     country: str = "us",
+    max_results: int = 5,
 ) -> tuple[list[dict], list[str]]:
     """Identify a pre-cropped image via Gemini description → GCS → Google Lens.
     Skips Gemini bounding-box detection (region already selected), but uses Gemini
@@ -681,7 +682,7 @@ def identify_crop(
     # delete here, so it's off the request's critical path.
     _tls.lens_timed_out = False
     _t_lens_start = time.monotonic()
-    products = _google_lens(gcs_url, query=effective_query, country=country)
+    products = _google_lens(gcs_url, query=effective_query, country=country, max_results=max_results)
     _t_lens = time.monotonic() - _t_lens_start
 
     # If Lens timed out and Gemini was skipped (no query), probe SerpAPI quota
@@ -707,7 +708,7 @@ def identify_crop(
     if not products and effective_query and _SERPAPI_KEY:
         logger.info("Lens found nothing — trying Shopping fallback for '%s'", effective_query)
         _t_shopping_start = time.monotonic()
-        products = _search_shopping(effective_query, country=country)
+        products = _search_shopping(effective_query, country=country, max_results=max_results)
         _t_shopping = time.monotonic() - _t_shopping_start
 
     if getattr(_tls, "serp_quota_exhausted", False):

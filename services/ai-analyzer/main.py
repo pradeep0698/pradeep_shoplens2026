@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from analyzer import (
     analyze_media,
     analyze_media_stream,
+    clamp_max_searches,
     classify_exception,
     identify_crop,
     get_active_model,
@@ -442,6 +443,7 @@ async def identify(request: AnalyzeRequest) -> JSONResponse:
             image_mime_type=request.image_mime_type,
             query=request.query,
             country=request.country,
+            max_results=clamp_max_searches(request.max_searches),
         )
     except Exception as exc:
         elapsed = time.monotonic() - start

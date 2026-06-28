@@ -24,6 +24,7 @@ class TapIdentifyUseCase {
     List<String>               shoppingCategories = const [],
     String?                    query,
     String?                    country,
+    int?                       maxSearches,
     Map<String, dynamic>?      mlkitContext,
   }) async {
     // Use /identify (not /analyze) — skips Gemini bounding-box detection since
@@ -37,6 +38,7 @@ class TapIdentifyUseCase {
       transcript:    '',
       query:         query,
       country:       country,
+      maxSearches:   maxSearches,
       mlkitContext:  mlkitContext,
     ));
 

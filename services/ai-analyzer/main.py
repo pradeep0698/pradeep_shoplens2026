@@ -65,12 +65,14 @@ _CORS = {"Access-Control-Allow-Origin": "*"}
 async def _log_startup_config() -> None:
     logger.info(
         "ai-analyzer starting | project_id=%s location=%s model=%s "
-        "gcs_lens_bucket=%s serpapi_key=%s",
+        "gcs_lens_bucket=%s serpapi_key=%s lens_timeout=%ss skip_gemini=%s",
         os.environ.get("PROJECT_ID") or "(unset)",
         os.environ.get("LOCATION", "us-central1"),
         get_active_model(),
         os.environ.get("GCS_LENS_BUCKET") or "(unset)",
         "set" if os.environ.get("SERPAPI_KEY") else "(unset)",
+        os.environ.get("LENS_TIMEOUT_SECONDS", "8"),
+        os.environ.get("IDENTIFY_SKIP_GEMINI", "true"),
     )
 
 

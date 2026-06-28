@@ -28,8 +28,12 @@ logger = logging.getLogger(__name__)
 _PROJECT      = os.environ.get("PROJECT_ID", "")
 _LOCATION     = os.environ.get("LOCATION", "us-central1")
 _DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
-_GCS_LENS_BUCKET = os.environ.get("GCS_LENS_BUCKET", "")
-_SERPAPI_KEY     = os.environ.get("SERPAPI_KEY", "")
+_GCS_LENS_BUCKET        = os.environ.get("GCS_LENS_BUCKET", "")
+_SERPAPI_KEY            = os.environ.get("SERPAPI_KEY", "")
+_LENS_TIMEOUT           = int(os.environ.get("LENS_TIMEOUT_SECONDS", "8"))
+# Skip Gemini description on /identify by default — Lens works fine without it
+# and Gemini adds 3-6s to every tap. Set to "false" to re-enable.
+_IDENTIFY_SKIP_GEMINI   = os.environ.get("IDENTIFY_SKIP_GEMINI", "true").lower() not in ("0", "false", "no")
 
 # Hard ceiling on SerpAPI (Lens) calls per analyze_media() run, regardless of
 # what the caller requests — protects the shared SerpAPI quota from a single
@@ -501,7 +505,7 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
         resp = _session.get(
             "https://serpapi.com/search",
             params={**base_params, "type": type_value},
-            timeout=25,
+            timeout=_LENS_TIMEOUT,
         )
         data = resp.json()
         if "error" in data:
@@ -617,14 +621,20 @@ def identify_crop(
     img.save(buf, format="JPEG", quality=85)
     jpeg_bytes = buf.getvalue()
 
-    # Gemini description and GCS upload are independent (the upload doesn't
-    # need the description) — run them concurrently instead of sequentially.
     _t_describe_upload_start = time.monotonic()
-    with ThreadPoolExecutor(max_workers=2) as _pool:
-        _describe_future = _pool.submit(_describe_crop, jpeg_bytes)
-        _upload_future = _pool.submit(_upload_gcs, jpeg_bytes)
-        gemini_query = _describe_future.result()
-        gcs_url = _upload_future.result()
+    if _IDENTIFY_SKIP_GEMINI:
+        # Skip Gemini description — saves 3-6s per tap. Lens still works well
+        # on the image alone; set IDENTIFY_SKIP_GEMINI=false to re-enable.
+        logger.info("identify_crop: Gemini description skipped (IDENTIFY_SKIP_GEMINI=true)")
+        gcs_url = _upload_gcs(jpeg_bytes)
+        gemini_query = ""
+    else:
+        # Gemini description and GCS upload are independent — run concurrently.
+        with ThreadPoolExecutor(max_workers=2) as _pool:
+            _describe_future = _pool.submit(_describe_crop, jpeg_bytes)
+            _upload_future = _pool.submit(_upload_gcs, jpeg_bytes)
+            gemini_query = _describe_future.result()
+            gcs_url = _upload_future.result()
     _t_describe_upload = time.monotonic() - _t_describe_upload_start
 
     effective_query = gemini_query or query

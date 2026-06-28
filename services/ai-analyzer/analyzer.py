@@ -567,7 +567,10 @@ def classify_exception(exc: Exception) -> tuple[int, str]:
     return 500, "INTERNAL_ERROR"
 
 
-# ── Single-crop identification (tap-to-identify, no Gemini) ──────────────────
+# ── Single-crop identification (tap-to-identify, no Gemini *detection*) ──────
+# Gemini is still used here — but only to describe the crop (color, material,
+# brand, style) so Google Lens gets a richer query. What's skipped vs /analyze
+# is the full-image bounding-box detection pass.
 
 def _perceptual_cache_key(img_bytes: bytes, country: str) -> str:
     """Average hash of an 8×8 grayscale thumbnail — identical for the same object

@@ -26,8 +26,10 @@ class TapIdentifyUseCase {
     String?                    country,
     Map<String, dynamic>?      mlkitContext,
   }) async {
-    // Use /identify (not /analyze) — skips Gemini re-detection on the
-    // already-cropped image, sending it directly to GCS → Google Lens.
+    // Use /identify (not /analyze) — skips Gemini bounding-box detection since
+    // ML Kit already localized the object. /identify still calls Gemini once to
+    // describe the crop (for a better Lens query), but skips the full-image
+    // detection pass, making it faster than the full /analyze pipeline.
     final analyzeResponse = await _analyzer.identifyCrop(AnalyzeRequest(
       imageData:     encodeImageToBase64(croppedBytes),
       imageMimeType: 'image/png',

@@ -27,6 +27,7 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
   final _detector = MlKitDetectorService();
   List<DetectedObject> _liveObjects = [];
   bool _processing = false;
+  bool _identifying = false;
   bool _initialized = false;
   String? _error;
   CameraDescription? _wideDescription;
@@ -210,7 +211,8 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
 
   Future<void> _freezeAndIdentify({DetectedObject? tappedObject}) async {
     final cam = _cam;
-    if (cam == null || !cam.value.isInitialized) return;
+    if (cam == null || !cam.value.isInitialized || _identifying) return;
+    _identifying = true;
 
     try {
       await cam.stopImageStream();
@@ -273,6 +275,7 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
         ref.read(pipelineProvider.notifier).analyzeLoaded(mlkitContext: mlkitContext);
       }
     } catch (e) {
+      _identifying = false;
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Capture failed: $e')),

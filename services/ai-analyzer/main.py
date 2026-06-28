@@ -241,11 +241,11 @@ async def analyze(request: AnalyzeRequest) -> JSONResponse:
         ctx = request.mlkit_context
         logger.info(
             "MLKIT | route=%s trigger=%s confidence=%.2f objects=%d labels=%s",
-            ctx.get("route", "?"),
-            ctx.get("trigger", "?"),
-            ctx.get("on_device_confidence") or 0.0,
-            ctx.get("detected_objects_count", 0),
-            [l.get("text") for l in ctx.get("detected_labels", [])],
+            ctx.route,
+            ctx.trigger,
+            ctx.on_device_confidence or 0.0,
+            ctx.detected_objects_count or 0,
+            [l.text for l in ctx.detected_labels],
         )
 
     logger.info(
@@ -330,11 +330,11 @@ async def analyze_stream(request: AnalyzeRequest) -> StreamingResponse:
         ctx = request.mlkit_context
         logger.info(
             "MLKIT | route=%s trigger=%s confidence=%.2f objects=%d labels=%s",
-            ctx.get("route", "?"),
-            ctx.get("trigger", "?"),
-            ctx.get("on_device_confidence") or 0.0,
-            ctx.get("detected_objects_count", 0),
-            [l.get("text") for l in ctx.get("detected_labels", [])],
+            ctx.route,
+            ctx.trigger,
+            ctx.on_device_confidence or 0.0,
+            ctx.detected_objects_count or 0,
+            [l.text for l in ctx.detected_labels],
         )
 
     logger.info(
@@ -394,9 +394,10 @@ async def analyze_stream(request: AnalyzeRequest) -> StreamingResponse:
     tags=["Analysis"],
     summary="Identify a cropped product image",
     description=(
-        "Skips Gemini detection — sends the cropped image directly to Google Lens via GCS "
-        "and returns matched products. Designed for the mobile tap-to-identify flow where "
-        "the user has already selected a specific product region.\n\n"
+        "Skips Gemini bounding-box detection — the crop is already selected by ML Kit on-device. "
+        "Still calls Gemini once to produce a rich text description (color, material, brand, style) "
+        "that improves Google Lens recall, then uploads to GCS and runs Lens. "
+        "Faster than /analyze because there is one Gemini call instead of N (one per detected object).\n\n"
         "Requires `image_data` (base64). `image_url` is not supported."
     ),
     responses={
@@ -421,11 +422,11 @@ async def identify(request: AnalyzeRequest) -> JSONResponse:
         ctx = request.mlkit_context
         logger.info(
             "MLKIT | route=%s trigger=%s confidence=%.2f objects=%d labels=%s",
-            ctx.get("route", "?"),
-            ctx.get("trigger", "?"),
-            ctx.get("on_device_confidence") or 0.0,
-            ctx.get("detected_objects_count", 0),
-            [l.get("text") for l in ctx.get("detected_labels", [])],
+            ctx.route,
+            ctx.trigger,
+            ctx.on_device_confidence or 0.0,
+            ctx.detected_objects_count or 0,
+            [l.text for l in ctx.detected_labels],
         )
 
     logger.info(

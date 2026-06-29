@@ -65,7 +65,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     // Re-read the freshest profile rather than reusing the stale snapshot —
     // a finalized voice session may have already merged new preferences into
     // Firestore server-side while the overlay was open.
-    final latest = ref.read(profileProvider).value ?? resolvedProfile;
+    final latest = ref.read(profileProvider).valueOrNull ?? resolvedProfile;
     if (latest.voiceOnboardingSeen) return;
     await ref.read(profileRepositoryProvider).save(
           user.uid,
@@ -95,9 +95,9 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     final pipeline           = ref.watch(pipelineProvider);
     final video              = ref.watch(videoProvider);
     final shoppingList       = ref.watch(shoppingListProvider);
-    final profile            = ref.watch(profileProvider).value;
+    final profile            = ref.watch(profileProvider).valueOrNull;
     final shoppingCategories = profile?.shoppingCategories ?? const [];
-    final isAdmin            = ref.watch(isAdminProvider).value ?? false;
+    final isAdmin            = ref.watch(isAdminProvider).valueOrNull ?? false;
     final hasSelection       = _tapKey.currentState?.hasSelection ?? false;
 
     if (profile != null) {
@@ -579,7 +579,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
 
   Future<String?> _onTapIdentify(Uint8List croppedBytes) async {
     final user    = ref.read(authStateProvider).value;
-    final profile = ref.read(profileProvider).value ?? const UserProfile();
+    final profile = ref.read(profileProvider).valueOrNull ?? const UserProfile();
     if (user == null) return null;
 
     return ref.read(tapIdentifyUseCaseProvider).identify(

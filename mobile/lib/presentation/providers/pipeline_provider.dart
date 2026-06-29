@@ -61,7 +61,7 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
 
   Future<void> analyzeImage(Uint8List bytes, String mimeType, {Map<String, dynamic>? mlkitContext}) async {
     final user    = ref.read(authStateProvider).value;
-    final profile = ref.read(profileProvider).value ?? const UserProfile();
+    final profile = ref.read(profileProvider).valueOrNull ?? const UserProfile();
     if (user == null) return;
 
     final sessionId = getSessionId(user.uid);
@@ -111,7 +111,7 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
   /// entirely since ML Kit already localized and classified the object.
   Future<void> identifyTappedObject(Uint8List bytes, {Map<String, dynamic>? mlkitContext}) async {
     final user    = ref.read(authStateProvider).value;
-    final profile = ref.read(profileProvider).value ?? const UserProfile();
+    final profile = ref.read(profileProvider).valueOrNull ?? const UserProfile();
     if (user == null) return;
 
     final sessionId = getSessionId(user.uid);

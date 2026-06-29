@@ -64,7 +64,7 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> w
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _language = ref.read(profileProvider).value?.voiceLanguage ?? 'English';
+    _language = ref.read(profileProvider).valueOrNull?.voiceLanguage ?? 'English';
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding, language: _language);
     });
@@ -116,7 +116,7 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> w
     if (lang == _language) return;
     setState(() => _language = lang);
     final user = ref.read(authStateProvider).value;
-    final profile = ref.read(profileProvider).value;
+    final profile = ref.read(profileProvider).valueOrNull;
     if (user != null && profile != null) {
       unawaited(ref.read(profileRepositoryProvider).save(user.uid, profile.copyWith(voiceLanguage: lang)));
     }

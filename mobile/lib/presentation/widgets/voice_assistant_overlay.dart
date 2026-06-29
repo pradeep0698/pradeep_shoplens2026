@@ -322,7 +322,7 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> w
             if (state.status == VoiceStatus.error) ...[
               _ErrorBanner(
                 message: state.errorMessage ?? 'Connection lost.',
-                onReconnect: () => ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding),
+                onReconnect: () => ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding, language: _language),
               ),
               const SizedBox(height: 16),
             ],

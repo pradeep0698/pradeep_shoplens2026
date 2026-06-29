@@ -44,6 +44,10 @@ void _installDiagnosticErrorWidget() {
 
 void main() {
   _installDiagnosticErrorWidget();
+  // Only a startup failure (before runApp below) should take over the whole
+  // screen — any later uncaught async error (e.g. a fire-and-forget call
+  // elsewhere in the app) must not blank out an already-running app.
+  var started = false;
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
     await dotenv.load(fileName: '.env');
@@ -68,7 +72,12 @@ void main() {
     }
 
     runApp(const ProviderScope(child: ShopLensApp()));
+    started = true;
   }, (error, stack) {
+    if (started) {
+      debugPrint('Uncaught async error after startup: $error\n$stack');
+      return;
+    }
     runApp(MaterialApp(
       home: Scaffold(
         backgroundColor: Colors.black,

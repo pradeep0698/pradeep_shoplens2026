@@ -16,7 +16,7 @@
 | 1 — Auth | Authenticated as `suryarao.r@gmail.com`, project set |
 | 2 — APIs | All required APIs enabled |
 | 3 — Firebase | Firestore DB created, security rules deployed, Hosting deployed → `https://project-b1a5dd5a-69e6-4db3-9d7.web.app`. Auth Email/Password already enabled. Web app created via `firebase apps:create WEB`. Android app recreated with the correct package name (see Known Issues below). iOS app confirmed correct (`com.shoplens.app`). |
-| 4 — Storage | `gs://shoplens2026-dev-hls-segments` and `gs://shoplens2026-dev-lens-tmp` created. **Firebase Storage default bucket is still NOT provisioned** — see Pending Manual Steps. |
+| 4 — Storage | `gs://shoplens2026-dev-hls-segments` and `gs://shoplens2026-dev-lens-tmp` created. Firebase Storage default bucket (`project-b1a5dd5a-69e6-4db3-9d7.firebasestorage.app`, us-central1) provisioned via console 2026-07-01. |
 | 5 — Artifact Registry | `shoplens` Docker repo created |
 | 6 — IAM | `shoplens-runner` SA created with all roles + Cloud Build SA permissions. Additionally granted `roles/storage.objectViewer`, `roles/artifactregistry.writer`, `roles/logging.logWriter` to the **Compute Engine default SA** (`115535290381-compute@developer.gserviceaccount.com`) — required for `gcloud run deploy --source` builds; not documented in the original setup guide. |
 | 7 — WIF | `github-pool` + `github-provider` created and repointed to `suryaraor/shoplens2026` |
@@ -43,14 +43,7 @@ New Android App ID: `1:115535290381:android:a69e0d2e5c92081298b544`
 
 ## Pending Manual Steps
 
-- [ ] **Firebase Console → Storage → Get started → choose us-central1.** This is the one remaining step that genuinely can't be done via CLI/API — the `.firebasestorage.app` domain is Firebase-managed; both `gcloud storage buckets create` and a direct Firebase Storage REST call were rejected. The frontend (`frontend/src/lib/storage.ts`) actively uses `getStorage()`, so this blocks any upload-to-Firebase-Storage feature until done.
-- [ ] **Push the 4 GitHub Actions secrets** to `suryaraor/shoplens2026` (Settings → Secrets and variables → Actions), each set to the full contents of the matching file:
-  - `SHOPLENS2026DEV_AI_ANALYZER_ENV` ← `services/ai-analyzer/.env.shoplens2026-dev`
-  - `SHOPLENS2026DEV_PRODUCT_MATCHER_ENV` ← `services/product-matcher/.env.shoplens2026-dev`
-  - `SHOPLENS2026DEV_STATE_MANAGER_ENV` ← `services/state-manager/.env.shoplens2026-dev`
-  - `SHOPLENS2026DEV_VOICE_ASSISTANT_ENV` ← `services/voice-assistant/.env.shoplens2026-dev`
-
-  (Could not be pushed via `gh secret set` in-session — the auto-mode classifier hard-blocks pushing these values to the external repo even with explicit user consent.)
+None remaining. Firebase Storage was provisioned via console on 2026-07-01, and all 4 GitHub Actions secrets were pushed to `suryaraor/shoplens2026` by the user (blocked from in-session automation by the auto-mode classifier's exfiltration guard, since it treats any write to that external repo as high-risk regardless of consent).
 
 ---
 

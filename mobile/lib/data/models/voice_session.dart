@@ -108,7 +108,12 @@ class VoiceSearchResult {
   factory VoiceSearchResult.fromJson(Map<String, dynamic> json, {required int seq}) => VoiceSearchResult(
         query: json['query'] as String? ?? '',
         products: ((json['products'] as List?) ?? const [])
-            .map((p) => Product.fromJson(p as Map<String, dynamic>))
+            .map((p) {
+              final map = Map<String, dynamic>.from(p as Map<String, dynamic>);
+              map['price'] = (map['price'] as num?)?.toDouble() ?? 0.0;
+              map['image_url'] = (map['image_url'] as String?) ?? '';
+              return Product.fromJson(map);
+            })
             .toList(),
         seq: seq,
       );

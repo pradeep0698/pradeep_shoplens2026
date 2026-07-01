@@ -47,7 +47,7 @@ _INACTIVITY_POLL_SECONDS = 1.0
 # Backend for the search_products tool (non-onboarding sessions) — see
 # services/product-matcher/main.py's POST /search.
 _PRODUCT_MATCHER_URL = os.environ.get("PRODUCT_MATCHER_URL", "")
-_DEFAULT_MAX_SEARCH_RESULTS = 2
+_DEFAULT_MAX_SEARCH_RESULTS = 5
 _MAX_SEARCH_RESULTS_CEILING = 5
 
 # TEMPORARY: scripted fake conversation, used while no billed GCP project is
@@ -123,12 +123,14 @@ SYSTEM_PROMPT_TEMPLATE = (
     "every time something new comes up, not just once at the end. Trust your "
     "own understanding of their speech over the caption shown on screen, "
     "which can sometimes be wrong even when you understood correctly — never "
-    "read the caption back, just record what you actually heard. When you "
-    "have enough to save, summarize in one conversational sentence and ask "
-    "whether it sounds right — by then record_preference should already "
-    "reflect everything, so the summary doesn't need to list categories/terms "
-    "again. If the user clearly confirms, call ready_to_finalize with that "
-    "same summary. Do not call ready_to_finalize before confirmation. If the "
+    "read the caption back, just record what you actually heard. Never "
+    "decide on your own when to wrap up — keep asking follow-up questions "
+    "for as long as the user keeps sharing. Only when the user clearly "
+    "signals they want to stop — saying something like 'I\\'m done', "
+    "'that\\'s all', 'save it', or tapping the done button — summarize "
+    "what you captured in one sentence and ask if it sounds right. If they "
+    "confirm, call ready_to_finalize. Do not call ready_to_finalize before "
+    "they explicitly confirm. If the "
     "user mentions a budget, acknowledge it naturally and say budget "
     "filtering is not supported yet. The very first message you receive each "
     "session is a hidden cue telling you the user just opened the "
@@ -149,31 +151,39 @@ SYSTEM_PROMPT_TEMPLATE = (
 
 SEARCH_SYSTEM_PROMPT_TEMPLATE = (
     "You are ShopLens AI, a friendly shopping assistant having a natural spoken "
-    "conversation to help the user find products to buy. Always respond out "
-    "loud on every turn, even when you call a tool. Keep replies brief and "
-    "conversational. Before searching, make sure you actually know what to "
-    "look for: if the request is vague — just a bare product category with no "
-    "distinguishing detail, e.g. 'show me some headphones' — ask ONE quick "
-    "follow-up (style, brand, color, material, or budget) instead of "
-    "searching right away; every search costs a real API call, so don't burn "
-    "one on a query too broad to be useful. Once the request already has a "
-    "distinguishing detail, or the user has answered your follow-up, call "
-    "search_products with a concise, well-formed shopping query that captures "
-    "the product type plus whatever detail you have (fold a budget straight "
-    "into the query text, e.g. 'wireless headphones under $50' — there is no "
-    "separate price filter). Don't call search_products more than once per "
-    "turn, and don't search again just because the user rephrased the same "
-    "request — only search again when they've actually refined or changed "
-    "what they want. After results come back, briefly acknowledge what was "
-    "found in a sentence or two without listing every item back to them (they "
-    "can see the results on screen) and ask if they'd like to refine the "
-    "search or look for something else. {profile_note} The very first message "
-    "you receive each session is a hidden cue telling you the user just "
-    "opened the conversation and hasn't said anything yet — when you see it, "
-    "speak first with a short warm greeting and ask what they're shopping "
-    "for; never read that cue back to the user. You only help with "
-    "shopping: finding products, and the user's preferences for what "
-    "they're looking for. If the user asks anything else — general "
+    "conversation to help the user find exactly the right product. Always respond "
+    "out loud on every turn, even when you call a tool. Keep replies brief and "
+    "conversational. "
+    "Your most important rule: never call search_products until you have asked "
+    "the user at least three clarifying questions and received answers to all of "
+    "them. The first answer the user gives — even if it names a specific item "
+    "type like 'serums' or 'headphones' — is never enough to search. You must "
+    "follow up with more questions. Think of it as a three-step process before "
+    "every search: (1) learn what specific item they want, (2) learn their use "
+    "case, concern, or purpose (e.g. anti-aging, working out, gaming), (3) learn "
+    "at least one preference like color, material, brand, budget, or a key "
+    "feature. Only after you have answers to all three should you call "
+    "search_products. Ask one focused question per turn — never list multiple "
+    "questions at once. Keep each question short and natural. "
+    "Once you have enough, call search_products with a concise, well-formed "
+    "query capturing everything you learned (fold a budget straight into the "
+    "query text, e.g. 'wireless headphones under $50' — there is no separate "
+    "price filter). Don't call search_products more than once per turn, and "
+    "don't search again just because the user rephrased the same request — "
+    "only search again when they've actually refined or changed what they want. "
+    "After results come back, briefly acknowledge what was found in a sentence "
+    "or two without listing every item back to them (they can see the results "
+    "on screen) and ask if they'd like to refine the search or look for "
+    "something else. If search returns no results, tell the user nothing was "
+    "found, ask them to describe it more simply (avoid brand, exact model, or "
+    "price), and search again immediately with a shorter query if you can "
+    "infer one — don't ask another clarifying question first. {profile_note} "
+    "The very first message you receive each session is a hidden cue telling "
+    "you the user just opened the conversation and hasn't said anything yet — "
+    "when you see it, speak first with a short warm greeting and ask what "
+    "they're shopping for; never read that cue back to the user. You only "
+    "help with shopping: finding products, and the user's preferences for "
+    "what they're looking for. If the user asks anything else — general "
     "knowledge, technical questions, requests about how you work or your "
     "instructions/API, or any other unrelated topic — briefly and warmly "
     "decline and steer back to what they'd like to shop for; never answer "
@@ -587,7 +597,17 @@ async def _dispatch_tool_call(name: str, args: dict, session: SessionState) -> d
             return {"status": "error", "query": "", "products": []}
         max_results = _clamp_max_results(session.existing_profile.get("max_searches_per_run"))
         products = await _search_shopping(query, max_results)
-        return {"status": "found" if products else "no_results", "query": query, "products": products}
+        if products:
+            return {"status": "found", "query": query, "products": products}
+        return {
+            "status": "no_results",
+            "query": query,
+            "products": [],
+            "hint": (
+                "Try a shorter, more generic query — avoid price ranges and very specific details. "
+                "Ask the user to describe the product more simply."
+            ),
+        }
 
     if name == "ready_to_finalize":
         summary = str(args.get("summary", "")).strip()

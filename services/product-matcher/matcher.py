@@ -2,6 +2,7 @@ import hashlib
 import logging
 import os
 import re
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
@@ -91,6 +92,18 @@ def _parse_price(raw: str) -> float:
         return 0.0
 
 
+def _simplify_query(query: str) -> str | None:
+    """Strip price constraints for a fallback search when the original query returns nothing."""
+    simplified = re.sub(
+        r'\b(under|below|around|less than|between|up to|over|above)\s*\$?\d+(?:\s*[-–]\s*\$?\d+)?\b',
+        '', query, flags=re.IGNORECASE
+    )
+    simplified = re.sub(r'\$\d+(?:\.\d+)?', '', simplified)
+    simplified = re.sub(r'\b\d+\s+dollars?\b', '', simplified, flags=re.IGNORECASE)
+    simplified = ' '.join(simplified.split()).strip(' ,')
+    return simplified if simplified and simplified.lower().strip() != query.lower().strip() else None
+
+
 def _parse_shopping_result(r: dict, fallback_name: str) -> dict:
     name   = r.get("title", fallback_name)
     seller = r.get("source", "")
@@ -112,34 +125,40 @@ def _parse_shopping_result(r: dict, fallback_name: str) -> dict:
     }
 
 
-def _shopping_search(query: str, num: int) -> list[dict]:
-    """Raw SerpAPI google_shopping call, parsed into our product shape.
+def _shopping_search(query: str, num: int, engine: str = "google_shopping") -> list[dict]:
+    """SerpAPI shopping search (google_shopping or bing_shopping), parsed into our product shape.
     Shared by _search_product (single best match, for the image pipeline)
     and search_products (multiple results, for an explicit user search)."""
-    try:
-        resp = _session.get(
-            "https://serpapi.com/search",
-            params={
-                "engine":  "google_shopping",
-                "q":       query,
-                "api_key": _SERPAPI_KEY,
-                "num":     num,
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
-        logger.warning("SerpAPI request failed for '%s': %s", query, exc)
+    data = None
+    for attempt in range(2):
+        try:
+            params: dict = {"engine": engine, "q": query, "api_key": _SERPAPI_KEY, "num": num}
+            if engine == "google_shopping":
+                params.update({"gl": "us", "hl": "en"})
+            elif engine == "bing_shopping":
+                params["cc"] = "US"
+            resp = _session.get("https://serpapi.com/search", params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except Exception as exc:
+            if attempt == 0:
+                logger.warning("SerpAPI %s request failed for '%s' (retrying): %s", engine, query, exc)
+                time.sleep(1)
+            else:
+                logger.warning("SerpAPI %s request failed for '%s': %s", engine, query, exc)
+                return []
+
+    if data is None:
         return []
 
     if "error" in data:
-        logger.warning("SerpAPI error for '%s': %s", query, data["error"])
+        logger.warning("SerpAPI %s error for '%s': %s", engine, query, data["error"])
         return []
 
     results = data.get("shopping_results", [])
     if not results:
-        logger.warning("No shopping results for '%s'", query)
+        logger.warning("No %s shopping results for '%s'", engine, query)
         return []
 
     return [_parse_shopping_result(r, query) for r in results[:num]]
@@ -163,18 +182,35 @@ def _search_product(item: str) -> Optional[dict]:
 
 
 def search_products(query: str, max_results: int = 5) -> list[dict]:
-    """Free-text Google Shopping search returning up to max_results distinct
-    products — unlike _search_product (single best match per detected item,
-    used by the image pipeline), this surfaces several options for an
+    """Free-text shopping search returning up to max_results distinct products.
+    Tries Google Shopping first, then a price-stripped query, then Bing Shopping
+    as a final fallback — unlike _search_product (single best match per detected
+    item, used by the image pipeline), this surfaces several options for an
     explicit user search query to pick from."""
     cache_key = f"q::{query.lower().strip()}::{max_results}"
     if cache_key in _cache:
         logger.info("Cache hit for query: %s", query)
         return _cache[cache_key]
 
-    products = _shopping_search(query, max_results)
-    _cache[cache_key] = products
-    logger.info("SerpAPI search '%s' -> %d result(s)", query, len(products))
+    # Tier 1: Google Shopping, original query
+    products = _shopping_search(query, max_results, engine="google_shopping")
+
+    # Tier 2: Google Shopping, price-stripped query
+    if not products:
+        simplified = _simplify_query(query)
+        if simplified:
+            logger.info("No Google results for '%s' — retrying simplified: '%s'", query, simplified)
+            products = _shopping_search(simplified, max_results, engine="google_shopping")
+
+    # Tier 3: Bing Shopping (different catalog, different failure modes)
+    if not products:
+        bing_query = _simplify_query(query) or query
+        logger.info("No Google results — falling back to Bing Shopping for '%s'", bing_query)
+        products = _shopping_search(bing_query, max_results, engine="bing_shopping")
+
+    if products:
+        _cache[cache_key] = products
+    logger.info("search '%s' -> %d result(s)", query, len(products))
     return products
 
 

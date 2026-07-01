@@ -69,6 +69,7 @@ def test_search_products_caches_by_query_and_max_results(monkeypatch):
 def test_search_products_returns_empty_list_on_serpapi_error(monkeypatch):
     matcher._cache.clear()
     monkeypatch.setattr(matcher._session, "get", lambda *a, **k: _FakeResponse({"error": "rate limited"}))
+    monkeypatch.setattr(matcher.time, "sleep", lambda s: None)
 
     assert matcher.search_products("anything") == []
 
@@ -145,6 +146,33 @@ def test_thumbnail_endpoint_returns_502_when_fetch_fails(monkeypatch):
     response = client.get("/thumbnail", params={"url": "https://evil.example.com/steal"})
 
     assert response.status_code == 502
+
+
+def test_simplify_query_strips_price_constraints():
+    assert matcher._simplify_query("headphones under $200") == "headphones"
+    assert matcher._simplify_query("desk lamp less than $50") == "desk lamp"
+    assert matcher._simplify_query("sofa between $300 and $600") == "sofa"
+    assert matcher._simplify_query("jacket $80") == "jacket"
+    assert matcher._simplify_query("wireless mouse") is None  # no price to strip
+
+
+def test_search_products_does_not_cache_empty_results(monkeypatch):
+    matcher._cache.clear()
+    calls = []
+
+    def fake_get(*args, **kwargs):
+        calls.append(1)
+        return _FakeResponse({"shopping_results": []})
+
+    monkeypatch.setattr(matcher._session, "get", fake_get)
+    monkeypatch.setattr(matcher.time, "sleep", lambda s: None)
+
+    matcher.search_products("completely unmatchable product xyz123")
+    matcher.search_products("completely unmatchable product xyz123")
+
+    # Both calls should hit the API — empty results must not be cached.
+    # Each call tries google_shopping twice (retry) + bing_shopping twice (retry) = 4 SerpAPI calls per search_products call.
+    assert len(calls) >= 4
 
 
 def test_search_endpoint_returns_products_and_clamps_max_results(monkeypatch):

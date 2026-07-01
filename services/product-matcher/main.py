@@ -3,7 +3,7 @@ import logging
 import os
 from typing import List
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -140,7 +140,7 @@ async def search(request: SearchRequest) -> JSONResponse:
         502: {"description": "Failed to fetch from upstream CDN"},
     },
 )
-async def thumbnail(url: str = Field(..., description="Fully-qualified Google CDN image URL")) -> Response:
+async def thumbnail(url: str = Query(..., description="Fully-qualified Google CDN image URL")) -> Response:
     result = await asyncio.to_thread(fetch_thumbnail, url)
     if result is None:
         return Response(status_code=502)

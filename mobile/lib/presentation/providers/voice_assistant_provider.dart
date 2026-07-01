@@ -339,9 +339,18 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           patch: VoiceProfilePatch.fromJson(json['patch'] as Map<String, dynamic>? ?? const {}),
         );
       case 'product_results':
-        state = state.copyWith(
-          searchResults: [...state.searchResults, VoiceSearchResult.fromJson(json, seq: _nextSeq())],
-        );
+        try {
+          state = state.copyWith(
+            searchResults: [...state.searchResults, VoiceSearchResult.fromJson(json, seq: _nextSeq())],
+          );
+        } catch (_) {
+          state = state.copyWith(
+            searchResults: [
+              ...state.searchResults,
+              VoiceSearchResult(query: json['query'] as String? ?? '', products: const [], seq: _nextSeq()),
+            ],
+          );
+        }
       case 'finalize_proposal':
         _speakingDebounce?.cancel();
         unawaited(_stopLiveAudio());

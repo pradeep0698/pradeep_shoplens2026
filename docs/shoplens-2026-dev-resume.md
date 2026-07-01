@@ -18,7 +18,7 @@
 | 4 — Storage | `gs://shoplens2026-dev-hls-segments` (public read, uniform access) and `gs://shoplens2026-dev-lens-tmp` (public read, 1-day lifecycle) created |
 | 5 — Artifact Registry | `shoplens` Docker repo created at `us-central1-docker.pkg.dev/project-b1a5dd5a-69e6-4db3-9d7/shoplens` |
 | 6 — IAM | `shoplens-runner` SA created with all 11 roles + Cloud Build SA permissions |
-| 7 — WIF | `github-pool` + `github-provider` created, SA bound to `shoplensai-coder/shoplens` |
+| 7 — WIF | `github-pool` + `github-provider` created, SA bound to `suryaraor/shoplens2026` (repointed 2026-06-30 after moving CI target repo) |
 
 ---
 

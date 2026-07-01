@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MOBILE_DIR="$(dirname "$SCRIPT_DIR")"
 GOOGLE_SERVICES="$MOBILE_DIR/android/app/google-services.json"
 COOKSHOP_GOOGLE_SERVICES="$MOBILE_DIR/android/app/google-services.cookshop-dev.json"
+BUILD_GRADLE="$MOBILE_DIR/android/app/build.gradle"
 
 if [ ! -f "$COOKSHOP_GOOGLE_SERVICES" ]; then
   echo "ERROR: $COOKSHOP_GOOGLE_SERVICES not found."
@@ -26,10 +27,16 @@ fi
 cp "$GOOGLE_SERVICES" "$GOOGLE_SERVICES.bak"
 cp "$COOKSHOP_GOOGLE_SERVICES" "$GOOGLE_SERVICES"
 
+# Patch applicationId to com.cookshop.mvp (Firebase project registers this package name)
+cp "$BUILD_GRADLE" "$BUILD_GRADLE.bak"
+sed -i 's/applicationId "com\.shoplens\.app"/applicationId "com.cookshop.mvp"/' "$BUILD_GRADLE"
+
 cleanup() {
-  echo "Restoring original google-services.json..."
+  echo "Restoring original google-services.json and build.gradle..."
   cp "$GOOGLE_SERVICES.bak" "$GOOGLE_SERVICES"
   rm "$GOOGLE_SERVICES.bak"
+  cp "$BUILD_GRADLE.bak" "$BUILD_GRADLE"
+  rm "$BUILD_GRADLE.bak"
 }
 trap cleanup EXIT
 

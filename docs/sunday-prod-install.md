@@ -58,43 +58,41 @@ Deploy only the services whose code changed since the last prod release. Check w
 git log --oneline <last-prod-sha>..main -- services/
 ```
 
+The `.env.cookshop-dev` files are `KEY=VALUE` format — convert them inline when deploying.
+`PORT` is reserved by Cloud Run and must be excluded. Use this pattern for each service:
+
+```bash
+VARS=$(grep -v '^#' services/<svc>/.env.cookshop-dev | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//') && \
+gcloud run deploy <svc> \
+  --project cookshop-dev-prj \
+  --region us-central1 \
+  --source services/<svc> \
+  --set-env-vars "$VARS" \
+  --quiet
+```
+
+Active services for cookshop-dev (deploy when their code changes):
+
 ```bash
 # ai-analyzer
-gcloud run deploy ai-analyzer \
-  --project cookshop-dev-prj \
-  --region us-central1 \
-  --set-env-vars-file services/ai-analyzer/.env.cookshop-dev
+VARS=$(grep -v '^#' services/ai-analyzer/.env.cookshop-dev | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//') && \
+gcloud run deploy ai-analyzer --project cookshop-dev-prj --region us-central1 --source services/ai-analyzer --set-env-vars "$VARS" --quiet
 
 # product-matcher
-gcloud run deploy product-matcher \
-  --project cookshop-dev-prj \
-  --region us-central1 \
-  --set-env-vars-file services/product-matcher/.env.cookshop-dev
+VARS=$(grep -v '^#' services/product-matcher/.env.cookshop-dev | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//') && \
+gcloud run deploy product-matcher --project cookshop-dev-prj --region us-central1 --source services/product-matcher --set-env-vars "$VARS" --quiet
 
 # state-manager
-gcloud run deploy state-manager \
-  --project cookshop-dev-prj \
-  --region us-central1 \
-  --set-env-vars-file services/state-manager/.env.cookshop-dev
+VARS=$(grep -v '^#' services/state-manager/.env.cookshop-dev | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//') && \
+gcloud run deploy state-manager --project cookshop-dev-prj --region us-central1 --source services/state-manager --set-env-vars "$VARS" --quiet
 
 # voice-assistant
-gcloud run deploy voice-assistant \
-  --project cookshop-dev-prj \
-  --region us-central1 \
-  --set-env-vars-file services/voice-assistant/.env.cookshop-dev
+VARS=$(grep -v '^#' services/voice-assistant/.env.cookshop-dev | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//') && \
+gcloud run deploy voice-assistant --project cookshop-dev-prj --region us-central1 --source services/voice-assistant --set-env-vars "$VARS" --quiet
 
-# pubsub-worker
-gcloud run deploy pubsub-worker \
-  --project cookshop-dev-prj \
-  --region us-central1 \
-  --set-env-vars-file services/pubsub-worker/.env.cookshop-dev
-
-# live-ingest (rarely changes)
-gcloud run deploy live-ingest \
-  --project cookshop-dev-prj \
-  --region us-central1 \
-  --set-env-vars-file services/live-ingest/.env.cookshop-dev
 ```
+
+> **live-ingest and pubsub-worker are NOT deployed to cookshop-dev** — the live video pipeline is not used in the Rajan prod environment. Skip both.
 
 ---
 

@@ -10,7 +10,7 @@
 #
 # ── GCP auth — Workload Identity Federation (no long-lived keys) ─────────────
 #   Pool:     github-pool  (projects/115535290381/locations/global/workloadIdentityPools/github-pool)
-#   Provider: github-provider  (locked to repo suryaraor/shoplens2026)
+#   Provider: github-provider  (locked to repo shoplens2026ai/shoplens2026)
 #   SA:       shoplens-runner@project-b1a5dd5a-69e6-4db3-9d7.iam.gserviceaccount.com
 # ─────────────────────────────────────────────────────────────────────────────
 

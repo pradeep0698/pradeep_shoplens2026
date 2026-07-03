@@ -1,0 +1,668 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Product Matcher",
+    "description": "SerpAPI-powered Google Shopping search and product matching service.\n\nTakes a list of detected item names and returns the best matching purchasable products. Also exposes a thumbnail proxy endpoint that adds CORS headers to Google's CDN images so the Flutter web client can render them.\n\n**Auth:** none required \u2014 CORS is open (`*`).",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/match": {
+      "post": {
+        "tags": [
+          "Matching"
+        ],
+        "summary": "Match items to products",
+        "description": "For each item name in `items`, runs a Google Shopping search via SerpAPI and returns the best matching product. Items with no results appear in `unmatched`.\n\nThis is the primary endpoint called by the AI Analyzer and Pub/Sub Worker.",
+        "operationId": "match_match_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Matching complete \u2014 check `unmatched` for items with no results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchResponse"
+                },
+                "example": {
+                  "matched_products": [
+                    {
+                      "product_id": "walmart-beautiful-3-5-qt-ecca45",
+                      "name": "Beautiful 3.5 Qt Stand Mixer",
+                      "price": 64.96,
+                      "image_url": "https://encrypted-tbn1.gstatic.com/shopping?q=tbn:ANd9GcSqMqBie2aAONKedRN2VEXA1q2-",
+                      "purchase_url": "https://www.walmart.com/ip/Beautiful-3-5-Qt-Stand-Mixer/expr123",
+                      "seller": "Walmart",
+                      "category": "Kitchen & Cookware"
+                    }
+                  ],
+                  "unmatched": []
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "SerpAPI error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                },
+                "example": {
+                  "detail": "Internal server error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request body failed Pydantic validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search": {
+      "post": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Search for products by query",
+        "description": "Direct Google Shopping search for a freetext query. Returns up to `max_results` products.",
+        "operationId": "search_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Up to max_results products for the query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                },
+                "example": {
+                  "products": [
+                    {
+                      "product_id": "walmart-beautiful-3-5-qt-ecca45",
+                      "name": "Beautiful 3.5 Qt Stand Mixer",
+                      "price": 64.96,
+                      "image_url": "https://encrypted-tbn1.gstatic.com/shopping?q=tbn:ANd9GcSqMqBie2aAONKedRN2VEXA1q2-",
+                      "purchase_url": "https://www.walmart.com/ip/Beautiful-3-5-Qt-Stand-Mixer/expr123",
+                      "seller": "Walmart",
+                      "category": "Kitchen & Cookware"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request body failed Pydantic validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/thumbnail": {
+      "get": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Proxy a product thumbnail image",
+        "description": "Fetches a product thumbnail from Google's image CDN and re-serves it with `Access-Control-Allow-Origin: *`. Required because Google's CDN omits CORS headers, which blocks Flutter web from fetching thumbnails directly.",
+        "operationId": "thumbnail_thumbnail_get",
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Fully-qualified Google CDN image URL",
+              "title": "Url"
+            },
+            "description": "Fully-qualified Google CDN image URL"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Image bytes with CORS header \u2014 Content-Type mirrors the upstream CDN response (e.g. image/jpeg)"
+          },
+          "502": {
+            "description": "Failed to fetch from upstream CDN, or the URL's host isn't on the allowed thumbnail-CDN list \u2014 empty body"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/debug/{item}": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Debug \u2014 match single item",
+        "description": "Runs `_search_product` for a single item and returns the raw internal result. For development only.",
+        "operationId": "debug_debug__item__get",
+        "parameters": [
+          {
+            "name": "item",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Item"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Single-item debug lookup",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebugResponse"
+                },
+                "example": {
+                  "item": "stand mixer",
+                  "result": {
+                    "product_id": "walmart-beautiful-3-5-qt-ecca45",
+                    "name": "Beautiful 3.5 Qt Stand Mixer",
+                    "price": 64.96,
+                    "image_url": "https://encrypted-tbn1.gstatic.com/shopping?q=tbn:ANd9GcSqMqBie2aAONKedRN2VEXA1q2-",
+                    "purchase_url": "https://www.walmart.com/ip/Beautiful-3-5-Qt-Stand-Mixer/expr123",
+                    "seller": "Walmart",
+                    "category": "Kitchen & Cookware"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/debug-raw/{item}": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Debug \u2014 raw SerpAPI response",
+        "description": "Calls SerpAPI directly for the given item and returns the first `shopping_results` entry with all keys. Useful for inspecting what SerpAPI returns before our parsing logic runs.",
+        "operationId": "debug_raw_debug_raw__item__get",
+        "parameters": [
+          {
+            "name": "item",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Item"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw SerpAPI shopping_results[0], unmodified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DebugRawResponse"
+                },
+                "example": {
+                  "keys": [
+                    "position",
+                    "title",
+                    "product_link",
+                    "product_id",
+                    "source",
+                    "price",
+                    "extracted_price",
+                    "thumbnail",
+                    "rating",
+                    "reviews"
+                  ],
+                  "first_result": {
+                    "position": 1,
+                    "title": "Beautiful 3.5 Qt Stand Mixer",
+                    "source": "Walmart",
+                    "price": "$64.96",
+                    "extracted_price": 64.96,
+                    "product_link": "https://www.walmart.com/ip/Beautiful-3-5-Qt-Stand-Mixer/expr123",
+                    "thumbnail": "https://encrypted-tbn1.gstatic.com/shopping?q=tbn:ANd9GcSqMqBie2aAONKedRN2VEXA1q2-",
+                    "rating": 4.6,
+                    "reviews": 812
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Health check",
+        "description": "Returns `ok` when SERPAPI_KEY is set, `degraded` (503) when it's missing.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Service healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                },
+                "example": {
+                  "status": "ok"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Missing required environment variable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DegradedHealthResponse"
+                },
+                "example": {
+                  "status": "degraded",
+                  "missing_env": [
+                    "SERPAPI_KEY"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "MatchRequest": {
+        "properties": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "List of detected item/product names to search for"
+          },
+          "ignore_terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Ignore Terms",
+            "description": "Terms to exclude from search results"
+          },
+          "max_searches": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Max Searches",
+            "description": "Maximum SerpAPI calls to make",
+            "default": 5
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "MatchRequest",
+        "examples": [
+          {
+            "ignore_terms": [],
+            "items": [
+              "stand mixer",
+              "silicone spatula"
+            ],
+            "max_searches": 5
+          }
+        ]
+      },
+      "SearchRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query",
+            "description": "Freetext product search query"
+          },
+          "max_results": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Max Results",
+            "description": "Maximum number of products to return",
+            "default": 5
+          }
+        },
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "SearchRequest"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "ProductItem": {
+        "type": "object",
+        "properties": {
+          "product_id": {
+            "type": "string",
+            "example": "walmart-beautiful-3-5-qt-ecca45"
+          },
+          "name": {
+            "type": "string",
+            "example": "Beautiful 3.5 Qt Stand Mixer"
+          },
+          "price": {
+            "type": "number",
+            "nullable": true,
+            "description": "Price in USD",
+            "example": 64.96
+          },
+          "image_url": {
+            "type": "string",
+            "nullable": true,
+            "example": "https://encrypted-tbn1.gstatic.com/shopping?q=tbn:ANd9GcSqMqBie2aAONKedRN2VEXA1q2-"
+          },
+          "purchase_url": {
+            "type": "string",
+            "nullable": true,
+            "example": "https://www.walmart.com/ip/Beautiful-3-5-Qt-Stand-Mixer/expr123"
+          },
+          "seller": {
+            "type": "string",
+            "nullable": true,
+            "example": "Walmart"
+          },
+          "category": {
+            "type": "string",
+            "nullable": true,
+            "example": "Kitchen & Cookware"
+          }
+        },
+        "required": [
+          "product_id",
+          "name",
+          "image_url",
+          "purchase_url",
+          "seller",
+          "category"
+        ]
+      },
+      "MatchResponse": {
+        "type": "object",
+        "properties": {
+          "matched_products": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductItem"
+            }
+          },
+          "unmatched": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Item names for which SerpAPI returned no results"
+          }
+        },
+        "required": [
+          "matched_products",
+          "unmatched"
+        ]
+      },
+      "SearchResponse": {
+        "type": "object",
+        "properties": {
+          "products": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductItem"
+            }
+          }
+        },
+        "required": [
+          "products"
+        ]
+      },
+      "DebugResponse": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProductItem"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "null if SerpAPI returned no shopping results for this item"
+          }
+        },
+        "required": [
+          "item",
+          "result"
+        ]
+      },
+      "DebugRawResponse": {
+        "type": "object",
+        "description": "Unmodified passthrough of SerpAPI's first google_shopping shopping_results entry \u2014 shape depends entirely on what SerpAPI currently returns.",
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "All top-level keys present in SerpAPI's raw result"
+          },
+          "first_result": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Common keys: position, title, link, product_link, product_id, source, price, extracted_price, rating, reviews, thumbnail, delivery"
+          }
+        },
+        "required": [
+          "keys",
+          "first_result"
+        ]
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "Human-readable error message"
+          }
+        },
+        "required": [
+          "detail"
+        ]
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "DegradedHealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "degraded"
+            ]
+          },
+          "missing_env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "status",
+          "missing_env"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Matching",
+      "description": "Batch item-to-product matching"
+    },
+    {
+      "name": "Search",
+      "description": "Direct product search"
+    },
+    {
+      "name": "Debug",
+      "description": "Single-item SerpAPI debugging"
+    },
+    {
+      "name": "System",
+      "description": "Health and diagnostics"
+    }
+  ],
+  "servers": [
+    {
+      "url": "https://product-matcher-82592393149.us-central1.run.app",
+      "description": "cookshop-dev-rajan-prod (live, public)"
+    },
+    {
+      "url": "https://product-matcher-115535290381.us-central1.run.app",
+      "description": "shoplens-dev"
+    },
+    {
+      "url": "http://localhost:8081",
+      "description": "local (uvicorn main:app)"
+    }
+  ]
+}

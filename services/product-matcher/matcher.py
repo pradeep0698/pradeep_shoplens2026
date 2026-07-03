@@ -321,12 +321,22 @@ def _term_matches(term: str, name: str) -> bool:
     term typed as "laptops" should match an item name containing "laptop"
     and vice versa. `term` is already lowercased by _normalize_terms; `name`
     is lowercased by the caller. Not exhaustive (won't handle "watches" ->
-    "watch"-style -es plurals), but covers the common trailing-s case."""
+    "watch"-style -es plurals), but covers the common trailing-s case.
+
+    Also tolerant of compound-word spacing (mirrors
+    services/ai-analyzer/analyzer.py's _term_matches): a preference typed as
+    "Smart Watch" must still match an item name containing "smartwatch", and
+    vice versa — found via a real preference-ranking miss where "smartwatch"
+    scored 0 against a "Smart Watch" preference and lost to items matching
+    only a generic category keyword."""
     if term in name:
         return True
     if term.endswith("s") and term[:-1] in name:
         return True
     if not term.endswith("s") and (term + "s") in name:
+        return True
+    term_compact = term.replace(" ", "")
+    if term_compact and term_compact in name.replace(" ", ""):
         return True
     return False
 

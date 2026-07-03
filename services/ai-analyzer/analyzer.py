@@ -371,13 +371,24 @@ def _term_matches(term: str, name: str) -> bool:
     a preference term typed as "laptops" should match an item name containing
     "laptop" and vice versa. Handles the common English trailing-s plural
     without pulling in a stemming library; not exhaustive (won't handle
-    "watches" -> "watch"-style -es plurals), but covers the common case."""
+    "watches" -> "watch"-style -es plurals), but covers the common case.
+
+    Also tolerant of compound-word spacing: a preference typed as "Smart
+    Watch" must still match an item name containing "smartwatch" (Gemini's
+    one-word phrasing), and vice versa — found via a real preference-ranking
+    miss where "smartwatch" scored 0 against a "Smart Watch" preference and
+    lost out to items matching only a generic category keyword. Comparing
+    with whitespace stripped from both sides catches this without needing a
+    dictionary of known compounds."""
     term = term.lower()
     if term in name:
         return True
     if term.endswith("s") and term[:-1] in name:
         return True
     if not term.endswith("s") and (term + "s") in name:
+        return True
+    term_compact = term.replace(" ", "")
+    if term_compact and term_compact in name.replace(" ", ""):
         return True
     return False
 

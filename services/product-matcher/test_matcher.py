@@ -349,6 +349,24 @@ def test_term_matches_handles_plural_and_singular():
     assert matcher._term_matches("laptops", "wireless mouse") is False
 
 
+def test_term_matches_handles_compound_word_spacing():
+    # Preference typed with a space must still match Gemini's one-word
+    # phrasing, and vice versa — a real preference-ranking miss where
+    # "smartwatch" scored 0 against a "smart watch" preference.
+    assert matcher._term_matches("smart watch", "black rectangular smartwatch") is True
+    assert matcher._term_matches("smartwatch", "black rectangular smart watch") is True
+    assert matcher._term_matches("smart watch", "wireless mouse") is False
+
+
+def test_prioritize_items_compound_word_preference_beats_generic_category_match():
+    items = ["Black rectangular smartwatch", "Acer Predator black gaming laptop"]
+    # Before the compound-word fix, the smartwatch scored 0 (no preference
+    # credit, no category keyword match) and lost to the laptop's generic
+    # "electronics" category hit despite being the user's literal preference.
+    result = matcher._prioritize_items(items, ["Smart Watch"], ["electronics"])
+    assert result[0] == "Black rectangular smartwatch"
+
+
 def test_item_score_sums_category_and_multiple_preference_matches():
     item = "nike black electronics gaming laptop"
     assert matcher._item_score(item, ["nike", "laptops"], ["electronics"]) == 3

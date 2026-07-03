@@ -44,6 +44,13 @@ class AuthNotifier extends AsyncNotifier<void> {
     );
   }
 
+  Future<void> forgotPassword(String email) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(
+      () => FirebaseAuth.instance.sendPasswordResetEmail(email: email),
+    );
+  }
+
   Future<void> signOut() => ref.read(authRepositoryProvider).signOut();
 }
 

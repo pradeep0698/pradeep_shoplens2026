@@ -12,6 +12,7 @@ import 'presentation/screens/main_screen.dart';
 import 'presentation/screens/profile_screen.dart';
 import 'presentation/screens/signup_screen.dart';
 import 'presentation/screens/splash_screen.dart';
+import 'presentation/screens/forgot_password_screen.dart';
 
 // Notifies GoRouter whenever Firebase Auth emits a new user state.
 // GoRouter is created once and stays stable — only the redirect re-runs.
@@ -45,27 +46,29 @@ final routerProvider = Provider<GoRouter>((ref) {
     initialLocation: '/splash',
     refreshListenable: authNotifier,
     redirect: (context, state) {
-      // currentUser is synchronous and accurate after Firebase.initializeApp()
       final isLoggedIn  = FirebaseAuth.instance.currentUser != null;
       final isSplash    = state.matchedLocation == '/splash';
-      final isAuthRoute   = state.matchedLocation == '/login' ||
-                            state.matchedLocation == '/signup';
-      final isPublicRoute = isAuthRoute || state.matchedLocation == '/about';
+      final isAuthRoute = state.matchedLocation == '/login' ||
+                          state.matchedLocation == '/signup';
+      final isPublicRoute = isAuthRoute ||
+                            state.matchedLocation == '/about' ||
+                            state.matchedLocation == '/forgot-password';
 
-      if (isSplash)              return isLoggedIn ? '/main' : '/login';
+      if (isSplash)                      return isLoggedIn ? '/main' : '/login';
       if (!isLoggedIn && !isPublicRoute) return '/login';
       if (isLoggedIn  &&  isAuthRoute)   return '/main';
       return null;
     },
     routes: [
-      GoRoute(path: '/splash',  builder: (_, __) => const SplashScreen()),
-      GoRoute(path: '/login',   builder: (_, __) => const LoginScreen()),
-      GoRoute(path: '/signup',  builder: (_, __) => const SignUpScreen()),
-      GoRoute(path: '/main',      builder: (_, __) => const MainScreen()),
-GoRoute(path: '/profile',   builder: (_, __) => const ProfileScreen()),
-      GoRoute(path: '/admin',     builder: (_, __) => const AdminScreen()),
-      GoRoute(path: '/live-scan', builder: (_, __) => const LiveScanScreen()),
-      GoRoute(path: '/about',    builder: (_, __) => const AboutScreen()),
+      GoRoute(path: '/splash',           builder: (_, __) => const SplashScreen()),
+      GoRoute(path: '/login',            builder: (_, __) => const LoginScreen()),
+      GoRoute(path: '/forgot-password',  builder: (_, __) => const ForgotPasswordScreen()),
+      GoRoute(path: '/signup',           builder: (_, __) => const SignUpScreen()),
+      GoRoute(path: '/main',             builder: (_, __) => const MainScreen()),
+      GoRoute(path: '/profile',          builder: (_, __) => const ProfileScreen()),
+      GoRoute(path: '/admin',            builder: (_, __) => const AdminScreen()),
+      GoRoute(path: '/live-scan',        builder: (_, __) => const LiveScanScreen()),
+      GoRoute(path: '/about',            builder: (_, __) => const AboutScreen()),
     ],
   );
 });

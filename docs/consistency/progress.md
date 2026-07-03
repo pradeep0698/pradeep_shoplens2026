@@ -73,23 +73,21 @@ path, so a shopper never notices the app switched search strategies underneath t
 | FR-2 | Currency label matches shopper's region | ✅ Done (label only) |
 | FR-3 | Preferences/categories prioritized under a tight search budget | 🟡 In progress (fix built, not yet deployed) |
 | FR-4 | Fallback search also respects region | ✅ Done |
+| PF-1 | Result count adapts to how cluttered the scan is | 🟡 In progress (deployed to dev, not yet verified/merged) |
 
-### Proposed Feature — Not Yet Built
-
-**PF-1 — Result count adapts to how cluttered the scan is**
+**Scenario 5 — Result count adapts to how cluttered the scan is** *(PF-1)*
 Right now, every detected item gets exactly one result back, whether the shopper scanned a
-single mug or a five-item desk — the app never shows more than one option per item, and that
-limit isn't configurable today. The proposal: give the existing "Search results per scan"
-profile dial (1-5, most shoppers including Diego default to 2) a second job. When a scan finds
-**multiple items**, cap results-per-item at that dial's value (e.g. 2), so a busy scan doesn't
-flood the shopper with a wall of cards. When a scan finds **exactly one item** — including
-every single-tap identify — ignore the dial and show up to a new deployment-level default of
-**15** results instead. The reasoning: the cost that matters is the number of *searches* run
-(one per item, against a shared, metered SerpAPI quota), not the number of *results* a single
-search hands back — so there's no cost reason to starve a shopper down to 1-2 options when only
-one search happened anyway.
-**Status: 🔵 Proposed — spec finalized 2026-07-03, not yet implemented.** *(Full technical
-design in the Appendix.)*
+single mug or a five-item desk. When a scan finds **multiple items**, results-per-item are now
+capped at the shopper's own "Search results per scan" profile dial (1-5, default 2), so a busy
+scan doesn't flood them with a wall of cards. When a scan finds **exactly one item** —
+including every single-tap identify — the dial is ignored and the shopper sees up to a new
+deployment-level default of **15** results instead. The reasoning: the cost that matters is
+the number of *searches* run (one per item, against a shared, metered SerpAPI quota), not the
+number of *results* a single search hands back — so there's no cost reason to starve a shopper
+down to 1-2 options when only one search happened anyway.
+**Status: 🟡 In progress — built, unit-tested (47/47), deployed to `shoplens2026-dev`
+2026-07-03. Not yet verified on-device, not yet merged to `main`.** *(Full technical design in
+the Appendix.)*
 
 ## Status at a Glance
 
@@ -97,7 +95,8 @@ design in the Appendix.)*
 |---|---|---|
 | Backend logic (region, currency, preference-aware search) | ✅ Done — live on `shoplens2026-dev` | Deployed, validated against real logs |
 | Android test build | ✅ Done | Points at `shoplens2026-dev`; one startup bug found & fixed |
-| Ranking-fairness fix (Scenario 3 / FR-3) | 🟡 In progress | Tested (38/38), queued for next release batch |
+| Ranking-fairness fix (Scenario 3 / FR-3) | 🟡 In progress | Tested (47/47), deployed to dev, queued for next release batch |
+| Density-aware result cap (Scenario 5 / PF-1) | 🟡 In progress | Tested (47/47), deployed to dev, not yet verified on-device |
 | iOS test build | ⬜ Pipeline | No blockers, just not prioritized yet |
 | Production rollout | ⬜ Pipeline | Still confined to the dev/test environment by design |
 
@@ -134,23 +133,26 @@ explainable result. **Deliberately held out of production** per direction, to sh
 first item in a batched release rather than a standalone hotfix. Engineering detail in the
 Appendix.
 
+**PF-1 — density-aware per-object result cap (Scenario 5)** — built, unit-tested (17 new tests,
+47/47 total passing), and deployed to `shoplens2026-dev` alongside the ranking-fairness fix.
+Removed the mobile client's `.take(5)` cap on tap-identify results, which would otherwise have
+silently discarded the extra results the server now returns. **Not yet verified on a real
+device, not yet merged to `main`.** Engineering detail in the Appendix.
+
 **Next release batch (accumulating):**
 1. ✅ Ranking-fairness fix — ready, described above.
-2. *(open — add the next item here before this batch ships)*
+2. ✅ PF-1 — density-aware per-object result cap, described above.
+3. *(open — add the next item here before this batch ships)*
 
-**Ship checklist once the batch is finalized:** commit → push to `main` → redeploy
-`ai-analyzer` + `product-matcher` to `shoplens2026-dev` (backend-only, no new APK needed for
-item 1) → re-validate Scenario 3 / FR-3 with the tester's original scenario.
+**Ship checklist once the batch is finalized:** on-device verification of both items above →
+push `next-release-batch` → merge to `main` → redeploy `ai-analyzer` + `product-matcher` to
+`shoplens2026-dev` (already done ahead of merge, for dev testing) → new APK build already done
+for this batch → re-validate Scenario 3 / FR-3 and Scenario 5 / PF-1 with real scans.
 
 ## ⬜ In Pipeline
 
 Not yet started, roughly ordered by what unblocks the most value next:
 
-- **PF-1 — density-aware per-object result cap.** Fully specified (see "Proposed Feature"
-  above and Appendix for the technical design) — not yet started. Touches
-  `services/ai-analyzer/analyzer.py`, `services/product-matcher/matcher.py`, both `main.py`
-  request/response models, and likely mobile UI work to render more than one result card per
-  detected item in the multi-object scan flow, which the app has never had to do before.
 - **iOS test build.** No blockers — just not yet prioritized.
 - **Search-budget A/B (`max_searches=2` vs. `=5`).** Needed to answer Decision #2 below with
   data instead of a guess; deferred because SerpAPI quota ran out mid-measurement session.
@@ -224,13 +226,13 @@ should sign off on before this goes further:
 3. **Rollout scope.** This currently covers the mobile app only. The internal web
    demo/admin tool does not send region/preference data to search at all — low priority
    unless that tool needs to demo this feature to anyone.
-4. **PF-1's profile copy and multi-result UI.** PF-1 (see above) reuses the "Search results
-   per scan" dial for a second purpose it wasn't originally labeled for — worth a copy review
-   so the setting still reads clearly once it also controls per-item result count. It also
-   means the multi-object scan flow will need to render more than one result card per item for
-   the first time (today it's always exactly one) — worth a quick design opinion on whether
-   that's a horizontal carousel, stacked cards, or a "show more" expansion before engineering
-   commits to one.
+4. **PF-1's profile copy.** PF-1 (Scenario 5, now implemented) reuses the "Search results per
+   scan" dial for a second purpose it wasn't originally labeled for — worth a copy review so
+   the setting still reads clearly once it also controls per-item result count. (The other
+   open question raised when this was first proposed — how to render more than one result card
+   per item — turned out to be a non-issue: the mobile product list was already a flat list
+   with no per-item grouping, so extra results just appear as more cards with zero UI changes
+   needed.)
 
 ## Known Issues Found & Fixed During Testing
 
@@ -274,8 +276,9 @@ exactly why real-device testing before merging to production is worth the time i
   (something the camera-based search may miss), confirm results look region-consistent.
   Hardest to eyeball from the UI alone — engineering can confirm via backend logs if unclear.
 
-**Install build:** `mobile/build/app/outputs/flutter-apk/app-release.apk` (~96 MB), points at
-`shoplens2026-dev`, rebuilt 2026-07-02 with the blank-screen bug fixed.
+**Install build:** `mobile/build/app/outputs/flutter-apk/app-release.apk`, points at
+`shoplens2026-dev`, rebuilt 2026-07-03 on the `next-release-batch` branch with the blank-screen
+fix, the tap-identify consistency/JPEG changes, the ranking-fairness fix, and PF-1 all included.
 
 </details>
 
@@ -334,58 +337,54 @@ your direction — not yet committed or deployed.**
 </details>
 
 <details>
-<summary><strong>PF-1 — density-aware per-object result cap (technical design, not yet built)</strong></summary>
+<summary><strong>PF-1 — density-aware per-object result cap (technical design, implemented)</strong></summary>
 
-**What exists today:**
+**Before:**
 - The "Search results per scan" profile dial is `maxSearchesPerRun` in Dart
   (`mobile/lib/data/models/user_profile.dart`), Firestore key `max_searches_per_run`, sent to
   both backends as `max_searches` (`AnalyzeRequest`/`MatchRequest`). Range 1-5
-  (`maxSearchesPerRunCeiling = 5`), default 2 (`defaultMaxSearchesPerRun`). UI: profile
-  settings, "Search results per scan," subtitle "How many product searches to run per scan
-  (1-5). Lower is faster, higher finds more."
-- Today this field has exactly **one** job: capping how many *detected items* get searched at
-  all in the multi-item `/analyze` and `/match` flows —
-  `services/ai-analyzer/analyzer.py:946-954` (and the streaming variant, `~1147-1150`):
-  `items_raw = items_raw[:search_limit]`; mirrored in
-  `services/product-matcher/matcher.py:307-311`.
-- **Results per item are currently hardcoded to 1** in that same multi-item pipeline —
-  `services/ai-analyzer/analyzer.py:993-998` (`_google_lens(..., max_results=1)` /
-  `_search_shopping(..., max_results=1)`, duplicated `~1188-1194` in the streaming variant) and
-  `services/product-matcher/matcher.py:175-193` (`_search_product` fetches 3 raw results via
-  `_shopping_search(item, 3, ...)` but only ever keeps `results[0]`). This cap isn't named or
-  configurable anywhere — it's an implicit `1`.
-- The **single-tap `/identify` flow is the one place today that already returns more than one
-  result for an item** — `identify_crop` (`analyzer.py:730-736`, called from `main.py:482`)
-  returns up to `max_results=clamp_max_searches(request.max_searches)`, i.e. it piggybacks on
-  the same 1-5 dial, capped at the ceiling of 5. Mobile further truncates this to 5 via
-  `.take(5)` in `tap_identify_usecase.dart:49-52`.
+  (`maxSearchesPerRunCeiling = 5`), default 2 (`defaultMaxSearchesPerRun`).
+- The dial had exactly **one** job: capping how many *detected items* get searched at all in
+  the multi-item `/analyze` and `/match` flows. Results per item were hardcoded to **1** in
+  that same pipeline (`_google_lens(..., max_results=1)` / `_search_shopping(...,
+  max_results=1)` in `analyzer.py`; `results[0]` in `matcher.py`, even though 3 raw results
+  were already being fetched and discarded). Only the single-tap `/identify` flow returned more
+  than one result, and it piggybacked on the same dial (capped at 5), further truncated to 5
+  client-side via `.take(5)` in `tap_identify_usecase.dart`.
 
-**Proposed change:**
-1. Add a new deployment-level env var, `MAX_RESULTS_PER_ITEM` (default `"15"`), read the same
-   way other numeric env vars already are in this codebase
-   (`_LENS_TIMEOUT = int(os.environ.get("LENS_TIMEOUT_SECONDS", "12"))` is the existing
-   pattern to follow) — in both `services/ai-analyzer/analyzer.py` and
-   `services/product-matcher/matcher.py`.
-2. In the multi-item `/analyze` and `/match` flows: when more than one item is being searched
-   this run, replace the hardcoded `max_results=1` (and matcher.py's `results[0]`) with
-   `min(clamp_max_searches(request.max_searches), MAX_RESULTS_PER_ITEM)` — e.g. a shopper on
-   the default dial value of 2 now gets 2 results per item instead of 1.
-3. When exactly one item is being searched this run (a single-object `/analyze` scan, or every
-   `/identify` call, which is definitionally single-object) — ignore the dial entirely and use
-   `MAX_RESULTS_PER_ITEM` (15) directly. This means `/identify`'s `max_results` changes from
-   "derived from `max_searches`, capped at 5" to "always up to the deployment default of 15,"
-   and the mobile `.take(5)` in `tap_identify_usecase.dart` should be raised to match (or
-   removed, since the server would already be enforcing the real cap).
-4. `MAX_SEARCHES_PER_RUN` (the item-count ceiling, currently a hardcoded `= 5` module constant
-   in both services) is unrelated to this change and stays as-is — this feature only touches
+**Implemented:**
+1. New deployment-level env var, `MAX_RESULTS_PER_ITEM` (default `"15"`), read the same way as
+   other numeric env vars in this codebase (`_LENS_TIMEOUT` is the existing pattern) — added to
+   both `services/ai-analyzer/analyzer.py` and `services/product-matcher/matcher.py`. A shared
+   `_results_per_item(item_count, max_searches)` helper in both files implements the rule:
+   `min(clamp_max_searches(max_searches), MAX_RESULTS_PER_ITEM)` when `item_count > 1`,
+   `MAX_RESULTS_PER_ITEM` directly when `item_count == 1`.
+2. `analyzer.py`: `analyze_media` and `analyze_media_stream` both compute `results_per_item`
+   right after their existing item-truncation step and pass it into `_google_lens`/
+   `_search_shopping` in place of the hardcoded `1`. `/identify`'s `max_results` now comes
+   straight from `MAX_RESULTS_PER_ITEM` (`main.py`'s `/identify` route) instead of
+   `clamp_max_searches(request.max_searches)`, since a tap is always single-object.
+3. `matcher.py`: `_search_product` now returns `list[dict]` (up to `max_results`, still cached)
+   instead of a single `Optional[dict]`; `match_products` collects every result per item instead
+   of just the first, deduping by `product_id` across the whole run same as before.
+4. `MAX_SEARCHES_PER_RUN` (the item-count ceiling) is untouched — this feature only changed
    results-*per*-item, not how many items get searched.
+5. Mobile: removed `tap_identify_usecase.dart`'s `.take(5)` — the server now enforces the real
+   cap, so the client cap would have silently thrown away results.
 
-**Open questions** (see "Decisions Needed" #4): profile-copy wording for the dial's second job,
-and how the mobile UI should render >1 result card per item in the multi-object flow, which it
-has never had to do before (today's UI structure has always assumed exactly one result per
-detected item).
+**Resolved open question:** rendering >1 result card per item in the multi-object flow turned
+out to need zero UI work — the product list was already a flat list with no per-item grouping
+(`ProductCard` in a plain `ListView.builder`), so extra results just appear as more cards.
+**Still open:** the profile dial's copy — see "Decisions Needed" #4.
 
-**Status: specified 2026-07-03, not started.** No code changes yet.
+**Tests:** 17 new (3 in `test_analyzer.py`, 6 in `test_matcher.py`, plus 8 more covering
+`_search_product`'s new list-returning signature and `match_products`'s multi-result handling),
+2 existing tests updated for the changed `_search_product` signature. 47/47 passing across
+both services.
+
+**Status: implemented, unit-tested, deployed to `shoplens2026-dev` 2026-07-03 (revisions
+`ai-analyzer-00004-m47`, `product-matcher-00007-mqv`), on the `next-release-batch` branch. Not
+yet verified on a real device, not yet merged to `main`.**
 
 </details>
 
@@ -497,5 +496,12 @@ All items below are complete and shipped in the current live deploy unless marke
   not-yet-started feature — reuses the existing "Search results per scan" dial for multi-object
   scans, adds a new `MAX_RESULTS_PER_ITEM` deployment default (15) for single-object scans.
   Raised two open questions (profile copy, multi-result UI) under Decisions Needed.
+- 2026-07-03: Implemented PF-1 (17 new tests, 47/47 total passing) and mobile's
+  `tap_identify_usecase.dart` cleanup, committed to `next-release-batch`. Discovered the
+  multi-result-card UI question was moot — the product list was already flat. Redeployed
+  `ai-analyzer`/`product-matcher` to `shoplens2026-dev` (revisions `ai-analyzer-00004-m47`,
+  `product-matcher-00007-mqv`) alongside the already-deployed ranking-fairness fix, and rebuilt
+  the Android APK with both changes. **Held on `next-release-batch`, not merged to `main`, per
+  direction — dev deploy and APK are for verification, not a production release.**
 
 </details>

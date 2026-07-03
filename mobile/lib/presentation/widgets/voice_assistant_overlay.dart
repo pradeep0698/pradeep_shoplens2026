@@ -59,6 +59,13 @@ class VoiceAssistantOverlay extends ConsumerStatefulWidget {
 class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> with WidgetsBindingObserver {
   final _textController = TextEditingController();
   String _language = 'English';
+  Timer? _pauseDebounce;
+
+  // Long enough to cover a Buy-link external-browser round trip (tap Buy ->
+  // browser opens -> user glances -> taps back, typically 1-3s on a real
+  // device) with margin; short enough that a genuine backgrounding still
+  // pauses the live session promptly.
+  static const _kPauseDebounce = Duration(seconds: 5);
 
   @override
   void initState() {
@@ -72,17 +79,33 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> w
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
-    // Only true backgrounding stops the live turn — AppLifecycleState.inactive
-    // fires the instant the window/tab loses focus even momentarily (e.g.
-    // url_launcher opening a product's Buy link), and must not be acted on
-    // here, or it reintroduces the bug described in dispose() below.
+    // AppLifecycleState.inactive fires the instant the window/tab loses
+    // focus even momentarily (e.g. url_launcher opening a product's Buy
+    // link), and must not be acted on here, or it reintroduces the bug
+    // described in dispose() below.
     if (lifecycleState == AppLifecycleState.paused) {
-      unawaited(ref.read(voiceAssistantProvider.notifier).pauseForBackground());
+      // Tapping a Buy link (launchUrl with LaunchMode.externalApplication)
+      // triggers a real `paused` transition on real devices, not just
+      // `inactive` — opening an external browser is a genuine app switch.
+      // Debounce so a quick round trip (tap Buy -> glance -> come back)
+      // never tears down the live session; only a backgrounding that
+      // outlasts the debounce actually pauses.
+      _pauseDebounce?.cancel();
+      _pauseDebounce = Timer(_kPauseDebounce, () {
+        _pauseDebounce = null;
+        unawaited(ref.read(voiceAssistantProvider.notifier).pauseForBackground());
+      });
+    } else if (lifecycleState == AppLifecycleState.resumed) {
+      // Came back before the debounce elapsed — the live session was never
+      // touched, so there's nothing to resume, just cancel the pending pause.
+      _pauseDebounce?.cancel();
+      _pauseDebounce = null;
     }
   }
 
   @override
   void dispose() {
+    _pauseDebounce?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     // The only full-teardown trigger now — previously a WidgetsBindingObserver
     // also cancelled on AppLifecycleState.inactive, which fires the instant
@@ -322,7 +345,16 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> w
             if (state.status == VoiceStatus.error) ...[
               _ErrorBanner(
                 message: state.errorMessage ?? 'Connection lost.',
-                onReconnect: () => ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding, language: _language),
+                // resume: true — this banner only shows when there's already
+                // a transcript/patch worth keeping (see _body()'s error
+                // branch), so reconnect should reattach to the same backend
+                // session (see live_session.py's resume_session_id) instead
+                // of starting a brand-new conversation from scratch.
+                onReconnect: () => ref.read(voiceAssistantProvider.notifier).start(
+                  isOnboarding: widget.isOnboarding,
+                  language: _language,
+                  resume: true,
+                ),
               ),
               const SizedBox(height: 16),
             ],
@@ -496,7 +528,7 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> w
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _holdToTalkButton(state),
+            _handsFreeToggleButton(state),
             const SizedBox(height: 4),
             // No review step exists in search mode — only onboarding's
             // preference flow needs an explicit "done" affordance.
@@ -536,40 +568,47 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> w
         ),
       );
 
-  /// Hold-to-talk: press down starts streaming mic audio for one turn,
-  /// release ends it — Gemini's own voice-activity detection is disabled
-  /// server-side, so this button is what marks the turn boundaries instead
-  /// of relying on (unreliable, over resampled web mic audio) automatic
-  /// silence detection.
-  Widget _holdToTalkButton(VoiceAssistantState state) {
+  /// Hands-free toggle: one tap starts a session that stays listening for
+  /// the whole conversation, another tap stops it — no per-turn button
+  /// presses. Gemini's own voice-activity detection stays disabled
+  /// server-side; a re-armable local VAD (Pcm16ReArmableSpeechGate, see
+  /// VoiceAssistantNotifier.startHandsFree) automatically detects each
+  /// utterance's start/end for the whole time the toggle is on, including
+  /// while the assistant is talking — so the user can just start talking to
+  /// interrupt it (barge-in), the same way ChatGPT's voice mode works.
+  Widget _handsFreeToggleButton(VoiceAssistantState state) {
     final notifier = ref.read(voiceAssistantProvider.notifier);
     final disabled = state.status == VoiceStatus.review ||
         state.status == VoiceStatus.saving ||
         state.status == VoiceStatus.done ||
         state.status == VoiceStatus.error;
-    return Listener(
-      onPointerDown: disabled ? null : (_) => notifier.beginSpeaking(),
-      onPointerUp: disabled ? null : (_) => notifier.endSpeaking(),
-      onPointerCancel: disabled ? null : (_) => notifier.endSpeaking(),
+    final active = state.isHandsFreeActive;
+    final label = !active
+        ? 'Tap to talk hands-free'
+        : (state.isRecording ? 'Listening…' : 'Listening — just start talking');
+    return GestureDetector(
+      onTap: disabled
+          ? null
+          : () => active ? notifier.stopHandsFree() : notifier.startHandsFree(),
       child: Container(
         width: double.infinity,
         padding: const EdgeInsets.symmetric(vertical: 14),
         decoration: BoxDecoration(
-          color: state.isRecording ? _kAccent : _kAccent.withValues(alpha: 0.12),
+          color: active ? _kAccent : _kAccent.withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(24),
           border: Border.all(color: _kAccent.withValues(alpha: disabled ? 0.3 : 1)),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.mic, color: state.isRecording ? _kBg : _kAccent.withValues(alpha: disabled ? 0.5 : 1), size: 18),
+            Icon(active ? Icons.mic : Icons.mic_none, color: active ? _kBg : _kAccent.withValues(alpha: disabled ? 0.5 : 1), size: 18),
             const SizedBox(width: 8),
             Flexible(
               child: Text(
-                state.isRecording ? "Listening… release when you're done" : 'Hold to answer',
+                label,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: state.isRecording ? _kBg : _kAccent.withValues(alpha: disabled ? 0.5 : 1),
+                  color: active ? _kBg : _kAccent.withValues(alpha: disabled ? 0.5 : 1),
                   fontSize: 13,
                   fontWeight: FontWeight.w700,
                 ),

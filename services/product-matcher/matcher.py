@@ -125,18 +125,50 @@ def _parse_shopping_result(r: dict, fallback_name: str) -> dict:
     }
 
 
+def _parse_amazon_result(r: dict, fallback_name: str) -> dict:
+    """Parses a SerpAPI Amazon Search API (engine=amazon) organic_results entry.
+    Amazon results don't carry a "source" retailer field the way Google/Bing
+    Shopping do — every result is sold on Amazon by definition. price can come
+    back as either a plain string or a nested {raw, value} object depending on
+    the listing, so both shapes are handled defensively."""
+    name = r.get("title", fallback_name)
+    seller = "Amazon"
+    purchase_url = (
+        r.get("link")
+        or "https://www.amazon.com/s?k=" + urllib.parse.quote(name)
+    )
+    price_field = r.get("price")
+    if isinstance(price_field, dict):
+        value = price_field.get("value")
+        price = value if isinstance(value, (int, float)) else _parse_price(price_field.get("raw", "0"))
+    else:
+        price = r.get("extracted_price") or _parse_price(price_field or "0")
+    image_url = r.get("thumbnail") or next(iter(r.get("thumbnails") or []), "")
+    return {
+        "name":         name,
+        "price":        price,
+        "image_url":    image_url,
+        "purchase_url": purchase_url,
+        "seller":       seller,
+        "product_id":   _make_product_id(seller, name),
+        "category":     _infer_category(name, seller),
+    }
+
+
 def _shopping_search(query: str, num: int, engine: str = "google_shopping") -> list[dict]:
-    """SerpAPI shopping search (google_shopping or bing_shopping), parsed into our product shape.
+    """SerpAPI shopping search (google_shopping or amazon), parsed into our product shape.
     Shared by _search_product (single best match, for the image pipeline)
     and search_products (multiple results, for an explicit user search)."""
     data = None
     for attempt in range(2):
         try:
-            params: dict = {"engine": engine, "q": query, "api_key": _SERPAPI_KEY, "num": num}
+            params: dict = {"engine": engine, "api_key": _SERPAPI_KEY}
             if engine == "google_shopping":
-                params.update({"gl": "us", "hl": "en"})
-            elif engine == "bing_shopping":
-                params["cc"] = "US"
+                params.update({"q": query, "num": num, "gl": "us", "hl": "en"})
+            elif engine == "amazon":
+                # SerpAPI's Amazon Search API mirrors Amazon's own URL params —
+                # "k" (keyword) rather than "q", and amazon_domain instead of gl/hl.
+                params.update({"k": query, "amazon_domain": "amazon.com"})
             resp = _session.get("https://serpapi.com/search", params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
@@ -156,12 +188,28 @@ def _shopping_search(query: str, num: int, engine: str = "google_shopping") -> l
         logger.warning("SerpAPI %s error for '%s': %s", engine, query, data["error"])
         return []
 
-    results = data.get("shopping_results", [])
+    result_key = "organic_results" if engine == "amazon" else "shopping_results"
+    results = data.get(result_key, [])
     if not results:
-        logger.warning("No %s shopping results for '%s'", engine, query)
+        logger.warning("No %s results for '%s'", engine, query)
         return []
 
-    return [_parse_shopping_result(r, query) for r in results[:num]]
+    parser = _parse_amazon_result if engine == "amazon" else _parse_shopping_result
+    return [parser(r, query) for r in results[:num]]
+
+
+def _merge_dedup(existing: list[dict], new: list[dict], cap: int) -> list[dict]:
+    """Appends `new` onto `existing`, skipping product_id duplicates, capped at `cap`."""
+    seen = {p["product_id"] for p in existing}
+    merged = list(existing)
+    for p in new:
+        if len(merged) >= cap:
+            break
+        if p["product_id"] in seen:
+            continue
+        seen.add(p["product_id"])
+        merged.append(p)
+    return merged
 
 
 def _search_product(item: str) -> Optional[dict]:
@@ -181,12 +229,15 @@ def _search_product(item: str) -> Optional[dict]:
     return product
 
 
-def search_products(query: str, max_results: int = 5) -> list[dict]:
+def search_products(query: str, max_results: int = 15) -> list[dict]:
     """Free-text shopping search returning up to max_results distinct products.
-    Tries Google Shopping first, then a price-stripped query, then Bing Shopping
-    as a final fallback — unlike _search_product (single best match per detected
-    item, used by the image pipeline), this surfaces several options for an
-    explicit user search query to pick from."""
+    Tries Google Shopping first, then a price-stripped query, then appends
+    Amazon results on top of whatever Google Shopping already found (deduped
+    by product_id) whenever the running total is still under 5 — unlike the
+    old Bing fallback, Amazon never replaces Tier 1/2 results, only tops them
+    up. Unlike _search_product (single best match per detected item, used by
+    the image pipeline), this surfaces several options for an explicit user
+    search query to pick from."""
     cache_key = f"q::{query.lower().strip()}::{max_results}"
     if cache_key in _cache:
         logger.info("Cache hit for query: %s", query)
@@ -195,18 +246,21 @@ def search_products(query: str, max_results: int = 5) -> list[dict]:
     # Tier 1: Google Shopping, original query
     products = _shopping_search(query, max_results, engine="google_shopping")
 
-    # Tier 2: Google Shopping, price-stripped query
-    if not products:
+    # Tier 2: Google Shopping, price-stripped query — only if still short
+    if len(products) < 5:
         simplified = _simplify_query(query)
         if simplified:
-            logger.info("No Google results for '%s' — retrying simplified: '%s'", query, simplified)
-            products = _shopping_search(simplified, max_results, engine="google_shopping")
+            logger.info("Only %d Google results for '%s' — retrying simplified: '%s'", len(products), query, simplified)
+            more = _shopping_search(simplified, max_results, engine="google_shopping")
+            products = _merge_dedup(products, more, max_results)
 
-    # Tier 3: Bing Shopping (different catalog, different failure modes)
-    if not products:
-        bing_query = _simplify_query(query) or query
-        logger.info("No Google results — falling back to Bing Shopping for '%s'", bing_query)
-        products = _shopping_search(bing_query, max_results, engine="bing_shopping")
+    # Tier 3: Amazon — appended on top of whatever Google Shopping found so
+    # far, only if still short of 5 total (never a full replace).
+    if len(products) < 5:
+        amazon_query = _simplify_query(query) or query
+        logger.info("Only %d results after Google tiers — appending Amazon results for '%s'", len(products), amazon_query)
+        amazon_results = _shopping_search(amazon_query, max_results, engine="amazon")
+        products = _merge_dedup(products, amazon_results, max_results)
 
     if products:
         _cache[cache_key] = products

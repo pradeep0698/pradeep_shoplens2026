@@ -35,6 +35,14 @@ _VOICE_NAME = os.environ.get("VOICE_NAME", "Puck")
 # logic below, which is driven by genuine inactivity instead, so a real,
 # actively-engaged conversation should essentially never hit this.
 _SESSION_MAX_SECONDS = int(os.environ.get("SESSION_MAX_SECONDS", "600"))
+# How long a disconnected (but not explicitly exited) session is kept alive
+# in the in-memory registry for a possible resume — deliberately separate
+# from and shorter than _SESSION_MAX_SECONDS, so an abandoned session that's
+# never resumed doesn't linger for the full hard ceiling. A disconnect here
+# means the WS dropped for any reason OTHER than an explicit exit (see
+# /voice/session/cancel and /voice/session/finalize in main.py, which delete
+# the registry entry immediately instead of going through this grace period).
+_DISCONNECT_GRACE_SECONDS = int(os.environ.get("DISCONNECT_GRACE_SECONDS", "120"))
 _SESSION_CONTEXT_WINDOW_TOKENS = int(os.environ.get("SESSION_CONTEXT_WINDOW_TOKENS", "32000"))
 # How long the conversation must be genuinely silent (see SessionState.last_
 # activity_at) before nudging the model to check in / wrap up, and how much
@@ -47,8 +55,8 @@ _INACTIVITY_POLL_SECONDS = 1.0
 # Backend for the search_products tool (non-onboarding sessions) — see
 # services/product-matcher/main.py's POST /search.
 _PRODUCT_MATCHER_URL = os.environ.get("PRODUCT_MATCHER_URL", "")
-_DEFAULT_MAX_SEARCH_RESULTS = 5
-_MAX_SEARCH_RESULTS_CEILING = 5
+_DEFAULT_MAX_SEARCH_RESULTS = 15
+_MAX_SEARCH_RESULTS_CEILING = 15
 
 # TEMPORARY: scripted fake conversation, used while no billed GCP project is
 # reachable for the real Vertex AI Live API call. Exercises the full WS
@@ -218,9 +226,33 @@ def _profile_note(existing_profile: dict) -> str:
     )
 
 
-def _system_prompt(existing_profile: dict, mode: str, language: str) -> str:
+def _resume_note(transcript: list[dict]) -> str:
+    """Compact prior-conversation context injected into the system prompt for
+    a resumed session — reuses the same text-injection mechanism as
+    _profile_note (already proven safe/testable) rather than replaying the
+    transcript turn-by-turn via send_client_content, whose behavior on a
+    brand-new Live connection (in particular a turn_complete=True replay
+    ending on a "model" turn) is unverified against the real API and not
+    unit-testable. Empty transcript (a normal, non-resumed session) yields no
+    note at all."""
+    if not transcript:
+        return ""
+    lines = [f"{turn.get('role', 'user')}: {turn.get('text', '')}" for turn in transcript[-20:]]
+    convo = "\n".join(lines)
+    if len(convo) > 2000:
+        convo = convo[-2000:]
+    return (
+        " This conversation was recently interrupted (e.g. a dropped "
+        "connection) and has just reconnected. Here is what was already "
+        "discussed before the interruption — do not repeat questions already "
+        "answered, and continue naturally from here:\n" + convo
+    )
+
+
+def _system_prompt(existing_profile: dict, mode: str, language: str, resume_transcript: list[dict] | None = None) -> str:
     template = SEARCH_SYSTEM_PROMPT_TEMPLATE if mode == "search" else SYSTEM_PROMPT_TEMPLATE
     prompt = template.format(profile_note=_profile_note(existing_profile))
+    prompt += _resume_note(resume_transcript or [])
     if language != "English":
         prompt += (
             f" Conduct this entire conversation in {language} — speak and "
@@ -378,6 +410,13 @@ class SessionState:
     # Guards _auto_save_and_close against being reached twice (the inactivity
     # watchdog and the hard SESSION_MAX_SECONDS ceiling race independently).
     auto_saved: bool = False
+    # Set when the WS disconnects for a reason OTHER than an explicit exit
+    # (cancel/finalize) — see run_voice_session's finally block. None means
+    # "currently connected" or "never connected yet". Used by
+    # is_disconnect_expired() to reap abandoned-but-not-explicitly-exited
+    # sessions after a grace period shorter than the hard SESSION_MAX_SECONDS
+    # ceiling.
+    disconnected_at: Optional[float] = None
 
     def __post_init__(self) -> None:
         normalized = profile_store.normalize_reviewed_patch(self.existing_profile)
@@ -396,11 +435,19 @@ class SessionState:
     def is_expired(self) -> bool:
         return (time.monotonic() - self.created_at) > _SESSION_MAX_SECONDS
 
+    def is_disconnect_expired(self) -> bool:
+        return self.disconnected_at is not None and (time.monotonic() - self.disconnected_at) > _DISCONNECT_GRACE_SECONDS
+
 
 class SessionRegistry:
-    """In-memory session registry. Sessions are short-lived (capped at
-    SESSION_MAX_SECONDS) and ephemeral by design — no Firestore persistence,
-    since a dropped connection means the Gemini Live session is gone regardless."""
+    """In-memory session registry. Sessions are capped at SESSION_MAX_SECONDS
+    total and ephemeral by design (no Firestore persistence) — but survive an
+    ordinary WS disconnect (network blip, backgrounding) for up to
+    DISCONNECT_GRACE_SECONDS so the client can resume the same session with
+    its transcript/latest_patch intact (see SessionState.disconnected_at and
+    /voice/session/start's resume_session_id in main.py). Only an explicit
+    exit (POST /voice/session/cancel or /finalize) deletes the entry
+    immediately."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, SessionState] = {}
@@ -422,7 +469,7 @@ class SessionRegistry:
             state = self._sessions.get(session_id)
         if state is None:
             return None
-        if state.is_expired():
+        if state.is_expired() or state.is_disconnect_expired():
             await self.delete(session_id)
             return None
         return state
@@ -444,12 +491,14 @@ def _get_client() -> genai.Client:
     return _genai_client
 
 
-def _live_config(existing_profile: dict, mode: str, language: str) -> types.LiveConnectConfig:
+def _live_config(
+    existing_profile: dict, mode: str, language: str, resume_transcript: list[dict] | None = None
+) -> types.LiveConnectConfig:
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
         tools=_tools_for_mode(mode),
         system_instruction=types.Content(
-            parts=[types.Part(text=_system_prompt(existing_profile, mode, language))]
+            parts=[types.Part(text=_system_prompt(existing_profile, mode, language, resume_transcript))]
         ),
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
@@ -472,13 +521,19 @@ def _live_config(existing_profile: dict, mode: str, language: str) -> types.Live
     )
 
 
-async def _send_greeting_trigger(gemini_session) -> None:
+async def _send_greeting_trigger(gemini_session, resumed: bool = False) -> None:
     """Sends a hidden turn right after connecting so Gemini speaks the opening
     greeting itself — a real, spoken, transcribed turn — instead of the old
     static assistant_greeting string the model never actually said or heard.
     Not recorded into session.transcript or sent to the client: the model's
     spoken reply (relayed normally via _pump_gemini_to_client) is the only
     thing the user sees/hears.
+
+    resumed=True (a reconnect after a dropped connection — see
+    run_voice_session's resume_transcript) swaps the cue so the model doesn't
+    re-introduce itself as if this were a brand-new conversation; the prior
+    context itself is injected separately into the system prompt (see
+    _resume_note), this cue only shapes how the model opens its first reply.
 
     Uses send_realtime_input(text=...) bracketed by activity_start/activity_end
     rather than send_client_content — the SDK's own docstring warns that
@@ -488,10 +543,16 @@ async def _send_greeting_trigger(gemini_session) -> None:
     (manual activity detection is enabled in _live_config). Mixing the two
     here was confirmed to silently break both the greeting and subsequent
     voice turns — no exception, just no response."""
-    await gemini_session.send_realtime_input(activity_start=types.ActivityStart())
-    await gemini_session.send_realtime_input(
-        text="(The user just opened the conversation and hasn't said anything yet.)"
+    cue = (
+        "(The connection was briefly interrupted and has just reconnected — "
+        "the user hasn't said anything new since reconnecting. Don't "
+        "re-introduce yourself or restart the conversation; briefly "
+        "acknowledge you're back and continue from where you left off.)"
+        if resumed else
+        "(The user just opened the conversation and hasn't said anything yet.)"
     )
+    await gemini_session.send_realtime_input(activity_start=types.ActivityStart())
+    await gemini_session.send_realtime_input(text=cue)
     await gemini_session.send_realtime_input(activity_end=types.ActivityEnd())
 
 
@@ -570,6 +631,45 @@ def _clamp_max_results(value) -> int:
         return _DEFAULT_MAX_SEARCH_RESULTS
 
 
+# Confirmed via SerpAPI's Google Shopping playground: appending this phrase
+# measurably improves thumbnail-image reliability — some results otherwise
+# come back with no image — so it's a real, functional part of the query,
+# not just cosmetic instructional text.
+_SHOPPING_CONTEXT_SUFFIX = "this is for shopping, include price, images, and links"
+
+
+def _sanitize_exclusion_term(term: str) -> str:
+    """Collapses a term to a single hyphen-joined token so it can be used as
+    a literal -token minus-exclusion (both Google Shopping and SerpAPI's
+    Amazon engine treat "-term" as a real exclusion operator) without needing
+    to quote multi-word phrases."""
+    cleaned = re.sub(r"[^a-z0-9\s-]", "", term.lower()).strip()
+    cleaned = re.sub(r"\s+", "-", cleaned)
+    return cleaned
+
+
+def _augment_query(query: str, profile: dict) -> str:
+    """Appends the shopping-context phrase, the profile's preference_terms
+    (as a soft bias), and ignore_terms (as hard -exclusions) to an
+    LLM-produced search query — a second, code-level layer on top of
+    whatever the model already folded into its own query text (see
+    SEARCH_SYSTEM_PROMPT_TEMPLATE). The augmented string is only ever sent to
+    the search backend — callers must keep showing the user the original,
+    unaugmented query."""
+    parts = [query, _SHOPPING_CONTEXT_SUFFIX]
+
+    preferences = [str(p).strip() for p in (profile.get("preference_terms") or []) if str(p).strip()]
+    if preferences:
+        parts.append("preferring " + ", ".join(preferences))
+
+    ignore_terms = [str(t).strip() for t in (profile.get("ignore_terms") or []) if str(t).strip()]
+    exclusions = [f"-{token}" for term in ignore_terms if (token := _sanitize_exclusion_term(term))]
+    if exclusions:
+        parts.append(" ".join(exclusions))
+
+    return " ".join(parts)
+
+
 async def _search_shopping(query: str, max_results: int) -> list[dict]:
     """Calls product-matcher's POST /search (free-text Google Shopping search
     via SerpAPI) for the search_products tool — see services/product-matcher/
@@ -596,7 +696,11 @@ async def _dispatch_tool_call(name: str, args: dict, session: SessionState) -> d
         if not query:
             return {"status": "error", "query": "", "products": []}
         max_results = _clamp_max_results(session.existing_profile.get("max_searches_per_run"))
-        products = await _search_shopping(query, max_results)
+        # The augmented query goes to the search backend; the client/UI still
+        # sees the original `query` below (see the returned dict) so the
+        # augmentation text never leaks into "Results for '...'" on screen.
+        augmented_query = _augment_query(query, session.existing_profile)
+        products = await _search_shopping(augmented_query, max_results)
         if products:
             return {"status": "found", "query": query, "products": products}
         return {
@@ -857,11 +961,20 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
 # local testing without a billed GCP project can exercise the full WS
 # protocol/UI with something resembling a real conversation.
 
+# Deliberately excludes ambiguous bare conversational answers like "no",
+# "yes", "done", "save", "go ahead" — those are extremely likely to occur as
+# an ordinary answer to a mid-interview yes/no follow-up (e.g. "Do you have
+# a favorite brand?" -> "No"), and matching on them here bypassed the
+# model's own judgment and jumped straight to finalize after just a few
+# turns. Only unambiguous multi-word closing phrases are matched now. Must
+# be kept in sync with the duplicate list in
+# mobile/lib/presentation/providers/voice_assistant_provider.dart's
+# _isClosingPhrase — no shared source of truth between the two today.
 _CLOSING_PHRASES = {
-    "no", "nope", "no thanks", "nothing else", "nothing more", "that's all",
-    "thats all", "that's it", "thats it", "i'm done", "im done", "done",
-    "save it", "go ahead", "looks good", "save", "that's everything",
-    "thats everything", "yes save it", "yes",
+    "nothing else", "nothing more", "that's all",
+    "thats all", "that's it", "thats it", "i'm done", "im done",
+    "save it", "looks good", "that's everything",
+    "thats everything",
 }
 
 _FILLER_PREFIXES = [
@@ -1138,17 +1251,21 @@ async def run_voice_session(websocket: WebSocket, session: SessionState) -> None
         try:
             await _run_mock_session(websocket, session)
         finally:
-            await session_registry.delete(session.session_id)
+            # See the non-mock path below for why this sets disconnected_at
+            # instead of deleting outright.
+            session.disconnected_at = time.monotonic()
         return
 
     client = _get_client()
     hard_remaining = max(0.0, _SESSION_MAX_SECONDS - (time.monotonic() - session.created_at))
+    resume_transcript = list(session.transcript)
 
     try:
         async with client.aio.live.connect(
-            model=_VOICE_MODEL, config=_live_config(session.existing_profile, session.mode, session.language)
+            model=_VOICE_MODEL,
+            config=_live_config(session.existing_profile, session.mode, session.language, resume_transcript),
         ) as gemini_session:
-            await _send_greeting_trigger(gemini_session)
+            await _send_greeting_trigger(gemini_session, resumed=bool(resume_transcript))
             session.last_activity_at = time.monotonic()
 
             pumps_task = asyncio.ensure_future(_run_pumps(websocket, gemini_session, session, hard_remaining))
@@ -1171,4 +1288,11 @@ async def run_voice_session(websocket: WebSocket, session: SessionState) -> None
     finally:
         # Gemini session is torn down by the `async with` block's __aexit__ above
         # regardless of how the wait() above exits — stops audio billing promptly.
-        await session_registry.delete(session.session_id)
+        # Do NOT delete the registry entry here — an ordinary WS disconnect
+        # (network blip, real backgrounding past the client's debounce)
+        # should be resumable; only an explicit exit (POST
+        # /voice/session/cancel or /finalize in main.py) deletes the entry
+        # immediately. If one of those already ran, session_registry.delete()
+        # is idempotent and this just sets a field on an object no longer in
+        # the registry — harmless.
+        session.disconnected_at = time.monotonic()

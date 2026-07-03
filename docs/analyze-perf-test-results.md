@@ -9,7 +9,115 @@ See [`postman/README.md`](../postman/README.md) for how to run a
 measurement. See [`analyzePerfomanceImprovement.md`](analyzePerfomanceImprovement.md)
 for the change candidates being tested (#1-#5).
 
-**Environment note:** this machine has no local Application Default Credentials for
+## Real latency baseline — p50/p95 (2026-07-03)
+
+Everything below this section is single-change A/B testing (median of 3-5 runs,
+comparing a candidate against a baseline). This section is different: it's a
+**distribution**, not a comparison — measured against the current live `main`
+code on `shoplens2026-dev` (no candidate change under test), to answer the
+roadmap question "would raising `max_searches` / adding caching / etc. actually
+move the needle?" with real numbers instead of guesses.
+
+**Method:** `newman -n 20` against
+`https://ai-analyzer-115535290381.us-central1.run.app` (the same Cloud Run dev
+URL/environment as the rest of this doc), current live revision, `GEMINI_MODEL=gemini-2.5-flash`.
+Raw per-iteration data and the node script used to compute percentiles are in
+this session's scratchpad, not committed (they're just `newman`'s own JSON
+reporter output — reproducible by rerunning):
+
+```sh
+# /analyze — no cache on this path, fixed test image is fine as-is
+newman run shoplens-analyze-perf.postman_collection.json \
+  -e shoplens-dev-cloud.postman_environment.json \
+  --folder "1. Analyze - Fixed Test Image" -n 20 --reporters cli,json \
+  --reporter-json-export analyze-run.json
+
+# /identify — has a 30-min cache keyed by crop+country, so vary country per
+# iteration (see countries.json below) against a copy of the collection with
+# "country": "{{country}}" in place of the hardcoded "us" in that one request
+newman run <collection-with-country-templated>.json \
+  -e shoplens-dev-cloud.postman_environment.json \
+  -d countries.json \
+  --folder "2. Identify - Fixed Crop" -n 20 --reporters cli,json \
+  --reporter-json-export identify-run.json
+```
+
+`countries.json` is a 20-element array of `{"country": "<iso2>"}` objects
+(distinct codes, e.g. `us, gb, de, in, jp, ...`) — any set of 20+ distinct
+codes works, the point is just that each iteration hits a different cache key.
+
+**`/identify` (tap-to-identify, single Gemini description + one Lens call) — n=19, cache-miss only.**
+The endpoint has a 30-minute perceptual-hash+country cache (`analyzer.py:118`,
+`_perceptual_cache_key`) — running the fixed test crop 20x back-to-back mostly
+measured the cache, not the endpoint (iterations 2-20 of an initial unvaried
+run all landed at 51-63ms). Re-ran with `country` varied per iteration
+(`us,gb,de,in,jp,fr,ca,au,br,mx,it,es,nl,se,no,dk,fi,pl,kr,sg` via
+`--iteration-data`, a temporary parameterized copy of the collection — the
+committed collection is unchanged) so every call is a genuine cache miss.
+Dropped iteration 1 (`country=us`), which still hit a cache entry left warm by
+the earlier unvaried run.
+
+| | value |
+|---|---|
+| n | 19 |
+| min | 4.4s |
+| **p50** | **19.2s** |
+| **p95** | **26.4s** |
+| max | 26.4s |
+| errors | 0/20 |
+
+Real production repeat-tap latency (identical crop within 30 min, e.g. a user
+tapping the same on-screen item twice) is the cache-hit number instead:
+**~55ms median** (n=19, iterations 2-20 of the first unvaried run) — a real
+and large gap worth knowing, not just a testing artifact, since ML Kit's
+on-device dot tracking means the same physical item can generate repeated
+identical crops within a session.
+
+**`/analyze` (full multi-item detection + search) — n=20, `max_searches=5`
+(the harness's fixed test value — see caveat below).**
+
+| | value |
+|---|---|
+| n | 19 (1 excluded — see errors) |
+| min | 8.5s |
+| **p50 (all 19)** | **43.9s** |
+| **p50 (first 12, pre-quota-exhaustion)** | **49.3s** |
+| **p95** | **60.3s** |
+| max | 60.3s |
+| errors | 1/20 — Vertex AI `429 RESOURCE_EXHAUSTED` on iteration 9 (31.1s before failing) |
+
+**Caveats, read before using these numbers for a decision:**
+- **SerpAPI quota exhausted mid-batch** (iterations 13-20, confirmed via
+  `SERP_QUOTA_EXCEEDED` in each response's `warnings`) — this session's
+  cumulative testing (the two `/identify` batches plus this one) ran out the
+  same shared key documented as exhausting easily elsewhere in this file. The
+  quota-affected tail's p50 is *lower* (27.4s vs 49.3s clean) because failed
+  searches fail fast instead of doing real Lens/Shopping lookups — **don't read
+  the full-batch p50 as "typical," it's biased down by quota failures**; use
+  the pre-quota-exhaustion clean p50 (49.3s) as the more honest number. p95
+  is unaffected either way (the slowest run, iteration 1, happened before
+  quota ran out).
+- **This measures `max_searches=5`, not the production default of 2**
+  (`docs/consistency/progress.md`'s "Decisions Needed" #2) — the perf harness
+  has always hardcoded 5 for A/B consistency across the candidate rows below.
+  These numbers answer "how slow is `/analyze` today," not "what would raising
+  the budget from 2 to 5 cost" — that needs a direct `max_searches=2` vs `=5`
+  comparison run, not done here (quota was already exhausted by this point in
+  the session). Recommended as the next concrete measurement before deciding #2.
+- **1/20 real error rate** under this burst pattern (20 back-to-back calls) —
+  a genuine Vertex AI rate-limit response, not a code bug. Worth knowing for
+  the "graceful fallback when quota's exhausted" backlog item, which so far
+  only discusses SerpAPI quota, not Vertex AI's.
+
+**What this unblocks:** the "Decisions Needed" #2 search-budget call now has a
+real cost baseline to compare against (49.3s p50 / 60.3s p95 at budget=5); the
+medium-term "shared caching" item has direct evidence for its payoff (cache
+hit ~55ms vs. cache miss ~19.2s p50 on `/identify` alone); the "graceful
+fallback on quota exhaustion" item now has both a real trigger frequency
+(quota died partway through 20 calls in one session) and a second, previously
+undiscussed failure mode (Vertex AI 429, 1/20 in this batch) to design around.
+
+## Summary (all 5 candidates tested 2026-06-20) this machine has no local Application Default Credentials for
 `shoplens-dev-499700` (Vertex AI / GCS / SerpAPI all need real cloud calls), so
 `services/ai-analyzer` cannot run as a bare local process here. Each row below was
 measured by deploying the exact code-under-test to the existing Cloud Run dev service

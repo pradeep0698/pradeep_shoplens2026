@@ -28,6 +28,24 @@
       "value": "stand mixer",
       "type": "default",
       "description": "Item name used in product-matcher debug requests"
+    },
+    {
+      "key": "test_thumbnail_url",
+      "value": "https://encrypted-tbn0.gstatic.com/shopping?q=tbn:example",
+      "type": "default",
+      "description": "Google Shopping CDN thumbnail URL used by GET /thumbnail (grab a real one from a /match or /search response's image_url field)"
+    },
+    {
+      "key": "image_base64",
+      "value": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAoHBwgHBgoICAgLCgoLDhgQDg0NDh0VFhEYIx8lJCIfIiEmKzcvJik0KSEiMEExNDk7Pj4+JS5ESUM8SDc9Pjv/2wBDAQoLCw4NDhwQEBw7KCIoOzs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozv/wAARCAAgACADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDKooorzD7gKKKKACiiigAooooA/9k=",
+      "type": "default",
+      "description": "Tiny valid solid-color JPEG (base64) so Analyze/Identify base64 requests exercise the real decode path instead of failing on placeholder text. Swap in a real product photo's base64 to test actual detection."
+    },
+    {
+      "key": "identify_crop_base64",
+      "value": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAoHBwgHBgoICAgLCgoLDhgQDg0NDh0VFhEYIx8lJCIfIiEmKzcvJik0KSEiMEExNDk7Pj4+JS5ESUM8SDc9Pjv/2wBDAQoLCw4NDhwQEBw7KCIoOzs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozv/wAARCAAgACADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDKooorzD7gKKKKACiiigAooooA/9k=",
+      "type": "default",
+      "description": "Tiny valid solid-color JPEG (base64) standing in for an ML Kit on-device crop. Swap in a real cropped product photo's base64 to test actual identification."
     }
   ],
   "item": [
@@ -119,7 +137,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"image_url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/320px-Cat03.jpg\",\n  \"transcript\": \"\",\n  \"ignore_terms\": [],\n  \"query\": \"\",\n  \"country\": \"us\",\n  \"max_searches\": 5\n}",
+              "raw": "{\n  \"image_url\": \"https://picsum.photos/id/1080/640/480.jpg\",\n  \"transcript\": \"\",\n  \"ignore_terms\": [],\n  \"query\": \"\",\n  \"country\": \"us\",\n  \"max_searches\": 5\n}",
               "options": { "raw": { "language": "json" } }
             },
             "url": {
@@ -195,7 +213,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"image_url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/320px-Cat03.jpg\",\n  \"transcript\": \"\",\n  \"ignore_terms\": [],\n  \"query\": \"\",\n  \"country\": \"us\",\n  \"max_searches\": 5\n}",
+              "raw": "{\n  \"image_url\": \"https://picsum.photos/id/1080/640/480.jpg\",\n  \"transcript\": \"\",\n  \"ignore_terms\": [],\n  \"query\": \"\",\n  \"country\": \"us\",\n  \"max_searches\": 5\n}",
               "options": { "raw": { "language": "json" } }
             },
             "url": {
@@ -242,15 +260,27 @@
           "response": []
         },
         {
-          "name": "Identify - Image URL",
+          "name": "Identify - Rejects image_url (expected 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status 400 - image_data required', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ],
           "request": {
+            "description": "/identify only accepts image_data (base64) — the on-device ML Kit crop is already selected, so there's no URL to fetch. This request intentionally omits image_data to verify the endpoint rejects image_url-only payloads with 400.",
             "method": "POST",
             "header": [
               { "key": "Content-Type", "value": "application/json" }
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"image_url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/320px-Cat03.jpg\",\n  \"query\": \"\",\n  \"ignore_terms\": [],\n  \"country\": \"us\",\n  \"max_searches\": 5\n}",
+              "raw": "{\n  \"image_url\": \"https://picsum.photos/id/1080/640/480.jpg\",\n  \"query\": \"\",\n  \"ignore_terms\": [],\n  \"country\": \"us\",\n  \"max_searches\": 5\n}",
               "options": { "raw": { "language": "json" } }
             },
             "url": {
@@ -310,6 +340,42 @@
               "raw": "{{product_matcher_url}}/match",
               "host": ["{{product_matcher_url}}"],
               "path": ["match"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Search Products by Query",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"stand mixer\",\n  \"max_results\": 5\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{product_matcher_url}}/search",
+              "host": ["{{product_matcher_url}}"],
+              "path": ["search"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Thumbnail (CORS Proxy)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{product_matcher_url}}/thumbnail?url={{test_thumbnail_url}}",
+              "host": ["{{product_matcher_url}}"],
+              "path": ["thumbnail"],
+              "query": [
+                { "key": "url", "value": "{{test_thumbnail_url}}" }
+              ]
             }
           },
           "response": []
@@ -603,7 +669,7 @@
                 "header": [{ "key": "Content-Type", "value": "application/json" }],
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"image_url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/3/3a/Cat03.jpg/320px-Cat03.jpg\",\n  \"transcript\": \"\",\n  \"ignore_terms\": [],\n  \"query\": \"\",\n  \"country\": \"us\",\n  \"max_searches\": 3\n}",
+                  "raw": "{\n  \"image_url\": \"https://picsum.photos/id/1080/640/480.jpg\",\n  \"transcript\": \"\",\n  \"ignore_terms\": [],\n  \"query\": \"\",\n  \"country\": \"us\",\n  \"max_searches\": 3\n}",
                   "options": { "raw": { "language": "json" } }
                 },
                 "url": {

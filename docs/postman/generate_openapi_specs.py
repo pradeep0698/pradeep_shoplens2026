@@ -24,11 +24,11 @@ SERVICES = ["ai-analyzer", "product-matcher", "state-manager", "voice-assistant"
 
 CLOUD_RUN_URLS = {
     "shoplens-dev": {
-        "ai-analyzer":      "https://ai-analyzer-935092313069.us-central1.run.app",
-        "product-matcher":  "https://product-matcher-935092313069.us-central1.run.app",
-        "state-manager":    "https://state-manager-935092313069.us-central1.run.app",
-        "voice-assistant":  "https://voice-assistant-935092313069.us-central1.run.app",
-        "pubsub-worker":    "https://pubsub-worker-935092313069.us-central1.run.app",
+        "ai-analyzer":      "https://ai-analyzer-115535290381.us-central1.run.app",
+        "product-matcher":  "https://product-matcher-115535290381.us-central1.run.app",
+        "state-manager":    "https://state-manager-115535290381.us-central1.run.app",
+        "voice-assistant":  "https://voice-assistant-115535290381.us-central1.run.app",
+        "pubsub-worker":    "https://pubsub-worker-115535290381.us-central1.run.app",
     },
     "cookshop-dev": {
         "ai-analyzer":      "https://ai-analyzer-82592393149.us-central1.run.app",
@@ -101,8 +101,7 @@ def main():
         print(f"  {service} ... ", end="", flush=True)
         try:
             if args.env == "local":
-                port = LOCAL_PORTS[service]
-                spec = fetch_spec(f"http://localhost:{port}")
+                spec = generate_local(service)
             else:
                 base_url = CLOUD_RUN_URLS[args.env][service]
                 spec = fetch_spec(base_url)

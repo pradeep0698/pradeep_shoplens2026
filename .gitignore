@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 .env.cookshop-dev
+.env.shoplens2026-dev
 # .env.local.example is intentionally tracked (it's a template)
 
 # IDE & editor
@@ -55,7 +56,6 @@ frontend/.eslintrc.json
 # Credentials & secrets — block all JSON, then allow known-safe files
 *.json
 !services/*/catalog.json
-!postman/*.json
 !docs/postman/*.json
 !docs/api-specs/*.json
 !frontend/package.json
@@ -67,6 +67,8 @@ service-account.json
 credentials.json
 infra/*.json
 github-secrets-dev
+GoogleService-Info*.plist
+config/firebase/
 
 # GCP & Cloud resources
 .firebase/
@@ -86,6 +88,9 @@ Thumbs.db
 plan/
 PUSH_CHECKLIST.md
 frontend_old/
+
+# Deploy tracking
+.cookshop-dev-last-deploy
 
 # Flutter mobile app
 mobile/.dart_tool/

@@ -32,6 +32,27 @@ C4Container
     Rel(analyzer, gcs_store, "upload_blob / public URL")
     Rel(analyzer, serpapi, "Lens search + Shopping search")
     Rel(ingest, analyzer, "analyze_media (GCS video URI)")
+
+    %% Mobile app — teal/cyan
+    UpdateElementStyle(mobile, "#0097A7", "#ffffff", "#006978")
+
+    %% Backend Cloud Run services — green
+    UpdateElementStyle(analyzer, "#2E7D32", "#ffffff", "#1b5e20")
+    UpdateElementStyle(matcher, "#2E7D32", "#ffffff", "#1b5e20")
+    UpdateElementStyle(voice, "#2E7D32", "#ffffff", "#1b5e20")
+
+    %% Live Ingest — greyed out (not on primary paths)
+    UpdateElementStyle(ingest, "#9E9E9E", "#ffffff", "#757575")
+
+    %% Databases — purple
+    UpdateElementStyle(firestore, "#6A1B9A", "#ffffff", "#4a148c")
+    UpdateElementStyle(gcs_store, "#6A1B9A", "#ffffff", "#4a148c")
+
+    %% External systems — amber/orange
+    UpdateElementStyle(mlkit, "#E65100", "#ffffff", "#bf360c")
+    UpdateElementStyle(gemini, "#E65100", "#ffffff", "#bf360c")
+    UpdateElementStyle(serpapi, "#E65100", "#ffffff", "#bf360c")
+    UpdateElementStyle(firebase_auth, "#E65100", "#ffffff", "#bf360c")
 ```
 
 ## Key points

@@ -30,30 +30,6 @@ class VisionResult {
   }
 }
 
-// ── Tap-identify UI states ────────────────────────────────────────────────────
-
-sealed class TapIdentifyState {
-  const TapIdentifyState();
-}
-
-final class TapIdentifyIdle extends TapIdentifyState {
-  const TapIdentifyIdle();
-}
-
-final class TapIdentifyLoading extends TapIdentifyState {
-  const TapIdentifyLoading();
-}
-
-final class TapIdentifySuccess extends TapIdentifyState {
-  const TapIdentifySuccess({this.productName});
-  final String? productName;
-}
-
-final class TapIdentifyError extends TapIdentifyState {
-  const TapIdentifyError(this.message);
-  final String message;
-}
-
 // ── Service contract ──────────────────────────────────────────────────────────
 
 /// Implement this to swap in any vision backend (Cloud Vision, Vertex AI, etc.)

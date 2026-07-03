@@ -3,9 +3,28 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/widgets.dart';
+import 'package:image/image.dart' as img;
 
 // Same encoding the web app applies via FileReader before calling /analyze
 String encodeImageToBase64(Uint8List bytes) => base64Encode(bytes);
+
+/// Encodes a decoded [ui.Image] as JPEG bytes. dart:ui's [ui.Image.toByteData]
+/// has no JPEG format, so pixels are read out as raw RGBA and re-encoded with
+/// the pure-Dart `image` package. Used for tap-crop uploads: the server
+/// re-encodes every crop to JPEG anyway, so sending PNG from the client only
+/// cost upload bytes for no benefit.
+Future<Uint8List> encodeUiImageToJpeg(ui.Image image, {int quality = 85}) async {
+  final bd = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+  if (bd == null) throw Exception('Image encoding failed (toByteData returned null)');
+  final rgba = img.Image.fromBytes(
+    width:       image.width,
+    height:      image.height,
+    bytes:       bd.buffer,
+    numChannels: 4,
+    order:       img.ChannelOrder.rgba,
+  );
+  return img.encodeJpg(rgba, quality: quality);
+}
 
 // AI Analyzer accepts: image/jpeg, image/png, image/webp
 String getMimeType(String path) {
@@ -27,7 +46,7 @@ String getMimeType(String path) {
 /// to be landscape (EXIF not applied on some devices), the function falls back
 /// to rotating the coordinate mapping 90° so the crop is still correct.
 ///
-/// Returns PNG bytes (accepted by /analyze and /identify backends).
+/// Returns JPEG bytes (accepted by /analyze and /identify backends).
 Future<Uint8List?> cropToMlKitBox(
   Uint8List imageBytes,
   Rect box,
@@ -89,9 +108,9 @@ Future<Uint8List?> cropToMlKitBox(
       Paint(),
     );
     final cropped = await recorder.endRecording().toImage(cw.round(), ch.round());
-    final bd = await cropped.toByteData(format: ui.ImageByteFormat.png);
+    final jpeg = await encodeUiImageToJpeg(cropped);
     cropped.dispose();
-    return bd?.buffer.asUint8List();
+    return jpeg;
   } finally {
     srcImage.dispose();
   }

@@ -3,6 +3,8 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import 'image_utils.dart';
+
 /// Coordinate translation and image-cropping helpers for [TapTargetDetector].
 /// Uses only [dart:ui] — no additional packages required.
 final class TapCropUtils {
@@ -105,7 +107,7 @@ final class TapCropUtils {
     );
   }
 
-  /// Extracts an arbitrary rectangular PNG crop from [imageBytes]
+  /// Extracts an arbitrary rectangular JPEG crop from [imageBytes]
   /// using [rect] in raw image pixel coordinates.
   static Future<Uint8List> cropRect({
     required Uint8List imageBytes,
@@ -137,10 +139,8 @@ final class TapCropUtils {
 
     final picture = recorder.endRecording();
     final cropped = await picture.toImage(w, h);
-    final bd      = await cropped.toByteData(format: ui.ImageByteFormat.png);
+    final jpeg    = await encodeUiImageToJpeg(cropped);
     cropped.dispose();
-
-    if (bd == null) throw Exception('Image encoding failed (toByteData returned null)');
-    return bd.buffer.asUint8List();
+    return jpeg;
   }
 }

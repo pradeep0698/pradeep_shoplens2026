@@ -33,7 +33,7 @@ class TapIdentifyUseCase {
     // detection pass, making it faster than the full /analyze pipeline.
     final analyzeResponse = await _analyzer.identifyCrop(AnalyzeRequest(
       imageData:          encodeImageToBase64(croppedBytes),
-      imageMimeType:      'image/png',
+      imageMimeType:      'image/jpeg',
       ignoreTerms:        ignoreTerms,
       transcript:         '',
       query:              query,

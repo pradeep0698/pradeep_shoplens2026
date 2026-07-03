@@ -6,13 +6,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
-import '../../core/services/vision_service.dart';
 import '../../core/utils/image_utils.dart';
 import '../../core/utils/product_ranker.dart';
-import '../../core/utils/session_id.dart';
 import '../../data/models/user_profile.dart';
 import '../../data/repositories/profile_repository.dart';
-import '../../domain/usecases/tap_identify_usecase.dart';
 import '../../domain/usecases/video_analyze_usecase.dart';
 import 'video_player_screen.dart';
 import '../providers/admin_provider.dart';
@@ -37,7 +34,6 @@ class MainScreen extends ConsumerStatefulWidget {
 }
 
 class _MainScreenState extends ConsumerState<MainScreen> {
-  TapIdentifyState _tapState = const TapIdentifyIdle();
   final _tapKey = GlobalKey<TapTargetDetectorState>();
   bool  _productCheckSettled = false;
   Timer? _productCheckTimer;
@@ -78,10 +74,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     ref.listen(pipelineProvider, (prev, next) {
       if (next.status == PipelineStatus.analyzing) {
         _productCheckTimer?.cancel();
-        setState(() {
-          _tapState = const TapIdentifyIdle();
-          _productCheckSettled = false;
-        });
+        setState(() => _productCheckSettled = false);
       }
       if (next.status == PipelineStatus.success &&
           prev?.status != PipelineStatus.success) {
@@ -180,6 +173,8 @@ class _MainScreenState extends ConsumerState<MainScreen> {
           PipelineStatusBar(
             status:        pipeline.status,
             errorMessage:  pipeline.errorMessage,
+            errorCode:     pipeline.errorCode,
+            isRetryable:   pipeline.isRetryable,
             foundProducts: pipeline.status == PipelineStatus.success
                 ? (shoppingList.value?.isNotEmpty == true
                     ? true
@@ -199,11 +194,11 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                   child: Stack(
                     children: [
                       TapTargetDetector(
-                        key:            _tapKey,
-                        imageBytes:     pipeline.imageBytes!,
-                        boxFit:         BoxFit.contain,
-                        onIdentify:     _onTapIdentify,
-                        onStateChanged: (state) => setState(() => _tapState = state),
+                        key:               _tapKey,
+                        imageBytes:        pipeline.imageBytes!,
+                        boxFit:            BoxFit.contain,
+                        onIdentify:        _onTapIdentify,
+                        onSelectionChanged: () => setState(() {}),
                         child: Image.memory(
                           pipeline.imageBytes!,
                           width: double.infinity,
@@ -224,9 +219,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                 ),
               ),
             ),
-            _TapResultBar(state: _tapState),
-
-            if (!isBusy && _tapState is! TapIdentifyLoading)
+            if (!isBusy)
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
                 child: Center(
@@ -577,78 +570,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         ),
       );
 
-  Future<String?> _onTapIdentify(Uint8List croppedBytes) async {
-    final user    = ref.read(authStateProvider).value;
-    final profile = ref.read(profileProvider).value ?? const UserProfile();
-    if (user == null) return null;
+  Future<void> _onTapIdentify(Uint8List croppedBytes) =>
+      ref.read(pipelineProvider.notifier).identifyTappedObject(croppedBytes);
 
-    return ref.read(tapIdentifyUseCaseProvider).identify(
-      croppedBytes:       croppedBytes,
-      sessionId:          getSessionId(user.uid),
-      ignoreTerms:        profile.ignoreTerms,
-      preferenceTerms:    profile.preferenceTerms,
-      shoppingCategories: profile.shoppingCategories,
-      country:            profile.country.isEmpty ? null : profile.country,
-    );
-  }
-
-}
-
-// ── Tap-identify result strip ─────────────────────────────────────────────────
-
-class _TapResultBar extends StatelessWidget {
-  const _TapResultBar({required this.state});
-  final TapIdentifyState state;
-
-  @override
-  Widget build(BuildContext context) {
-    return switch (state) {
-      TapIdentifyIdle()    => const SizedBox(height: 8),
-      TapIdentifyLoading() => const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          child: Row(
-            children: [
-              SizedBox(
-                width: 12,
-                height: 12,
-                child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF34D399)),
-              ),
-              SizedBox(width: 8),
-              Text('Identifying…', style: TextStyle(color: Color(0xFF64748B), fontSize: 12)),
-            ],
-          ),
-        ),
-      TapIdentifySuccess(productName: final name) => Padding(
-          padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
-          child: name != null
-              ? Row(
-                  children: [
-                    const Icon(Icons.check_circle_outline, size: 14, color: Color(0xFF34D399)),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        'Added: $name',
-                        style: const TextStyle(color: Color(0xFF6EE7B7), fontSize: 12),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                )
-              : const Text(
-                  'No matching product found',
-                  style: TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
-                ),
-        ),
-      TapIdentifyError(message: final msg) => Padding(
-          padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
-          child: Text(
-            'Identify failed: $msg',
-            style: const TextStyle(color: Color(0xFFF87171), fontSize: 11),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-    };
-  }
 }

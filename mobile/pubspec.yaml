@@ -32,6 +32,7 @@ dependencies:
   # Image
   image_picker:         ^1.1.2
   cached_network_image: ^3.3.1
+  image:                ^4.9.1
 
   # Live scan — real-time camera + on-device object detection
   camera:                          ^0.11.0+2

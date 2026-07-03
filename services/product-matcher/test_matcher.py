@@ -4,6 +4,18 @@ import main
 import matcher
 
 
+def test_session_retry_does_not_wrap_read_timeouts():
+    # read=False (the literal bool) is required, NOT 0 or None — both of
+    # those still route a read-timeout through urllib3's retry-accounting,
+    # which re-raises it wrapped as requests.exceptions.ConnectionError even
+    # though zero retries actually happen, silently breaking any caller that
+    # catches requests.exceptions.Timeout specifically. Mirrors
+    # services/ai-analyzer's identical regression, caught in production logs
+    # on 2026-07-03.
+    adapter = matcher._session.get_adapter("https://serpapi.com")
+    assert adapter.max_retries.read is False
+
+
 class _FakeResponse:
     def __init__(self, payload: dict, status: int = 200):
         self._payload = payload

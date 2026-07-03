@@ -107,14 +107,26 @@ def _is_serp_quota_error(data: dict) -> bool:
 
 # A bare requests.Session retries nothing — one dropped connection or 5xx
 # blip fails the whole call. SerpAPI GETs are idempotent, so retrying is
-# safe. Deliberately NOT retrying on read-timeout (`read=0`): a call that
-# already read for the full timeout with no response is the slow-server
-# case, not a blip — retrying it would double the wait (e.g. 60s -> 120s)
-# for a call that's likely to time out again. Only fast-failing connect
-# errors and 429/5xx responses get retried.
+# safe. Deliberately NOT retrying on read-timeout: a call that already read
+# for the full timeout with no response is the slow-server case, not a
+# blip — retrying it would double the wait (e.g. 60s -> 120s) for a call
+# that's likely to time out again. Only fast-failing connect errors and
+# 429/5xx responses get retried.
+#
+# `read=False` (the literal bool, NOT `0` or `None`) is required here, not
+# just cosmetic — verified empirically, since this bit urllib3 in production
+# on 2026-07-03. `read=0`/`read=None` still route a read-timeout through
+# urllib3's retry-accounting path, which re-raises it wrapped as
+# `requests.exceptions.ConnectionError` (via urllib3's MaxRetryError) even
+# though zero retries actually happen. That silently breaks any caller
+# catching `requests.exceptions.Timeout` specifically (e.g. _google_lens's
+# `_tls.lens_timed_out` flag, which gates the /identify recovery path) —
+# those calls no longer matched and always fell through to the generic
+# exception branch. Only `read=False` makes urllib3 re-raise the original,
+# unwrapped exception instead of going through the retry/wrap machinery.
 def _build_session() -> _req.Session:
     retry = Retry(
-        total=2, connect=2, read=0, status=2,
+        total=2, connect=2, read=False, status=2,
         backoff_factor=0.3,
         status_forcelist=frozenset({429, 502, 503, 504}),
         allowed_methods=frozenset({"GET"}),

@@ -1,6 +1,19 @@
 import analyzer
 
 
+def test_session_retry_does_not_wrap_read_timeouts():
+    # read=False (the literal bool) is required, NOT 0 or None — both of
+    # those still route a read-timeout through urllib3's retry-accounting,
+    # which re-raises it wrapped as requests.exceptions.ConnectionError even
+    # though zero retries actually happen. That silently breaks any caller
+    # catching requests.exceptions.Timeout specifically — e.g. _google_lens's
+    # `_tls.lens_timed_out` flag, which gates the /identify recovery path.
+    # Regression: broke exactly this way in production on 2026-07-03 with
+    # read=0; caught by comparing live logs before/after this fix.
+    adapter = analyzer._session.get_adapter("https://serpapi.com")
+    assert adapter.max_retries.read is False
+
+
 def test_normalize_country_defaults_empty_to_us():
     assert analyzer.normalize_country(None) == "us"
     assert analyzer.normalize_country("") == "us"

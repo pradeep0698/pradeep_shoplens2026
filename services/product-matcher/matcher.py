@@ -32,11 +32,19 @@ MAX_RESULTS_PER_ITEM = int(os.environ.get("MAX_RESULTS_PER_ITEM", "15"))
 # A bare requests.Session retries nothing — one dropped connection or 5xx
 # blip fails the whole call. Mirrors services/ai-analyzer/analyzer.py's
 # _build_session: idempotent GETs are safe to retry, but NOT on read-timeout
-# (`read=0`) — a call that already read for the full timeout with no response
-# is the slow-server case, not a blip, and retrying would just double the wait.
+# — a call that already read for the full timeout with no response is the
+# slow-server case, not a blip, and retrying would just double the wait.
+#
+# `read=False` (the literal bool, NOT `0` or `None`) is required, not just
+# cosmetic — verified empirically. `read=0`/`read=None` still route a
+# read-timeout through urllib3's retry-accounting path, which re-raises it
+# wrapped as `requests.exceptions.ConnectionError` even though zero retries
+# actually happen — silently breaking any caller that catches
+# `requests.exceptions.Timeout` specifically. Only `read=False` makes
+# urllib3 re-raise the original, unwrapped exception.
 def _build_session() -> requests.Session:
     retry = Retry(
-        total=2, connect=2, read=0, status=2,
+        total=2, connect=2, read=False, status=2,
         backoff_factor=0.3,
         status_forcelist=frozenset({429, 502, 503, 504}),
         allowed_methods=frozenset({"GET"}),

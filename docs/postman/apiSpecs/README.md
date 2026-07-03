@@ -32,6 +32,28 @@ the real code paths:
 
 ## Viewing it
 
+### Option A — hosted on GitHub Pages (recommended, always current)
+
+`.github/workflows/pages.yml` publishes this folder to GitHub Pages
+automatically on every push to `main` that touches
+`docs/postman/apiSpecs/**`. Once Pages is enabled (one-time repo setting,
+see below):
+
+**https://shoplens2026ai.github.io/shoplens2026/**
+
+Since this repo is private, whether that URL is restricted to
+collaborators/org members or requires a paid GitHub plan for private-repo
+Pages depends on the org's billing plan — check under **Settings → Pages**
+if it doesn't load.
+
+**One-time setup (manual, in the browser):** go to
+`https://github.com/shoplens2026ai/shoplens2026/settings/pages` → under
+**Build and deployment → Source**, select **GitHub Actions** (not "Deploy
+from a branch"). After that, the workflow handles every future deploy —
+nothing else to configure.
+
+### Option B — locally
+
 Open `index.html` in a browser — it embeds Swagger UI with a dropdown to
 switch between all 5 services, rendering every endpoint's request body,
 response schema/example per status code, and field descriptions.

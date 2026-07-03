@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -66,17 +67,27 @@ _CORS = {"Access-Control-Allow-Origin": "*"}
 
 @app.on_event("startup")
 async def _log_startup_config() -> None:
+    # Fingerprint, not the key itself — a short SHA-256 prefix is safe to log
+    # (irreversible, useless for auth) but still lets you confirm across
+    # environments/deployments that the SERPAPI_KEY actually loaded is the one
+    # you expect, without ever putting real credential material in Cloud
+    # Logging. Length is logged too since 0 is an unambiguous misconfiguration.
+    _key = os.environ.get("SERPAPI_KEY", "")
+    _key_fp = hashlib.sha256(_key.encode()).hexdigest()[:8] if _key else "(empty)"
     logger.info(
         "ai-analyzer starting | project_id=%s location=%s model=%s "
-        "gcs_lens_bucket=%s serpapi_key=%s lens_timeout=%ss skip_gemini=%s",
+        "gcs_lens_bucket=%s serpapi_key_len=%d serpapi_key_fp=%s lens_timeout=%ss skip_gemini=%s",
         os.environ.get("PROJECT_ID") or "(unset)",
         os.environ.get("LOCATION", "us-central1"),
         get_active_model(),
         os.environ.get("GCS_LENS_BUCKET") or "(unset)",
-        "set" if os.environ.get("SERPAPI_KEY") else "(unset)",
+        len(_key),
+        _key_fp,
         os.environ.get("LENS_TIMEOUT_SECONDS", "60"),
         os.environ.get("IDENTIFY_SKIP_GEMINI", "true"),
     )
+    if not _key:
+        logger.error("SERPAPI_KEY is empty or unset — every SerpAPI call will fail")
 
 
 @app.exception_handler(Exception)

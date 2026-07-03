@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import os
 from typing import List
@@ -42,6 +43,23 @@ app = FastAPI(
 )
 
 _CORS = {"Access-Control-Allow-Origin": "*"}
+
+
+@app.on_event("startup")
+async def _log_startup_config() -> None:
+    # Fingerprint, not the key itself — a short SHA-256 prefix is safe to log
+    # (irreversible, useless for auth) but still lets you confirm across
+    # environments/deployments that the SERPAPI_KEY actually loaded is the one
+    # you expect, without ever putting real credential material in Cloud
+    # Logging. Length is logged too since 0 is an unambiguous misconfiguration.
+    _key = os.environ.get("SERPAPI_KEY", "")
+    _key_fp = hashlib.sha256(_key.encode()).hexdigest()[:8] if _key else "(empty)"
+    logger.info(
+        "product-matcher starting | serpapi_key_len=%d serpapi_key_fp=%s",
+        len(_key), _key_fp,
+    )
+    if not _key:
+        logger.error("SERPAPI_KEY is empty or unset — every SerpAPI call will fail")
 
 
 @app.exception_handler(Exception)

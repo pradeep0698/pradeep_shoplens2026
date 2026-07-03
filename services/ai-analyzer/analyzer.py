@@ -275,10 +275,38 @@ def _build_preference_block(
     return "".join(lines)
 
 
-def _preference_sort_key(item: dict, preference_terms: list[str], shopping_categories: list[str]) -> tuple:
-    """Higher-priority items sort first. Used to pick which detected items get
-    a Lens search when there are more items than max_searches allows — without
-    this, truncation is an arbitrary function of Gemini's listing order.
+def _term_matches(term: str, name: str) -> bool:
+    """Case-insensitive substring match with naive singular/plural tolerance —
+    a preference term typed as "laptops" should match an item name containing
+    "laptop" and vice versa. Handles the common English trailing-s plural
+    without pulling in a stemming library; not exhaustive (won't handle
+    "watches" -> "watch"-style -es plurals), but covers the common case."""
+    term = term.lower()
+    if term in name:
+        return True
+    if term.endswith("s") and term[:-1] in name:
+        return True
+    if not term.endswith("s") and (term + "s") in name:
+        return True
+    return False
+
+
+def _preference_score(item: dict, preference_terms: list[str], shopping_categories: list[str]) -> int:
+    """Higher score sorts first. Used to pick which detected items get a Lens
+    search when there are more items than max_searches allows — without this,
+    truncation is an arbitrary function of Gemini's listing order.
+
+    Additive, not lexicographic: a category hit and each matching preference
+    term each contribute one point. A previous version used a (category_hit,
+    preference_hit) tuple sort key, which meant ANY category match — even with
+    zero preference matches — ranked above EVERY item with a preference match
+    but no category match. That silently made an explicit, specific user
+    preference (e.g. "Smart watch") powerless against a generic category
+    match (e.g. "Electronics" catching a laptop), which is backwards — a
+    direct preference-term hit is at least as strong a signal as a category
+    hit. Summing lets an item that matches on both outrank one that matches
+    on only one, without either dimension being able to unconditionally
+    dominate the other.
 
     Category matching goes through _CATEGORY_KEYWORDS (same keyword lists
     _infer_category uses) rather than a literal substring check — a category
@@ -288,10 +316,8 @@ def _preference_sort_key(item: dict, preference_terms: list[str], shopping_categ
     category_hit = any(
         kw in name for cat in shopping_categories for kw in _CATEGORY_KEYWORDS.get(cat, [])
     )
-    preference_hit = any(term.lower() in name for term in preference_terms)
-    # False < True, so "not hit" sorts after "hit" when negated to an int and
-    # used ascending — 0 (matched) before 1 (unmatched).
-    return (0 if category_hit else 1, 0 if preference_hit else 1)
+    preference_matches = sum(1 for term in preference_terms if _term_matches(term, name))
+    return (1 if category_hit else 0) + preference_matches
 
 
 def _prioritize_items(
@@ -303,8 +329,9 @@ def _prioritize_items(
     cats = _normalize_terms(shopping_categories)
     if not prefs and not cats:
         return items_raw
-    # Stable sort — preserves Gemini's relative ordering within each priority tier.
-    return sorted(items_raw, key=lambda item: _preference_sort_key(item, prefs, cats))
+    # Stable sort — preserves Gemini's relative ordering within each score tier.
+    # Negate the score since sorted() is ascending and we want highest-first.
+    return sorted(items_raw, key=lambda item: -_preference_score(item, prefs, cats))
 
 
 def _parse_items_with_boxes(text: str) -> list[dict]:

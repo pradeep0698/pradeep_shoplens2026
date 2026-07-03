@@ -67,3 +67,78 @@ def test_prioritize_items_is_stable_within_priority_tier():
     ]
     result = analyzer._prioritize_items(items, preference_terms=[], shopping_categories=["Furniture"])
     assert [i["name"] for i in result] == ["chair one", "chair two", "lamp"]
+
+
+def test_prioritize_items_preference_only_match_beats_no_match_item():
+    # Regression test: a preference-only match (no category match) must still
+    # outrank an item matching neither signal — previously a strict
+    # (category_hit, preference_hit) tuple sort ranked ALL category matches
+    # above ALL preference-only matches, which was fine, but this case
+    # (preference-only vs nothing) already worked before and must keep working.
+    items = [
+        {"name": "plain ceramic coffee mug", "box": None},
+        {"name": "black rubber strap smart watch", "box": None},
+    ]
+    result = analyzer._prioritize_items(
+        items, preference_terms=["smart watch"], shopping_categories=["Electronics"],
+    )
+    assert result[0]["name"] == "black rubber strap smart watch"
+
+
+def test_prioritize_items_dual_match_beats_single_match():
+    # Regression test for the real bug: an item matching BOTH category and
+    # preference (score 2) should outrank items matching only one signal
+    # (score 1 each) — the two single-signal items are tied, so stable sort
+    # preserves their original relative order (keyboard was listed first).
+    items = [
+        {"name": "black plastic full-size keyboard", "box": None},          # category only -> 1
+        {"name": "black rubber strap smart watch", "box": None},            # preference only -> 1
+        {"name": "Nike black electronics gaming keyboard", "box": None},    # category + preference -> 2
+    ]
+    result = analyzer._prioritize_items(
+        items, preference_terms=["nike", "smart watch"], shopping_categories=["Electronics"],
+    )
+    assert [i["name"] for i in result] == [
+        "Nike black electronics gaming keyboard",
+        "black plastic full-size keyboard",
+        "black rubber strap smart watch",
+    ]
+
+
+def test_prioritize_items_category_no_longer_unconditionally_beats_preference():
+    # The exact real-world case this fix addresses: a category-only match
+    # (laptop, via the "Electronics" keyword list) must not automatically
+    # outrank a preference-only match (smart watch, via an explicit
+    # preference term) when neither matches on both signals — they should
+    # score equally (1 point each) and fall back to original relative order.
+    items = [
+        {"name": "black rubber strap smart watch", "box": None},   # preference only -> score 1
+        {"name": "black metal frame portable laptop", "box": None},  # category only -> score 1
+    ]
+    result = analyzer._prioritize_items(
+        items, preference_terms=["smart watch"], shopping_categories=["Electronics"],
+    )
+    # Equal scores (1 each) -> stable sort preserves original order (watch was first).
+    assert [i["name"] for i in result] == [
+        "black rubber strap smart watch",
+        "black metal frame portable laptop",
+    ]
+
+
+def test_term_matches_handles_plural_and_singular():
+    assert analyzer._term_matches("laptops", "black metal frame portable laptop") is True
+    assert analyzer._term_matches("laptop", "grey metal ergonomic laptop stand") is True
+    assert analyzer._term_matches("nike", "nike black running shoes") is True
+    assert analyzer._term_matches("laptops", "wireless mouse") is False
+
+
+def test_preference_score_sums_category_and_multiple_preference_matches():
+    item = {"name": "nike black electronics gaming laptop"}
+    # category hit (laptop) + 2 preference hits (nike, laptops~laptop) = 3
+    assert analyzer._preference_score(item, ["nike", "laptops"], ["Electronics"]) == 3
+    # category hit only = 1
+    assert analyzer._preference_score(item, [], ["Electronics"]) == 1
+    # single preference hit only = 1
+    assert analyzer._preference_score(item, ["nike"], []) == 1
+    # no hits = 0
+    assert analyzer._preference_score({"name": "plain white mug"}, ["nike"], ["Electronics"]) == 0

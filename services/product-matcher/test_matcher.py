@@ -239,6 +239,54 @@ def test_match_products_prioritizes_preference_terms_under_cap(monkeypatch):
     assert result["currency"] == "USD"
 
 
+def test_prioritize_items_category_no_longer_unconditionally_beats_preference():
+    # Regression test for a real bug found in production testing: a
+    # category-only match (laptop, via the "Electronics" keyword list) must
+    # not automatically outrank a preference-only match (smart watch, via an
+    # explicit preference term) — they should score equally (1 point each)
+    # and fall back to original relative order, not have category strictly
+    # dominate preference.
+    items = [
+        "black rubber strap smart watch",     # preference only -> score 1
+        "black metal frame portable laptop",  # category only -> score 1
+    ]
+    result = matcher._prioritize_items(
+        items, preference_terms=["smart watch"], shopping_categories=["Electronics"],
+    )
+    assert result == ["black rubber strap smart watch", "black metal frame portable laptop"]
+
+
+def test_prioritize_items_dual_match_beats_single_match():
+    items = [
+        "black plastic full-size keyboard",          # category only -> 1
+        "black rubber strap smart watch",            # preference only -> 1
+        "Nike black electronics gaming keyboard",    # category + preference -> 2
+    ]
+    result = matcher._prioritize_items(
+        items, preference_terms=["nike", "smart watch"], shopping_categories=["Electronics"],
+    )
+    assert result == [
+        "Nike black electronics gaming keyboard",
+        "black plastic full-size keyboard",
+        "black rubber strap smart watch",
+    ]
+
+
+def test_term_matches_handles_plural_and_singular():
+    assert matcher._term_matches("laptops", "black metal frame portable laptop") is True
+    assert matcher._term_matches("laptop", "grey metal ergonomic laptop stand") is True
+    assert matcher._term_matches("nike", "nike black running shoes") is True
+    assert matcher._term_matches("laptops", "wireless mouse") is False
+
+
+def test_item_score_sums_category_and_multiple_preference_matches():
+    item = "nike black electronics gaming laptop"
+    assert matcher._item_score(item, ["nike", "laptops"], ["electronics"]) == 3
+    assert matcher._item_score(item, [], ["electronics"]) == 1
+    assert matcher._item_score(item, ["nike"], []) == 1
+    assert matcher._item_score("plain white mug", ["nike"], ["electronics"]) == 0
+
+
 def test_currency_for_country_known_and_default():
     assert matcher.currency_for_country("gb") == "GBP"
     assert matcher.currency_for_country("de") == "EUR"

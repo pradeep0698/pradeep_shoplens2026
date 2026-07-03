@@ -235,10 +235,32 @@ def clamp_max_searches(requested: int | None) -> int:
     return max(1, min(int(requested), MAX_SEARCHES_PER_RUN))
 
 
-def _item_priority(item: str, preference_terms: list[str], shopping_categories: list[str]) -> tuple:
-    """Lower sorts first. `preference_terms`/`shopping_categories` are already
-    lowercased by _normalize_terms; _CATEGORY_KEYWORDS keys are not, hence the
-    explicit .lower() on the category name here."""
+def _term_matches(term: str, name: str) -> bool:
+    """Substring match with naive singular/plural tolerance — a preference
+    term typed as "laptops" should match an item name containing "laptop"
+    and vice versa. `term` is already lowercased by _normalize_terms; `name`
+    is lowercased by the caller. Not exhaustive (won't handle "watches" ->
+    "watch"-style -es plurals), but covers the common trailing-s case."""
+    if term in name:
+        return True
+    if term.endswith("s") and term[:-1] in name:
+        return True
+    if not term.endswith("s") and (term + "s") in name:
+        return True
+    return False
+
+
+def _item_score(item: str, preference_terms: list[str], shopping_categories: list[str]) -> int:
+    """Higher score sorts first. `preference_terms`/`shopping_categories` are
+    already lowercased by _normalize_terms; _CATEGORY_KEYWORDS keys are not,
+    hence the explicit .lower() on the category name here.
+
+    Additive, not lexicographic: a category hit and each matching preference
+    term each contribute one point, mirroring services/ai-analyzer/analyzer.py's
+    _preference_score. A prior (category_hit, preference_hit) tuple sort key
+    let any category match rank above every preference-only match regardless
+    of how many preference terms hit — summing avoids either dimension
+    unconditionally dominating the other."""
     name = item.lower()
     category_hit = any(
         kw in name
@@ -247,8 +269,8 @@ def _item_priority(item: str, preference_terms: list[str], shopping_categories: 
         if cat_name.lower() == cat
         for kw in kws
     )
-    preference_hit = any(term in name for term in preference_terms)
-    return (0 if category_hit else 1, 0 if preference_hit else 1)
+    preference_matches = sum(1 for term in preference_terms if _term_matches(term, name))
+    return (1 if category_hit else 0) + preference_matches
 
 
 def _prioritize_items(
@@ -264,7 +286,7 @@ def _prioritize_items(
     cats = _normalize_terms(shopping_categories)
     if not prefs and not cats:
         return items
-    return sorted(items, key=lambda item: _item_priority(item, prefs, cats))
+    return sorted(items, key=lambda item: -_item_score(item, prefs, cats))
 
 
 def match_products(

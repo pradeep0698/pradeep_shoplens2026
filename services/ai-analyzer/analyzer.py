@@ -19,6 +19,8 @@ from cachetools import TTLCache
 from google.cloud import storage as gcs
 
 import requests as _req
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from google import genai
 from google.genai import types
 from PIL import Image
@@ -103,18 +105,90 @@ def _is_serp_quota_error(data: dict) -> bool:
     return "run out of searches" in err or "ran out of searches" in err
 
 
+# A bare requests.Session retries nothing — one dropped connection or 5xx
+# blip fails the whole call. SerpAPI GETs are idempotent, so retrying is
+# safe. Deliberately NOT retrying on read-timeout (`read=0`): a call that
+# already read for the full timeout with no response is the slow-server
+# case, not a blip — retrying it would double the wait (e.g. 60s -> 120s)
+# for a call that's likely to time out again. Only fast-failing connect
+# errors and 429/5xx responses get retried.
+def _build_session() -> _req.Session:
+    retry = Retry(
+        total=2, connect=2, read=0, status=2,
+        backoff_factor=0.3,
+        status_forcelist=frozenset({429, 502, 503, 504}),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    session = _req.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+_session = _build_session()
+
+# A single `timeout=N` in requests applies N to BOTH the connect and read
+# phases independently — so a hung TCP handshake could previously wait the
+# full LENS_TIMEOUT_SECONDS (up to 60s) before even getting to the read
+# phase's own up-to-60s wait. Splitting the two caps connect failures at 5s
+# instead, and (paired with the tracing below) lets us tell a dead-connection
+# failure apart from a server that connected fine but never answered — which
+# is what actually happened in the 2026-07-03 SerpAPI incident this was added
+# for (that one was purely a read-phase hang; connect succeeded immediately).
+_SERP_CONNECT_TIMEOUT = 5
+
+
+def _serp_get(url: str, params: dict, read_timeout: float, label: str) -> dict:
+    """Shared SerpAPI GET: connect/read timeout split, structured before/after
+    tracing (api_key masked), and a readable log line when SerpAPI's response
+    isn't valid JSON instead of an opaque JSONDecodeError downstream."""
+    safe_params = {k: v for k, v in params.items() if k != "api_key"}
+    t0 = time.monotonic()
+    try:
+        resp = _session.get(url, params=params, timeout=(_SERP_CONNECT_TIMEOUT, read_timeout))
+    except Exception as exc:
+        logger.warning(
+            "SerpAPI [%s] request failed: type=%s elapsed=%.2fs params=%s error=%s",
+            label, type(exc).__name__, time.monotonic() - t0, safe_params, exc,
+        )
+        raise
+    elapsed = time.monotonic() - t0
+    try:
+        data = resp.json()
+    except ValueError:
+        logger.warning(
+            "SerpAPI [%s] non-JSON response: status=%s elapsed=%.2fs body=%r",
+            label, resp.status_code, elapsed, resp.text[:300],
+        )
+        raise
+    logger.info(
+        "SerpAPI [%s] status=%s elapsed=%.2fs params=%s",
+        label, resp.status_code, elapsed, safe_params,
+    )
+    return data
+
+
 def _probe_serp_quota() -> bool:
     """Check SerpAPI quota via the account endpoint (fast, no search cost).
     Returns True if quota is available, False if exhausted.
     Called after a Lens timeout to avoid chaining Gemini + Shopping hangs
     when the real cause is quota exhaustion."""
     try:
-        resp = _session.get(
+        data = _serp_get(
             "https://serpapi.com/account",
-            params={"api_key": _SERPAPI_KEY},
-            timeout=3,
+            {"api_key": _SERPAPI_KEY},
+            read_timeout=3,
+            label="account",
         )
-        data = resp.json()
+        if "error" in data:
+            # e.g. an invalid/revoked key — distinct from quota exhaustion.
+            # `total_searches_left` is absent from this response shape, so
+            # falling through to the .get(..., default) below would silently
+            # misreport this as "quota OK — 1 searches left".
+            logger.warning("SerpAPI quota probe returned an error: %s — assuming quota OK", data["error"])
+            return True
         remaining = data.get("total_searches_left", 1)
         if remaining == 0:
             logger.warning("SerpAPI quota exhausted — 0 searches left")
@@ -125,9 +199,6 @@ def _probe_serp_quota() -> bool:
     except Exception as exc:
         logger.warning("SerpAPI quota probe failed: %s — assuming quota OK", exc)
         return True
-
-
-_session = _req.Session()
 
 # Cache for /identify results — keyed on perceptual hash (8x8 avg hash) + country.
 # Perceptual hash is robust to minor crop/scale differences from live scan taps
@@ -484,9 +555,9 @@ def _delete_gcs(url: str) -> None:
 def _search_shopping(query: str, country: str = "us", max_results: int = 5) -> list[dict]:
     """Text-based Google Shopping search via SerpAPI. Used as Lens fallback."""
     try:
-        resp = _session.get(
+        data = _serp_get(
             "https://serpapi.com/search",
-            params={
+            {
                 "engine":  "google_shopping",
                 "q":       query,
                 "api_key": _SERPAPI_KEY,
@@ -494,9 +565,9 @@ def _search_shopping(query: str, country: str = "us", max_results: int = 5) -> l
                 "hl":      "en",
                 "num":     max_results,
             },
-            timeout=10,
+            read_timeout=10,
+            label="shopping",
         )
-        data = resp.json()
         if "error" in data:
             logger.warning("Shopping error: %s", data["error"])
             if _is_serp_quota_error(data):
@@ -659,18 +730,16 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
         base_params["q"] = query
 
     def _fetch(type_value: str) -> dict:
-        resp = _session.get(
+        data = _serp_get(
             "https://serpapi.com/search",
-            params={**base_params, "type": type_value},
-            timeout=_LENS_TIMEOUT,
+            {**base_params, "type": type_value},
+            read_timeout=_LENS_TIMEOUT,
+            label=f"lens:{type_value}",
         )
-        data = resp.json()
         if "error" in data:
             logger.warning("Lens [%s] error: %s", type_value, data["error"])
             if _is_serp_quota_error(data):
                 _tls.serp_quota_exhausted = True
-        else:
-            logger.info("Lens [%s] keys: %s", type_value, list(data.keys()))
         return data
 
     def _build_result(r: dict, price: float) -> dict:

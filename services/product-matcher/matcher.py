@@ -2,11 +2,14 @@ import hashlib
 import logging
 import os
 import re
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from cachetools import TTLCache
 
 logger = logging.getLogger(__name__)
@@ -26,7 +29,66 @@ MAX_SEARCHES_PER_RUN = 5
 # search, not per result row.
 MAX_RESULTS_PER_ITEM = int(os.environ.get("MAX_RESULTS_PER_ITEM", "15"))
 
-_session = requests.Session()
+# A bare requests.Session retries nothing — one dropped connection or 5xx
+# blip fails the whole call. Mirrors services/ai-analyzer/analyzer.py's
+# _build_session: idempotent GETs are safe to retry, but NOT on read-timeout
+# (`read=0`) — a call that already read for the full timeout with no response
+# is the slow-server case, not a blip, and retrying would just double the wait.
+def _build_session() -> requests.Session:
+    retry = Retry(
+        total=2, connect=2, read=0, status=2,
+        backoff_factor=0.3,
+        status_forcelist=frozenset({429, 502, 503, 504}),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+_session = _build_session()
+
+# A single `timeout=N` in requests applies N to BOTH the connect and read
+# phases independently, so a hung TCP handshake could wait the full read
+# timeout too before even starting the read phase's own wait. Splitting caps
+# connect failures at 5s and makes a dead-connection failure distinguishable
+# from a server that connected fine but never answered (see the 2026-07-03
+# SerpAPI incident in services/ai-analyzer/analyzer.py's _serp_get docstring).
+_SERP_CONNECT_TIMEOUT = 5
+
+
+def _serp_get(url: str, params: dict, read_timeout: float, label: str) -> dict:
+    """Shared SerpAPI GET: connect/read timeout split, structured before/after
+    tracing (api_key masked), and a readable log line when SerpAPI's response
+    isn't valid JSON instead of an opaque JSONDecodeError downstream."""
+    safe_params = {k: v for k, v in params.items() if k != "api_key"}
+    t0 = time.monotonic()
+    try:
+        resp = _session.get(url, params=params, timeout=(_SERP_CONNECT_TIMEOUT, read_timeout))
+    except Exception as exc:
+        logger.warning(
+            "SerpAPI [%s] request failed: type=%s elapsed=%.2fs params=%s error=%s",
+            label, type(exc).__name__, time.monotonic() - t0, safe_params, exc,
+        )
+        raise
+    elapsed = time.monotonic() - t0
+    try:
+        data = resp.json()
+    except ValueError:
+        logger.warning(
+            "SerpAPI [%s] non-JSON response: status=%s elapsed=%.2fs body=%r",
+            label, resp.status_code, elapsed, resp.text[:300],
+        )
+        raise
+    logger.info(
+        "SerpAPI [%s] status=%s elapsed=%.2fs params=%s",
+        label, resp.status_code, elapsed, safe_params,
+    )
+    return data
+
 
 _cache: TTLCache = TTLCache(maxsize=500, ttl=1800)
 
@@ -150,9 +212,9 @@ def _shopping_search(query: str, num: int, country: str = DEFAULT_COUNTRY) -> li
     region-blind regardless of the user's profile, unlike ai-analyzer's
     Lens/Shopping calls which have always passed it."""
     try:
-        resp = _session.get(
+        data = _serp_get(
             "https://serpapi.com/search",
-            params={
+            {
                 "engine":  "google_shopping",
                 "q":       query,
                 "api_key": _SERPAPI_KEY,
@@ -160,10 +222,9 @@ def _shopping_search(query: str, num: int, country: str = DEFAULT_COUNTRY) -> li
                 "hl":      "en",
                 "num":     num,
             },
-            timeout=10,
+            read_timeout=10,
+            label="shopping",
         )
-        resp.raise_for_status()
-        data = resp.json()
     except Exception as exc:
         logger.warning("SerpAPI request failed for '%s': %s", query, exc)
         return []

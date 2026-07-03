@@ -49,6 +49,35 @@ def clamp_max_searches(requested: int | None) -> int:
     return max(1, min(int(requested), MAX_SEARCHES_PER_RUN))
 
 
+# Currency has no dedicated field anywhere in the system — it's derived from
+# country so a default/consistent value is always available without adding a
+# new profile field. Mirrors the 19-country dropdown in
+# mobile/lib/presentation/widgets/profile_form.dart. SerpAPI's google_shopping
+# and google_lens engines have no currency param of their own — pricing already
+# follows the `gl` (country) param, so this is purely a display/consistency
+# label, not something that changes what SerpAPI returns.
+_COUNTRY_CURRENCY: dict[str, str] = {
+    "us": "USD", "gb": "GBP", "ca": "CAD", "au": "AUD", "de": "EUR",
+    "fr": "EUR", "in": "INR", "jp": "JPY", "br": "BRL", "mx": "MXN",
+    "es": "EUR", "it": "EUR", "nl": "EUR", "se": "SEK", "sg": "SGD",
+    "kr": "KRW", "ae": "AED", "za": "ZAR", "nz": "NZD", "ie": "EUR",
+}
+DEFAULT_COUNTRY = "us"
+DEFAULT_CURRENCY = "USD"
+
+
+def normalize_country(country: str | None) -> str:
+    """Empty/missing country defaults to 'us' — same default as
+    AnalyzeRequest.country's Pydantic default, applied defensively here too
+    since a client can send an empty string rather than omitting the field."""
+    value = (country or "").strip().lower()
+    return value or DEFAULT_COUNTRY
+
+
+def currency_for_country(country: str | None) -> str:
+    return _COUNTRY_CURRENCY.get(normalize_country(country), DEFAULT_CURRENCY)
+
+
 def _is_serp_quota_error(data: dict) -> bool:
     err = data.get("error", "").lower()
     return "run out of searches" in err or "ran out of searches" in err
@@ -130,6 +159,7 @@ _PROMPT = (
     '[{{"name": "Mid-century modern white wooden dining chair", "box": [200, 150, 750, 500]}},\n'
     ' {{"name": "Nike gold finish gooseneck kitchen faucet", "box": [50, 600, 400, 900]}}]\n\n'
     "{ignore_block}"
+    "{preference_block}"
     "ONLY include items from these categories: clothing, footwear, accessories "
     "(bags, watches, jewellery, sunglasses), furniture, home decor, kitchenware, "
     "electronics, sports equipment, books, stationery.\n\n"
@@ -219,6 +249,62 @@ def _build_ignore_block(ignore_terms: list[str] | None) -> str:
         "Do not include any item that matches or clearly refers to these ignored "
         f"terms: {ignored}.\n\n"
     )
+
+
+def _build_preference_block(
+    preference_terms: list[str] | None,
+    shopping_categories: list[str] | None,
+) -> str:
+    """User profile preferences/categories bias what Gemini lists FIRST — this
+    matters because analyze_media() only spends its limited SerpAPI-search
+    budget on the first `max_searches` items, so ordering directly affects
+    which items actually get product matches. Never excludes anything; a
+    non-preferred item is still a valid product, just not prioritized."""
+    prefs = _normalize_terms(preference_terms)
+    cats = _normalize_terms(shopping_categories)
+    if not prefs and not cats:
+        return ""
+    lines = ["This user has stated shopping preferences — use them to ORDER your "
+             "results (preferred items first in the returned array), but still "
+             "include every qualifying item you find, preferred or not:\n"]
+    if cats:
+        lines.append(f"- Preferred categories: {', '.join(cats)}\n")
+    if prefs:
+        lines.append(f"- Preferred styles/brands/materials: {', '.join(prefs)}\n")
+    lines.append("\n")
+    return "".join(lines)
+
+
+def _preference_sort_key(item: dict, preference_terms: list[str], shopping_categories: list[str]) -> tuple:
+    """Higher-priority items sort first. Used to pick which detected items get
+    a Lens search when there are more items than max_searches allows — without
+    this, truncation is an arbitrary function of Gemini's listing order.
+
+    Category matching goes through _CATEGORY_KEYWORDS (same keyword lists
+    _infer_category uses) rather than a literal substring check — a category
+    name like "Furniture" never appears verbatim in an item name like "wooden
+    dining chair", so keyword lookup is required for this to match anything."""
+    name = item["name"].lower()
+    category_hit = any(
+        kw in name for cat in shopping_categories for kw in _CATEGORY_KEYWORDS.get(cat, [])
+    )
+    preference_hit = any(term.lower() in name for term in preference_terms)
+    # False < True, so "not hit" sorts after "hit" when negated to an int and
+    # used ascending — 0 (matched) before 1 (unmatched).
+    return (0 if category_hit else 1, 0 if preference_hit else 1)
+
+
+def _prioritize_items(
+    items_raw: list[dict],
+    preference_terms: list[str] | None,
+    shopping_categories: list[str] | None,
+) -> list[dict]:
+    prefs = _normalize_terms(preference_terms)
+    cats = _normalize_terms(shopping_categories)
+    if not prefs and not cats:
+        return items_raw
+    # Stable sort — preserves Gemini's relative ordering within each priority tier.
+    return sorted(items_raw, key=lambda item: _preference_sort_key(item, prefs, cats))
 
 
 def _parse_items_with_boxes(text: str) -> list[dict]:
@@ -631,9 +717,11 @@ def identify_crop(
     _t_total_start = time.monotonic()
     _warnings: list[str] = []
     _tls.serp_quota_exhausted = False
+    country = normalize_country(country)
+    logger.info("PROFILE | country=%s currency=%s", country, currency_for_country(country))
     img_bytes = base64.b64decode(image_data)
 
-    cache_key = _perceptual_cache_key(img_bytes, country or "us")
+    cache_key = _perceptual_cache_key(img_bytes, country)
     if cache_key in _identify_cache:
         cached_products, cached_warnings = _identify_cache[cache_key]
         logger.info(
@@ -740,6 +828,8 @@ def analyze_media(
     ignore_terms: list[str] | None = None,
     country: str = "us",
     max_searches: int | None = None,
+    preference_terms: list[str] | None = None,
+    shopping_categories: list[str] | None = None,
 ) -> tuple[list[str], list[dict], list[str]]:
     """Returns (item_names, products, warnings).
 
@@ -749,9 +839,15 @@ def analyze_media(
     """
     _t_total_start = time.monotonic()
     _warnings: list[str] = []
+    country = normalize_country(country)
     client = _get_client()
     text_part = _PROMPT.format(
         ignore_block=_build_ignore_block(ignore_terms),
+        preference_block=_build_preference_block(preference_terms, shopping_categories),
+    )
+    logger.info(
+        "PROFILE | country=%s currency=%s preference_terms=%s shopping_categories=%s",
+        country, currency_for_country(country), preference_terms or [], shopping_categories or [],
     )
 
     if gcs_video_uri:
@@ -821,8 +917,12 @@ def analyze_media(
     items_raw = unique_items
 
     # Cap SerpAPI (Lens) calls per run — user-configurable up to MAX_SEARCHES_PER_RUN.
+    # Prioritize items matching the user's preferences/categories BEFORE
+    # truncating, so a busy frame spends its limited quota on what the user
+    # is likely to want rather than on whatever Gemini happened to list first.
     search_limit = clamp_max_searches(max_searches)
     if len(items_raw) > search_limit:
+        items_raw = _prioritize_items(items_raw, preference_terms, shopping_categories)
         logger.info("Capping Lens searches: %d detected → %d (limit=%d)", len(items_raw), search_limit, search_limit)
         items_raw = items_raw[:search_limit]
 
@@ -955,6 +1055,8 @@ def analyze_media_stream(
     ignore_terms: list[str] | None = None,
     country: str = "us",
     max_searches: int | None = None,
+    preference_terms: list[str] | None = None,
+    shopping_categories: list[str] | None = None,
 ):
     """Generator version of analyze_media's image path, for streaming partial
     results to the client as each item's Lens search completes instead of
@@ -969,8 +1071,16 @@ def analyze_media_stream(
     per-item Lens fan-out, so there's nothing to stream.
     """
     _t_total_start = time.monotonic()
+    country = normalize_country(country)
     client = _get_client()
-    text_part = _PROMPT.format(ignore_block=_build_ignore_block(ignore_terms))
+    text_part = _PROMPT.format(
+        ignore_block=_build_ignore_block(ignore_terms),
+        preference_block=_build_preference_block(preference_terms, shopping_categories),
+    )
+    logger.info(
+        "PROFILE | country=%s currency=%s preference_terms=%s shopping_categories=%s",
+        country, currency_for_country(country), preference_terms or [], shopping_categories or [],
+    )
 
     media_part = _load_image_part(
         image_url=image_url,
@@ -1009,6 +1119,7 @@ def analyze_media_stream(
 
     search_limit = clamp_max_searches(max_searches)
     if len(items_raw) > search_limit:
+        items_raw = _prioritize_items(items_raw, preference_terms, shopping_categories)
         items_raw = items_raw[:search_limit]
 
     final_warnings: list[str] = []
@@ -1022,7 +1133,7 @@ def analyze_media_stream(
             "TIMING (stream) | total=%.2fs gemini=%.2fs items_phase=0.00s items=0",
             time.monotonic() - _t_total_start, _t_gemini,
         )
-        yield {"type": "done", "warnings": final_warnings}
+        yield {"type": "done", "warnings": final_warnings, "country": country, "currency": currency_for_country(country)}
         return
 
     img_bytes = base64.b64decode(image_data)
@@ -1093,7 +1204,7 @@ def analyze_media_stream(
         "TIMING (stream) | total=%.2fs gemini=%.2fs items_phase=%.2fs items=%d",
         time.monotonic() - _t_total_start, _t_gemini, time.monotonic() - _t_items_start, len(items_raw),
     )
-    yield {"type": "done", "warnings": final_warnings}
+    yield {"type": "done", "warnings": final_warnings, "country": country, "currency": currency_for_country(country)}
 
 
 def analyze_segment(gcs_video_uri: str, transcript: str) -> list[str]:

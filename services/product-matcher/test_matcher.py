@@ -150,11 +150,103 @@ def test_thumbnail_endpoint_returns_502_when_fetch_fails(monkeypatch):
 def test_search_endpoint_returns_products_and_clamps_max_results(monkeypatch):
     matcher._cache.clear()
     monkeypatch.setattr(
-        main, "search_products", lambda query, max_results: [{"name": query, "max_results": max_results}]
+        main, "search_products",
+        lambda query, max_results, country: [{"name": query, "max_results": max_results, "country": country}],
     )
     client = TestClient(main.app)
 
-    response = client.post("/search", json={"query": "lamp", "max_results": 99})
+    # 15 passes SearchRequest's own le=20 bound but still exceeds
+    # MAX_SEARCHES_PER_RUN (5) — clamp_max_searches() should bring it down to 5.
+    response = client.post("/search", json={"query": "lamp", "max_results": 15})
 
     assert response.status_code == 200
-    assert response.json()["products"] == [{"name": "lamp", "max_results": 5}]
+    body = response.json()
+    assert body["products"] == [{"name": "lamp", "max_results": 5, "country": "us"}]
+    assert body["country"] == "us"
+    assert body["currency"] == "USD"
+
+
+def test_search_endpoint_defaults_and_normalizes_country(monkeypatch):
+    matcher._cache.clear()
+    seen = {}
+
+    def fake_search_products(query, max_results, country):
+        seen["country"] = country
+        return []
+
+    monkeypatch.setattr(main, "search_products", fake_search_products)
+    client = TestClient(main.app)
+
+    response = client.post("/search", json={"query": "lamp", "max_results": 5, "country": " GB "})
+
+    assert response.status_code == 200
+    assert seen["country"] == "gb"
+    assert response.json()["currency"] == "GBP"
+
+
+def test_shopping_search_passes_gl_param(monkeypatch):
+    captured = {}
+
+    def fake_get(url, params=None, timeout=None):
+        captured.update(params or {})
+        return _FakeResponse({"shopping_results": []})
+
+    monkeypatch.setattr(matcher._session, "get", fake_get)
+
+    matcher._shopping_search("lamp", 5, country="gb")
+
+    assert captured["gl"] == "gb"
+
+
+def test_search_product_cache_is_country_aware(monkeypatch):
+    matcher._cache.clear()
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(params.get("gl"))
+        return _FakeResponse({"shopping_results": [{"title": "Item", "source": "Store", "extracted_price": 1.0}]})
+
+    monkeypatch.setattr(matcher._session, "get", fake_get)
+
+    matcher._search_product("widget", country="us")
+    matcher._search_product("widget", country="gb")
+    matcher._search_product("widget", country="us")  # cache hit, no new call
+
+    assert calls == ["us", "gb"]
+
+
+def test_match_products_prioritizes_preference_terms_under_cap(monkeypatch):
+    matcher._cache.clear()
+    seen_queries = []
+
+    def fake_search_product(item, country=matcher.DEFAULT_COUNTRY):
+        seen_queries.append(item)
+        return {
+            "product_id": f"pid-{item}", "name": item, "price": 1.0,
+            "image_url": "", "purchase_url": "", "seller": "Store", "category": "General",
+        }
+
+    monkeypatch.setattr(matcher, "_search_product", fake_search_product)
+
+    result = matcher.match_products(
+        ["plain white mug", "Nike running shoes"],
+        max_searches=1,
+        preference_terms=["nike"],
+    )
+
+    assert seen_queries == ["Nike running shoes"]
+    assert result["country"] == "us"
+    assert result["currency"] == "USD"
+
+
+def test_currency_for_country_known_and_default():
+    assert matcher.currency_for_country("gb") == "GBP"
+    assert matcher.currency_for_country("de") == "EUR"
+    assert matcher.currency_for_country(None) == "USD"
+    assert matcher.currency_for_country("zz") == "USD"
+
+
+def test_normalize_country_defaults_empty_to_us():
+    assert matcher.normalize_country(None) == "us"
+    assert matcher.normalize_country("") == "us"
+    assert matcher.normalize_country(" GB ") == "gb"

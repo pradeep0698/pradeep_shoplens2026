@@ -19,6 +19,41 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/MatchRequest"
+              },
+              "examples": {
+                "basic": {
+                  "summary": "Match detected items to products",
+                  "value": {
+                    "items": [
+                      "stand mixer",
+                      "silicone spatula"
+                    ],
+                    "ignore_terms": [],
+                    "max_searches": 5,
+                    "country": "us",
+                    "preference_terms": [],
+                    "shopping_categories": []
+                  }
+                },
+                "with_profile_context": {
+                  "summary": "Match with user profile preferences \u2014 biases which items get a SerpAPI search when more items are detected than max_searches allows",
+                  "value": {
+                    "items": [
+                      "stand mixer",
+                      "silicone spatula",
+                      "Nike running shoes"
+                    ],
+                    "ignore_terms": [],
+                    "max_searches": 2,
+                    "country": "gb",
+                    "preference_terms": [
+                      "nike"
+                    ],
+                    "shopping_categories": [
+                      "Electronics"
+                    ]
+                  }
+                }
               }
             }
           },
@@ -44,7 +79,9 @@
                       "category": "Kitchen & Cookware"
                     }
                   ],
-                  "unmatched": []
+                  "unmatched": [],
+                  "country": "us",
+                  "currency": "USD"
                 }
               }
             }
@@ -88,6 +125,16 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SearchRequest"
+              },
+              "examples": {
+                "basic": {
+                  "summary": "Freetext product search",
+                  "value": {
+                    "query": "stand mixer",
+                    "max_results": 5,
+                    "country": "us"
+                  }
+                }
               }
             }
           },
@@ -112,7 +159,9 @@
                       "seller": "Walmart",
                       "category": "Kitchen & Cookware"
                     }
-                  ]
+                  ],
+                  "country": "us",
+                  "currency": "USD"
                 }
               }
             }
@@ -376,6 +425,28 @@
             "title": "Max Searches",
             "description": "Maximum SerpAPI calls to make",
             "default": 5
+          },
+          "country": {
+            "type": "string",
+            "title": "Country",
+            "description": "Two-letter ISO country code for regional product search. Empty/unset defaults to 'us'. Currency is derived from this \u2014 see the `currency` field on the response.",
+            "default": "us"
+          },
+          "preference_terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Preference Terms",
+            "description": "Free-text style/brand/material preferences from the user's profile. Used to prioritize which items get a SerpAPI search when there are more items than max_searches allows."
+          },
+          "shopping_categories": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Shopping Categories",
+            "description": "Preferred shopping categories from the user's profile. Same prioritization role as preference_terms."
           }
         },
         "type": "object",
@@ -385,12 +456,15 @@
         "title": "MatchRequest",
         "examples": [
           {
+            "country": "us",
             "ignore_terms": [],
             "items": [
               "stand mixer",
               "silicone spatula"
             ],
-            "max_searches": 5
+            "max_searches": 5,
+            "preference_terms": [],
+            "shopping_categories": []
           }
         ]
       },
@@ -408,6 +482,12 @@
             "title": "Max Results",
             "description": "Maximum number of products to return",
             "default": 5
+          },
+          "country": {
+            "type": "string",
+            "title": "Country",
+            "description": "Two-letter ISO country code for regional product search. Empty/unset defaults to 'us'.",
+            "default": "us"
           }
         },
         "type": "object",
@@ -518,11 +598,23 @@
               "type": "string"
             },
             "description": "Item names for which SerpAPI returned no results"
+          },
+          "country": {
+            "type": "string",
+            "description": "Normalized country used for this request \u2014 empty/unset request.country defaults to 'us'",
+            "example": "us"
+          },
+          "currency": {
+            "type": "string",
+            "description": "Currency derived from country (no separate currency field exists \u2014 see matcher.currency_for_country)",
+            "example": "USD"
           }
         },
         "required": [
           "matched_products",
-          "unmatched"
+          "unmatched",
+          "country",
+          "currency"
         ]
       },
       "SearchResponse": {
@@ -533,10 +625,22 @@
             "items": {
               "$ref": "#/components/schemas/ProductItem"
             }
+          },
+          "country": {
+            "type": "string",
+            "description": "Normalized country used for this request \u2014 empty/unset request.country defaults to 'us'",
+            "example": "us"
+          },
+          "currency": {
+            "type": "string",
+            "description": "Currency derived from country",
+            "example": "USD"
           }
         },
         "required": [
-          "products"
+          "products",
+          "country",
+          "currency"
         ]
       },
       "DebugResponse": {

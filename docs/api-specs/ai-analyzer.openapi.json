@@ -290,7 +290,7 @@
           "country": {
             "type": "string",
             "title": "Country",
-            "description": "Two-letter ISO country code for regional product search",
+            "description": "Two-letter ISO country code for regional product search. Empty/unset defaults to 'us'. Currency is derived from this (no separate currency field) \u2014 see the `currency` field on the response.",
             "default": "us"
           },
           "max_searches": {
@@ -300,6 +300,22 @@
             "title": "Max Searches",
             "description": "Maximum number of SerpAPI searches to execute",
             "default": 5
+          },
+          "preference_terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Preference Terms",
+            "description": "Free-text style/brand/material preferences from the user's profile (e.g. 'minimalist', 'Nike'). Used to prioritize which detected items get a product search when there are more items than max_searches allows."
+          },
+          "shopping_categories": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Shopping Categories",
+            "description": "Preferred shopping categories from the user's profile (e.g. 'Furniture', 'Electronics'). Same prioritization role as preference_terms."
           },
           "mlkit_context": {
             "anyOf": [
@@ -321,7 +337,9 @@
             "ignore_terms": [],
             "image_url": "https://example.com/product.jpg",
             "max_searches": 5,
+            "preference_terms": [],
             "query": "",
+            "shopping_categories": [],
             "transcript": ""
           }
         ]

@@ -128,8 +128,10 @@ def enrich_ai_analyzer(spec: dict) -> dict:
             "warnings": {"type": "array", "items": {"type": "string"}, "description": "Non-fatal warnings, e.g. items with no search results"},
             "gcs_uri": {"type": "string", "nullable": True, "description": "Echoes the request's gcs_uri, if provided"},
             "image_url": {"type": "string", "nullable": True, "description": "Echoes the request's image_url, if provided"},
+            "country": {"type": "string", "description": "Normalized country used for this request — empty/unset request.country defaults to 'us'", "example": "us"},
+            "currency": {"type": "string", "description": "Currency derived from country (no separate currency field exists — see analyzer.currency_for_country)", "example": "USD"},
         },
-        "required": ["items", "products", "warnings", "gcs_uri", "image_url"],
+        "required": ["items", "products", "warnings", "gcs_uri", "image_url", "country", "currency"],
     }
     schemas["IdentifyResponse"] = {
         "type": "object",
@@ -137,8 +139,10 @@ def enrich_ai_analyzer(spec: dict) -> dict:
             "items": {"type": "array", "items": {"type": "string"}, "description": "Always empty for /identify — detection is skipped, the crop is already selected"},
             "products": {"type": "array", "items": {"$ref": "#/components/schemas/ProductItem"}},
             "warnings": {"type": "array", "items": {"type": "string"}},
+            "country": {"type": "string", "description": "Normalized country used for this request — empty/unset request.country defaults to 'us'", "example": "us"},
+            "currency": {"type": "string", "description": "Currency derived from country", "example": "USD"},
         },
-        "required": ["items", "products", "warnings"],
+        "required": ["items", "products", "warnings", "country", "currency"],
     }
     schemas["ErrorDetail"] = ERROR_DETAIL_WITH_CODE
     schemas["ConfigResponse"] = {
@@ -175,23 +179,32 @@ def enrich_ai_analyzer(spec: dict) -> dict:
         "image_url": ("Analyze a public image URL", {
             "image_url": "https://picsum.photos/id/1080/640/480.jpg",
             "transcript": "", "ignore_terms": [], "query": "", "country": "us", "max_searches": 5,
+            "preference_terms": [], "shopping_categories": [],
         }),
         "image_data_base64": ("Analyze a base64-encoded image", {
             "image_data": "<base64-encoded JPEG/PNG/WebP bytes>", "image_mime_type": "image/jpeg",
             "transcript": "", "ignore_terms": [], "query": "", "country": "us", "max_searches": 5,
+            "preference_terms": [], "shopping_categories": [],
         }),
         "gcs_video_uri": ("Analyze a live-stream HLS segment (called by Pub/Sub Worker)", {
             "gcs_uri": "gs://shoplens2026-dev-hls-segments/live/segment001.ts",
             "transcript": "And here you can see the stand mixer being used to knead the dough",
             "ignore_terms": [], "query": "", "country": "us", "max_searches": 5,
+            "preference_terms": [], "shopping_categories": [],
         }),
         "with_mlkit_context": ("Analyze with on-device ML Kit context forwarded for log-based routing analysis", {
             "image_url": "https://picsum.photos/id/1080/640/480.jpg",
             "transcript": "", "ignore_terms": [], "query": "", "country": "us", "max_searches": 5,
+            "preference_terms": [], "shopping_categories": [],
             "mlkit_context": {
                 "route": "gemini_fallback", "trigger": "auto", "on_device_confidence": 0.41,
                 "detected_objects_count": 2, "detected_labels": [{"text": "Furniture"}, {"text": "Chair"}],
             },
+        }),
+        "with_profile_context": ("Analyze with user profile preferences — biases which items get a Lens search when more items are detected than max_searches allows", {
+            "image_url": "https://picsum.photos/id/1080/640/480.jpg",
+            "transcript": "", "ignore_terms": [], "query": "", "country": "gb", "max_searches": 3,
+            "preference_terms": ["minimalist", "Nike"], "shopping_categories": ["Electronics", "Furniture"],
         }),
     })
     p["/analyze"]["post"]["responses"].update({
@@ -204,6 +217,7 @@ def enrich_ai_analyzer(spec: dict) -> dict:
                 "seller": "Walmart", "category": "Kitchen & Cookware",
             }],
             "warnings": [], "gcs_uri": None, "image_url": "https://picsum.photos/id/1080/640/480.jpg",
+            "country": "us", "currency": "USD",
         }),
         "400": _resp("No media input provided", {"$ref": "#/components/schemas/ErrorDetail"},
                       {"detail": "Provide gcs_uri, image_url, or image_data.", "error_code": "INVALID_REQUEST"}),
@@ -219,6 +233,7 @@ def enrich_ai_analyzer(spec: dict) -> dict:
         "image_url": ("Stream analysis of a public image URL", {
             "image_url": "https://picsum.photos/id/1080/640/480.jpg",
             "transcript": "", "ignore_terms": [], "query": "", "country": "us", "max_searches": 5,
+            "preference_terms": [], "shopping_categories": [],
         }),
     })
     p["/analyze/stream"]["post"]["responses"].update({
@@ -230,7 +245,7 @@ def enrich_ai_analyzer(spec: dict) -> dict:
                 "oneOf": [
                     {"type": "object", "properties": {"type": {"const": "items"}, "items": {"type": "array", "items": {"type": "string"}}}, "required": ["type", "items"]},
                     {"type": "object", "properties": {"type": {"const": "match"}, "name": {"type": "string"}, "products": {"type": "array", "items": {"$ref": "#/components/schemas/ProductItem"}}, "warnings": {"type": "array", "items": {"type": "string"}}}, "required": ["type", "name", "products", "warnings"]},
-                    {"type": "object", "properties": {"type": {"const": "done"}, "warnings": {"type": "array", "items": {"type": "string"}}}, "required": ["type", "warnings"]},
+                    {"type": "object", "properties": {"type": {"const": "done"}, "warnings": {"type": "array", "items": {"type": "string"}}, "country": {"type": "string"}, "currency": {"type": "string"}}, "required": ["type", "warnings", "country", "currency"]},
                     {"type": "object", "properties": {"type": {"const": "error"}, "detail": {"type": "string"}, "error_code": {"type": "string"}}, "required": ["type", "detail", "error_code"]},
                 ],
             },
@@ -264,7 +279,7 @@ def enrich_ai_analyzer(spec: dict) -> dict:
                 "price": 64.96, "image_url": "https://encrypted-tbn1.gstatic.com/shopping?q=tbn:ANd9GcSqMqBie2aAONKedRN2VEXA1q2-",
                 "purchase_url": "https://www.walmart.com/ip/Beautiful-3-5-Qt-Stand-Mixer/expr123",
                 "seller": "Walmart", "category": "Kitchen & Cookware",
-            }], "warnings": [],
+            }], "warnings": [], "country": "us", "currency": "USD",
         }),
         "400": _resp("image_data not provided — /identify does not accept image_url", {"$ref": "#/components/schemas/ErrorDetail"},
                       {"detail": "Provide image_data.", "error_code": "INVALID_REQUEST"}),
@@ -308,13 +323,19 @@ def enrich_product_matcher(spec: dict) -> dict:
         "properties": {
             "matched_products": {"type": "array", "items": {"$ref": "#/components/schemas/ProductItem"}},
             "unmatched": {"type": "array", "items": {"type": "string"}, "description": "Item names for which SerpAPI returned no results"},
+            "country": {"type": "string", "description": "Normalized country used for this request — empty/unset request.country defaults to 'us'", "example": "us"},
+            "currency": {"type": "string", "description": "Currency derived from country (no separate currency field exists — see matcher.currency_for_country)", "example": "USD"},
         },
-        "required": ["matched_products", "unmatched"],
+        "required": ["matched_products", "unmatched", "country", "currency"],
     }
     schemas["SearchResponse"] = {
         "type": "object",
-        "properties": {"products": {"type": "array", "items": {"$ref": "#/components/schemas/ProductItem"}}},
-        "required": ["products"],
+        "properties": {
+            "products": {"type": "array", "items": {"$ref": "#/components/schemas/ProductItem"}},
+            "country": {"type": "string", "description": "Normalized country used for this request — empty/unset request.country defaults to 'us'", "example": "us"},
+            "currency": {"type": "string", "description": "Currency derived from country", "example": "USD"},
+        },
+        "required": ["products", "country", "currency"],
     }
     schemas["DebugResponse"] = {
         "type": "object",
@@ -350,6 +371,16 @@ def enrich_product_matcher(spec: dict) -> dict:
 
     p = spec["paths"]
 
+    p["/match"]["post"]["requestBody"]["content"]["application/json"]["examples"] = _req_examples({
+        "basic": ("Match detected items to products", {
+            "items": ["stand mixer", "silicone spatula"], "ignore_terms": [], "max_searches": 5,
+            "country": "us", "preference_terms": [], "shopping_categories": [],
+        }),
+        "with_profile_context": ("Match with user profile preferences — biases which items get a SerpAPI search when more items are detected than max_searches allows", {
+            "items": ["stand mixer", "silicone spatula", "Nike running shoes"], "ignore_terms": [], "max_searches": 2,
+            "country": "gb", "preference_terms": ["nike"], "shopping_categories": ["Electronics"],
+        }),
+    })
     p["/match"]["post"]["responses"].update({
         "200": _resp("Matching complete — check `unmatched` for items with no results", {"$ref": "#/components/schemas/MatchResponse"}, {
             "matched_products": [{
@@ -359,10 +390,14 @@ def enrich_product_matcher(spec: dict) -> dict:
                 "seller": "Walmart", "category": "Kitchen & Cookware",
             }],
             "unmatched": [],
+            "country": "us", "currency": "USD",
         }),
         "500": _resp("SerpAPI error", {"$ref": "#/components/schemas/ErrorDetail"}, {"detail": "Internal server error"}),
     })
 
+    p["/search"]["post"]["requestBody"]["content"]["application/json"]["examples"] = _req_examples({
+        "basic": ("Freetext product search", {"query": "stand mixer", "max_results": 5, "country": "us"}),
+    })
     p["/search"]["post"]["responses"]["200"] = _resp(
         "Up to max_results products for the query", {"$ref": "#/components/schemas/SearchResponse"}, {
             "products": [{
@@ -371,6 +406,7 @@ def enrich_product_matcher(spec: dict) -> dict:
                 "purchase_url": "https://www.walmart.com/ip/Beautiful-3-5-Qt-Stand-Mixer/expr123",
                 "seller": "Walmart", "category": "Kitchen & Cookware",
             }],
+            "country": "us", "currency": "USD",
         },
     )
 

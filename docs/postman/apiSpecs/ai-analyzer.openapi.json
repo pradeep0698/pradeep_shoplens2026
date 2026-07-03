@@ -109,7 +109,9 @@
                     "ignore_terms": [],
                     "query": "",
                     "country": "us",
-                    "max_searches": 5
+                    "max_searches": 5,
+                    "preference_terms": [],
+                    "shopping_categories": []
                   }
                 },
                 "image_data_base64": {
@@ -121,7 +123,9 @@
                     "ignore_terms": [],
                     "query": "",
                     "country": "us",
-                    "max_searches": 5
+                    "max_searches": 5,
+                    "preference_terms": [],
+                    "shopping_categories": []
                   }
                 },
                 "gcs_video_uri": {
@@ -132,7 +136,9 @@
                     "ignore_terms": [],
                     "query": "",
                     "country": "us",
-                    "max_searches": 5
+                    "max_searches": 5,
+                    "preference_terms": [],
+                    "shopping_categories": []
                   }
                 },
                 "with_mlkit_context": {
@@ -144,6 +150,8 @@
                     "query": "",
                     "country": "us",
                     "max_searches": 5,
+                    "preference_terms": [],
+                    "shopping_categories": [],
                     "mlkit_context": {
                       "route": "gemini_fallback",
                       "trigger": "auto",
@@ -158,6 +166,25 @@
                         }
                       ]
                     }
+                  }
+                },
+                "with_profile_context": {
+                  "summary": "Analyze with user profile preferences \u2014 biases which items get a Lens search when more items are detected than max_searches allows",
+                  "value": {
+                    "image_url": "https://picsum.photos/id/1080/640/480.jpg",
+                    "transcript": "",
+                    "ignore_terms": [],
+                    "query": "",
+                    "country": "gb",
+                    "max_searches": 3,
+                    "preference_terms": [
+                      "minimalist",
+                      "Nike"
+                    ],
+                    "shopping_categories": [
+                      "Electronics",
+                      "Furniture"
+                    ]
                   }
                 }
               }
@@ -190,7 +217,9 @@
                   ],
                   "warnings": [],
                   "gcs_uri": null,
-                  "image_url": "https://picsum.photos/id/1080/640/480.jpg"
+                  "image_url": "https://picsum.photos/id/1080/640/480.jpg",
+                  "country": "us",
+                  "currency": "USD"
                 }
               }
             }
@@ -273,7 +302,9 @@
                     "ignore_terms": [],
                     "query": "",
                     "country": "us",
-                    "max_searches": 5
+                    "max_searches": 5,
+                    "preference_terms": [],
+                    "shopping_categories": []
                   }
                 }
               }
@@ -348,11 +379,19 @@
                           "items": {
                             "type": "string"
                           }
+                        },
+                        "country": {
+                          "type": "string"
+                        },
+                        "currency": {
+                          "type": "string"
                         }
                       },
                       "required": [
                         "type",
-                        "warnings"
+                        "warnings",
+                        "country",
+                        "currency"
                       ]
                     },
                     {
@@ -485,7 +524,9 @@
                       "category": "Kitchen & Cookware"
                     }
                   ],
-                  "warnings": []
+                  "warnings": [],
+                  "country": "us",
+                  "currency": "USD"
                 }
               }
             }
@@ -620,7 +661,7 @@
           "country": {
             "type": "string",
             "title": "Country",
-            "description": "Two-letter ISO country code for regional product search",
+            "description": "Two-letter ISO country code for regional product search. Empty/unset defaults to 'us'. Currency is derived from this (no separate currency field) \u2014 see the `currency` field on the response.",
             "default": "us"
           },
           "max_searches": {
@@ -630,6 +671,22 @@
             "title": "Max Searches",
             "description": "Maximum number of SerpAPI searches to execute",
             "default": 5
+          },
+          "preference_terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Preference Terms",
+            "description": "Free-text style/brand/material preferences from the user's profile (e.g. 'minimalist', 'Nike'). Used to prioritize which detected items get a product search when there are more items than max_searches allows."
+          },
+          "shopping_categories": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Shopping Categories",
+            "description": "Preferred shopping categories from the user's profile (e.g. 'Furniture', 'Electronics'). Same prioritization role as preference_terms."
           },
           "mlkit_context": {
             "anyOf": [
@@ -651,7 +708,9 @@
             "ignore_terms": [],
             "image_url": "https://example.com/product.jpg",
             "max_searches": 5,
+            "preference_terms": [],
             "query": "",
+            "shopping_categories": [],
             "transcript": ""
           }
         ]
@@ -876,6 +935,16 @@
             "type": "string",
             "nullable": true,
             "description": "Echoes the request's image_url, if provided"
+          },
+          "country": {
+            "type": "string",
+            "description": "Normalized country used for this request \u2014 empty/unset request.country defaults to 'us'",
+            "example": "us"
+          },
+          "currency": {
+            "type": "string",
+            "description": "Currency derived from country (no separate currency field exists \u2014 see analyzer.currency_for_country)",
+            "example": "USD"
           }
         },
         "required": [
@@ -883,7 +952,9 @@
           "products",
           "warnings",
           "gcs_uri",
-          "image_url"
+          "image_url",
+          "country",
+          "currency"
         ]
       },
       "IdentifyResponse": {
@@ -907,12 +978,24 @@
             "items": {
               "type": "string"
             }
+          },
+          "country": {
+            "type": "string",
+            "description": "Normalized country used for this request \u2014 empty/unset request.country defaults to 'us'",
+            "example": "us"
+          },
+          "currency": {
+            "type": "string",
+            "description": "Currency derived from country",
+            "example": "USD"
           }
         },
         "required": [
           "items",
           "products",
-          "warnings"
+          "warnings",
+          "country",
+          "currency"
         ]
       },
       "ErrorDetail": {

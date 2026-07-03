@@ -281,6 +281,28 @@
             "title": "Max Searches",
             "description": "Maximum SerpAPI calls to make",
             "default": 5
+          },
+          "country": {
+            "type": "string",
+            "title": "Country",
+            "description": "Two-letter ISO country code for regional product search. Empty/unset defaults to 'us'. Currency is derived from this \u2014 see the `currency` field on the response.",
+            "default": "us"
+          },
+          "preference_terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Preference Terms",
+            "description": "Free-text style/brand/material preferences from the user's profile. Used to prioritize which items get a SerpAPI search when there are more items than max_searches allows."
+          },
+          "shopping_categories": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Shopping Categories",
+            "description": "Preferred shopping categories from the user's profile. Same prioritization role as preference_terms."
           }
         },
         "type": "object",
@@ -290,12 +312,15 @@
         "title": "MatchRequest",
         "examples": [
           {
+            "country": "us",
             "ignore_terms": [],
             "items": [
               "stand mixer",
               "silicone spatula"
             ],
-            "max_searches": 5
+            "max_searches": 5,
+            "preference_terms": [],
+            "shopping_categories": []
           }
         ]
       },
@@ -313,6 +338,12 @@
             "title": "Max Results",
             "description": "Maximum number of products to return",
             "default": 5
+          },
+          "country": {
+            "type": "string",
+            "title": "Country",
+            "description": "Two-letter ISO country code for regional product search. Empty/unset defaults to 'us'.",
+            "default": "us"
           }
         },
         "type": "object",

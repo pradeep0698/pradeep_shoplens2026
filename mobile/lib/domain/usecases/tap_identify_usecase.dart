@@ -32,14 +32,16 @@ class TapIdentifyUseCase {
     // describe the crop (for a better Lens query), but skips the full-image
     // detection pass, making it faster than the full /analyze pipeline.
     final analyzeResponse = await _analyzer.identifyCrop(AnalyzeRequest(
-      imageData:     encodeImageToBase64(croppedBytes),
-      imageMimeType: 'image/png',
-      ignoreTerms:   ignoreTerms,
-      transcript:    '',
-      query:         query,
-      country:       country,
-      maxSearches:   maxSearches,
-      mlkitContext:  mlkitContext,
+      imageData:          encodeImageToBase64(croppedBytes),
+      imageMimeType:      'image/png',
+      ignoreTerms:        ignoreTerms,
+      transcript:         '',
+      query:              query,
+      country:            country,
+      maxSearches:        maxSearches,
+      preferenceTerms:    preferenceTerms,
+      shoppingCategories: shoppingCategories,
+      mlkitContext:       mlkitContext,
     ));
 
     if (analyzeResponse.products.isEmpty) return null;

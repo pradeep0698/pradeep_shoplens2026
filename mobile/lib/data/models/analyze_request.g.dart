@@ -17,6 +17,14 @@ AnalyzeRequest _$AnalyzeRequestFromJson(Map<String, dynamic> json) =>
       gcsUri: json['gcs_uri'] as String?,
       imageUrl: json['image_url'] as String?,
       maxSearches: (json['max_searches'] as num?)?.toInt(),
+      preferenceTerms: (json['preference_terms'] as List<dynamic>?)
+              ?.map((e) => e as String)
+              .toList() ??
+          const [],
+      shoppingCategories: (json['shopping_categories'] as List<dynamic>?)
+              ?.map((e) => e as String)
+              .toList() ??
+          const [],
       mlkitContext: json['mlkit_context'] as Map<String, dynamic>?,
       transcript: json['transcript'] as String? ?? '',
       query: json['query'] as String?,
@@ -31,6 +39,8 @@ Map<String, dynamic> _$AnalyzeRequestToJson(AnalyzeRequest instance) =>
       if (instance.gcsUri case final value?) 'gcs_uri': value,
       if (instance.imageUrl case final value?) 'image_url': value,
       if (instance.maxSearches case final value?) 'max_searches': value,
+      'preference_terms': instance.preferenceTerms,
+      'shopping_categories': instance.shoppingCategories,
       if (instance.mlkitContext case final value?) 'mlkit_context': value,
       'transcript': instance.transcript,
       if (instance.query case final value?) 'query': value,

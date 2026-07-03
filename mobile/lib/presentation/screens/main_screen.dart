@@ -12,6 +12,7 @@ import '../../core/utils/product_ranker.dart';
 import '../../core/utils/session_id.dart';
 import '../../data/models/user_profile.dart';
 import '../../data/repositories/profile_repository.dart';
+import '../../data/repositories/recent_searches_repository.dart';
 import '../../domain/usecases/tap_identify_usecase.dart';
 import '../../domain/usecases/video_analyze_usecase.dart';
 import 'video_player_screen.dart';
@@ -19,12 +20,14 @@ import '../providers/admin_provider.dart';
 import '../providers/auth_provider.dart';
 import '../providers/pipeline_provider.dart';
 import '../providers/profile_provider.dart';
+import '../providers/recent_searches_provider.dart';
 import '../providers/shopping_list_provider.dart';
 import '../providers/video_provider.dart';
 import '../widgets/chatbot_fab.dart';
 import '../widgets/info_tooltip_icon.dart';
 import '../widgets/pipeline_status_bar.dart';
 import '../widgets/product_card.dart';
+import '../widgets/recent_searches_list.dart';
 import '../widgets/sync_indicator.dart';
 import '../widgets/tap_target_detector.dart';
 import '../widgets/voice_assistant_overlay.dart';
@@ -43,6 +46,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   Timer? _productCheckTimer;
   bool  _onboardingTriggered = false;
   bool  _micPrewarmed = false;
+  bool  _savedToRecent = false;
 
   @override
   void dispose() {
@@ -50,9 +54,6 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     super.dispose();
   }
 
-  // Shows the voice assistant once, the first time the resolved profile comes
-  // back with voiceOnboardingSeen == false — fires off the loading frame, not
-  // on a default-constructed UserProfile (see plan risk #7).
   Future<void> _maybeShowOnboarding(UserProfile resolvedProfile) async {
     if (_onboardingTriggered || resolvedProfile.voiceOnboardingSeen) return;
     _onboardingTriggered = true;
@@ -62,15 +63,19 @@ class _MainScreenState extends ConsumerState<MainScreen> {
 
     final user = ref.read(authStateProvider).value;
     if (user == null) return;
-    // Re-read the freshest profile rather than reusing the stale snapshot —
-    // a finalized voice session may have already merged new preferences into
-    // Firestore server-side while the overlay was open.
     final latest = ref.read(profileProvider).value ?? resolvedProfile;
     if (latest.voiceOnboardingSeen) return;
     await ref.read(profileRepositoryProvider).save(
           user.uid,
           latest.copyWith(voiceOnboardingSeen: true),
         );
+  }
+
+  Future<void> _reScan(RecentSearchEntry entry) async {
+    ref.read(videoProvider.notifier).reset();
+    await ref.read(pipelineProvider.notifier).setImage(entry.imageBytes, entry.mimeType);
+    setState(() => _savedToRecent = true);
+    ref.read(pipelineProvider.notifier).analyzeLoaded();
   }
 
   @override
@@ -81,6 +86,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         setState(() {
           _tapState = const TapIdentifyIdle();
           _productCheckSettled = false;
+          _savedToRecent = false;
         });
       }
       if (next.status == PipelineStatus.success &&
@@ -89,6 +95,15 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         _productCheckTimer = Timer(const Duration(seconds: 5), () {
           if (mounted) setState(() => _productCheckSettled = true);
         });
+        // Save image to recent searches once per scan
+        if (!_savedToRecent) {
+          final bytes    = next.imageBytes;
+          final mimeType = _mimeType;
+          if (bytes != null && mimeType != null) {
+            _savedToRecent = true;
+            ref.read(recentSearchesProvider.notifier).add(bytes, mimeType);
+          }
+        }
       }
     });
 
@@ -104,11 +119,6 @@ class _MainScreenState extends ConsumerState<MainScreen> {
       WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowOnboarding(profile));
     }
 
-    // Acquiring the mic for the first time in a browser tab is slow (OS/
-    // browser audio-hardware cold start) even when permission was already
-    // granted in a prior session — paying that cost here, as soon as the
-    // main screen loads, means the user doesn't eat it the moment they tap
-    // the voice chat FAB. Guarded to run once per screen lifetime.
     if (!_micPrewarmed) {
       _micPrewarmed = true;
       unawaited(Permission.microphone.request());
@@ -278,21 +288,38 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                 child: Text('Connection error: $e', style: const TextStyle(color: Color(0xFFF87171), fontSize: 13)),
               ),
               data: (products) {
-                // Re-sorts an already-finalized saved list by current category
-                // preferences only — the $0/exact-match ordering was already
-                // decided once, at save time, when the source was known.
                 final ranked = rankProducts(products, shoppingCategories,
                     isExactMatchSource: true);
-                return ranked.isEmpty
-                    ? _emptyState()
-                    : ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
+
+                if (ranked.isEmpty) {
+                  return SingleChildScrollView(
+                    child: Column(
+                      children: [
+                        _emptyState(),
+                        RecentSearchesList(onTap: _reScan),
+                      ],
+                    ),
+                  );
+                }
+
+                return SingleChildScrollView(
+                  child: Column(
+                    children: [
+                      ListView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
                         itemCount: ranked.length,
                         itemBuilder: (_, i) => ProductCard(
                           product:            ranked[i],
                           shoppingCategories: shoppingCategories,
                         ),
-                      );
+                      ),
+                      RecentSearchesList(onTap: _reScan),
+                      const SizedBox(height: 100),
+                    ],
+                  ),
+                );
               },
             ),
           ),
@@ -387,13 +414,15 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     );
   }
 
+  String? _mimeType;
+
   Widget _buildVideoSection(VideoState video) {
     final thumbnail = switch (video) {
-      VideoLoaded(:final thumbnail)   => thumbnail,
-      VideoCacheHit(:final thumbnail) => thumbnail,
+      VideoLoaded(:final thumbnail)    => thumbnail,
+      VideoCacheHit(:final thumbnail)  => thumbnail,
       VideoAnalyzing(:final thumbnail) => thumbnail,
-      VideoError(:final thumbnail)    => thumbnail,
-      _                               => null,
+      VideoError(:final thumbnail)     => thumbnail,
+      _                                => null,
     };
 
     final fileName = switch (video) {
@@ -549,9 +578,9 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     if (file == null) return;
 
     ref.read(videoProvider.notifier).reset();
-    final bytes    = await file.readAsBytes();
-    final mimeType = getMimeType(file.path);
-    await ref.read(pipelineProvider.notifier).setImage(bytes, mimeType);
+    final bytes = await file.readAsBytes();
+    _mimeType   = getMimeType(file.path);
+    await ref.read(pipelineProvider.notifier).setImage(bytes, _mimeType!);
   }
 
   Future<void> _pickVideo() async {
@@ -567,12 +596,14 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            const SizedBox(height: 24),
             Icon(Icons.shopping_cart_outlined, size: 52, color: Colors.white.withValues(alpha: 0.15)),
             const SizedBox(height: 14),
             const Text(
               'Matched products will appear here',
               style: TextStyle(color: Color(0xFF475569), fontSize: 12),
             ),
+            const SizedBox(height: 8),
           ],
         ),
       );
@@ -591,7 +622,6 @@ class _MainScreenState extends ConsumerState<MainScreen> {
       country:            profile.country.isEmpty ? null : profile.country,
     );
   }
-
 }
 
 // ── Tap-identify result strip ─────────────────────────────────────────────────

@@ -30,7 +30,7 @@ _LOCATION     = os.environ.get("LOCATION", "us-central1")
 _DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
 _GCS_LENS_BUCKET        = os.environ.get("GCS_LENS_BUCKET", "")
 _SERPAPI_KEY            = os.environ.get("SERPAPI_KEY", "")
-_LENS_TIMEOUT           = int(os.environ.get("LENS_TIMEOUT_SECONDS", "12"))
+_LENS_TIMEOUT           = int(os.environ.get("LENS_TIMEOUT_SECONDS", "60"))
 # Skip Gemini description on /identify by default — Lens works fine without it
 # and Gemini adds 3-6s to every tap. Set to "false" to re-enable.
 _IDENTIFY_SKIP_GEMINI   = os.environ.get("IDENTIFY_SKIP_GEMINI", "true").lower() not in ("0", "false", "no")

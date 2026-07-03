@@ -74,7 +74,7 @@ async def _log_startup_config() -> None:
         get_active_model(),
         os.environ.get("GCS_LENS_BUCKET") or "(unset)",
         "set" if os.environ.get("SERPAPI_KEY") else "(unset)",
-        os.environ.get("LENS_TIMEOUT_SECONDS", "8"),
+        os.environ.get("LENS_TIMEOUT_SECONDS", "60"),
         os.environ.get("IDENTIFY_SKIP_GEMINI", "true"),
     )
 

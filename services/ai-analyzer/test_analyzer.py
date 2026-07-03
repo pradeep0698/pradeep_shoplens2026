@@ -142,3 +142,19 @@ def test_preference_score_sums_category_and_multiple_preference_matches():
     assert analyzer._preference_score(item, ["nike"], []) == 1
     # no hits = 0
     assert analyzer._preference_score({"name": "plain white mug"}, ["nike"], ["Electronics"]) == 0
+
+
+def test_results_per_item_uses_dial_when_multiple_items():
+    assert analyzer._results_per_item(3, max_searches=2) == 2
+    assert analyzer._results_per_item(3, max_searches=None) == analyzer.MAX_SEARCHES_PER_RUN
+
+
+def test_results_per_item_ignores_dial_for_single_item():
+    assert analyzer._results_per_item(1, max_searches=2) == analyzer.MAX_RESULTS_PER_ITEM
+
+
+def test_results_per_item_multi_item_never_exceeds_dial_ceiling():
+    # An out-of-range dial value clamps to MAX_SEARCHES_PER_RUN (5) before the
+    # MAX_RESULTS_PER_ITEM (15) ceiling is even considered — the dial's own
+    # ceiling is tighter, so it's what wins here.
+    assert analyzer._results_per_item(3, max_searches=999) == analyzer.MAX_SEARCHES_PER_RUN

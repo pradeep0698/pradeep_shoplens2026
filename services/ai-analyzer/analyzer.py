@@ -40,6 +40,16 @@ _IDENTIFY_SKIP_GEMINI   = os.environ.get("IDENTIFY_SKIP_GEMINI", "true").lower()
 # busy frame. Per-user profile preference (1-5) is clamped against this.
 MAX_SEARCHES_PER_RUN = 5
 
+# Deployment-level cap on how many results come back per item. The user's 1-5
+# "search results per scan" profile dial only limits results-per-item when a
+# run is searching MULTIPLE items (keeps a busy scan from flooding the
+# shopper with cards); a single-item run — including every /identify tap,
+# which is always exactly one object — ignores the dial and uses this
+# instead, since only one search call runs either way. SerpAPI is billed per
+# search, not per result row, so there's no cost reason to cap a lone search
+# down to 1-5 results.
+MAX_RESULTS_PER_ITEM = int(os.environ.get("MAX_RESULTS_PER_ITEM", "15"))
+
 _tls = threading.local()
 
 
@@ -47,6 +57,16 @@ def clamp_max_searches(requested: int | None) -> int:
     if requested is None:
         return MAX_SEARCHES_PER_RUN
     return max(1, min(int(requested), MAX_SEARCHES_PER_RUN))
+
+
+def _results_per_item(item_count: int, max_searches: int | None) -> int:
+    """How many results to fetch for each item being searched this run.
+    Multi-item runs stay dial-limited (clamped to MAX_RESULTS_PER_ITEM as a
+    safety ceiling); a single-item run uses the deployment default directly,
+    ignoring the dial."""
+    if item_count > 1:
+        return min(clamp_max_searches(max_searches), MAX_RESULTS_PER_ITEM)
+    return MAX_RESULTS_PER_ITEM
 
 
 # Currency has no dedicated field anywhere in the system — it's derived from
@@ -733,7 +753,7 @@ def identify_crop(
     image_mime_type: str | None = None,
     query: str = "",
     country: str = "us",
-    max_results: int = 5,
+    max_results: int = MAX_RESULTS_PER_ITEM,
 ) -> tuple[list[dict], list[str]]:
     """Identify a pre-cropped image via Gemini description → GCS → Google Lens.
     Skips Gemini bounding-box detection (region already selected), but uses Gemini
@@ -953,6 +973,9 @@ def analyze_media(
         logger.info("Capping Lens searches: %d detected → %d (limit=%d)", len(items_raw), search_limit, search_limit)
         items_raw = items_raw[:search_limit]
 
+    results_per_item = _results_per_item(len(items_raw), max_searches)
+    logger.info("Results per item: %d (items=%d, dial=%s)", results_per_item, len(items_raw), max_searches)
+
     # Decode raw image bytes once for cropping
     products: list[dict] = []
     _t_items_start = time.monotonic()
@@ -990,12 +1013,13 @@ def analyze_media(
                           "total": time.monotonic() - _t_item_start}
                 return [], item_warnings, False, timing
 
-            # One listing per detected object — total listings == number of
-            # objects searched, matching the user-configured max_searches.
-            # Cleanup handled by the bucket's 1-day lifecycle rule, not an
-            # explicit delete here, so it's off the request's critical path.
+            # Up to results_per_item listings per detected object — dial-capped
+            # when multiple objects are being searched, deployment-capped when
+            # this is the only one. Cleanup handled by the bucket's 1-day
+            # lifecycle rule, not an explicit delete here, so it's off the
+            # request's critical path.
             _t_lens_start = time.monotonic()
-            matched = _google_lens(gcs_url, query=name, country=country, max_results=1)
+            matched = _google_lens(gcs_url, query=name, country=country, max_results=results_per_item)
             _t_lens = time.monotonic() - _t_lens_start
 
             _t_shopping = 0.0
@@ -1005,7 +1029,7 @@ def analyze_media(
                 logger.warning("No Lens results for '%s' — trying Shopping fallback", name)
                 if _SERPAPI_KEY:
                     _t_shopping_start = time.monotonic()
-                    matched = _search_shopping(name, country=country, max_results=1)
+                    matched = _search_shopping(name, country=country, max_results=results_per_item)
                     _t_shopping = time.monotonic() - _t_shopping_start
                 if matched:
                     logger.info("Shopping fallback matched '%s' → %d result(s)", name, len(matched))
@@ -1149,6 +1173,8 @@ def analyze_media_stream(
         items_raw = _prioritize_items(items_raw, preference_terms, shopping_categories)
         items_raw = items_raw[:search_limit]
 
+    results_per_item = _results_per_item(len(items_raw), max_searches)
+
     final_warnings: list[str] = []
 
     if not (image_data and _GCS_LENS_BUCKET and _SERPAPI_KEY):
@@ -1185,13 +1211,13 @@ def analyze_media_stream(
             logger.warning(msg)
             item_warnings.append(msg)
             return [], item_warnings, False
-        matched = _google_lens(gcs_url, query=name, country=country, max_results=1)
+        matched = _google_lens(gcs_url, query=name, country=country, max_results=results_per_item)
         if matched:
             logger.info("Lens matched '%s' -> %d result(s)", name, len(matched))
         else:
             logger.warning("No Lens results for '%s' — trying Shopping fallback", name)
             if _SERPAPI_KEY:
-                matched = _search_shopping(name, country=country, max_results=1)
+                matched = _search_shopping(name, country=country, max_results=results_per_item)
             if matched:
                 logger.info("Shopping fallback matched '%s' → %d result(s)", name, len(matched))
             else:

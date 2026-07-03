@@ -15,13 +15,13 @@ from pydantic import BaseModel, Field
 from analyzer import (
     analyze_media,
     analyze_media_stream,
-    clamp_max_searches,
     classify_exception,
     currency_for_country,
     identify_crop,
     normalize_country,
     get_active_model,
     set_active_model,
+    MAX_RESULTS_PER_ITEM,
 )
 
 _request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
@@ -479,7 +479,10 @@ async def identify(request: AnalyzeRequest) -> JSONResponse:
             image_mime_type=request.image_mime_type,
             query=request.query,
             country=country,
-            max_results=clamp_max_searches(request.max_searches),
+            # /identify is always a single tapped object — ignore the
+            # multi-object dial (max_searches) and use the deployment default,
+            # since only one search runs here regardless of the dial's value.
+            max_results=MAX_RESULTS_PER_ITEM,
         )
     except Exception as exc:
         elapsed = time.monotonic() - start

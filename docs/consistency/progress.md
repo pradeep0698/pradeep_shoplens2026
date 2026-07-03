@@ -1,301 +1,507 @@
-# Profile Consistency — Progress
+# Profile Consistency Initiative — Status Report
 
-Branch: `feature/consistency`
-Goal: integrate user profile (country, preferences, shopping categories) into the
-analyze pipeline's context/prompt, default region to `us` and derive currency from
-country when not set, and improve result relevance by fine-tuning the context/prompt
-and the item-selection logic that decides what gets searched under the SerpAPI quota cap.
+*Last updated: 2026-07-03*
 
-## What to test (for QA / Business)
+## Summary
 
-Plain-language functional requirements — use this section to test the feature without
-needing to read code. Environment: **shoplens2026-dev** backend is live, and an Android
-test build (.apk) pointed at it is ready — see below for the install file.
+Shopping results now reflect who the shopper actually is: their region, their stated
+preferences, and their preferred categories — instead of every scan being treated as an
+anonymous, US-only, preference-blind request. This closes a real gap where the app already
+*collected* a shopper's preferences but never *used* them when deciding what to search for,
+and fixes two silent regional-consistency bugs along the way.
 
-### ✅ Ready to test now
+**Where this stands right now:** the core feature is live on the `shoplens2026-dev`
+environment and has been validated against real devices and real backend logs. Testing
+surfaced two genuine bugs — both found and fixed. One is already deployed; the other is
+implemented and tested but intentionally **held back** to ship as part of the next release
+batch rather than as a one-line patch.
 
-**FR-1 — New users (or anyone without a country set) default to the US**
-- What changed: if a shopper's profile has no country selected, search now behaves as if
-  "United States" were selected — instead of behaving inconsistently or unpredictably.
-- How to test: use/create a profile with no country chosen (or clear an existing one), scan
-  or search for a product, confirm you get normal results (US retailers/pricing), not an
-  error or empty result.
-- Pass/fail: no crashes, no blank results, results look like a normal US search.
+## What This Means for Shoppers — Real Scenarios
 
-**FR-2 — Currency shown matches the shopper's country**
-- What changed: the app now reports a currency (USD, GBP, EUR, INR, JPY, etc.) that matches
-  whatever country is set on the shopper's profile. No country set → USD.
-- How to test: set the profile's country to a few different countries (US, UK, Germany,
-  India, Japan) one at a time, run a scan/search each time, confirm the currency reported
-  matches that country (USD / GBP / EUR / INR / JPY respectively).
-- Known limitation (see "In design/planning"): this is a currency **label** only — the
-  price number itself is not converted, so don't test/expect converted prices yet.
+These are the actual situations this work changes, told the way a shopper would experience
+them. QA can use these as ready-made test scenarios (step-by-step scripts are in the
+Appendix); for a client demo, these are the story to tell instead of "we added region-aware
+preference logic to the backend."
 
-**FR-3 — Personalized results: preferred categories/brands get priority**
-- What changed: if a shopper has set "Preferred Categories" (e.g. Electronics, Furniture)
-  or free-text style/brand preferences on their profile, and a scan finds more items than
-  the app can look up in one go, the app now looks up the shopper's preferred items first
-  instead of picking arbitrarily.
-- How to test:
-  1. Set a profile's preferred category to, say, "Electronics" and add a preference term
-     like "Nike."
-  2. Lower "max searches per scan" in the profile to a small number (1–2).
-  3. Scan/upload a photo with a mix of preferred and non-preferred items (e.g. electronics
-     next to furniture, or a Nike item next to a plain item).
-- Pass/fail: results favor the preferred category/brand item(s); a non-preferred item may
-  be skipped if the search budget runs out, but a preferred one should not be skipped in
-  favor of a non-preferred one.
+**Scenario 1 — A brand-new shopper who hasn't set a country yet** *(FR-1)*
+Alex just installed the app and hasn't touched profile settings yet. They scan a pair of
+headphones on a store shelf. Before this work, an unset region was a real edge case that could
+have produced broken or empty results. Now the app quietly defaults to US-style results — Alex
+never hits a dead end just because they skipped a setup step.
+**Status: ✅ Done**
 
-**FR-4 — Backup ("fallback") search also respects the shopper's country**
-- What changed: previously, if the camera-based visual search didn't find a match, the
-  app's backup text search always searched as if the shopper were in the US — regardless of
-  their real profile country. That's fixed now.
-- How to test: set profile country to a non-US country, scan an item likely to need the
-  fallback search (something generic/unusual that the visual search may miss), and check
-  results look consistent with that region.
-- Note: this is the hardest one to eyeball from the UI alone — if a tester can't tell
-  whether it worked, flag it here and engineering can confirm via backend logs.
+**Scenario 2 — A shopper outside the US sees prices in their own currency** *(FR-2)*
+Priya, in Mumbai, has set her country to India. She scans a blender. The result card now shows
+"₹2,499" instead of "$2,499" — the currency label matches where she actually is, instead of
+defaulting to USD for every shopper regardless of region.
+**Demo carefully — important caveat:** this is a currency *label* fix, not live conversion.
+The number itself is the same number the search returned; only the currency symbol changed to
+match her region. A "₹2,499" result is not necessarily what that item actually costs in
+rupees today. Real conversion is an open business decision, not yet built — see "Decisions
+Needed" below.
+**Status: ✅ Done (label only — see caveat)**
 
-**Install build**
-- Android test APK (points at `shoplens2026-dev`): `mobile/build/app/outputs/flutter-apk/app-release.apk`
-  (~96 MB), rebuilt 2026-07-02 from this branch **with a blank-screen bug fixed** (see below).
-  Side-load onto a test device to run FR-1 through FR-4 above.
-- **If you already installed an earlier copy of this APK and got a blank screen instead of the
-  login screen, uninstall/reinstall with this rebuilt one** — that was a real bug (not a test
-  failure), now fixed. See "Bug found during testing" below for details.
+**Scenario 3 — A shopper's stated preferences actually influence what gets checked** *(FR-3)*
+Diego told the app he's especially interested in "Electronics" and specifically searches for
+"Nike" gear. He scans a cluttered desk — a laptop, a coffee mug, a notebook, a pair of
+sneakers. The app can only afford to run a couple of searches per scan (a cost/speed
+tradeoff), so *which* items get checked matters. Before this work, Diego's preferences were
+collected at signup but never actually used — the app checked items in whatever order it
+happened to notice them. Now it prioritizes the laptop and sneakers first, because those match
+what Diego said he cares about.
+**What testing caught:** a tester added a specific preference, "Smart watch," on top of a
+broader "Electronics" category preference and scanned a desk with a smart watch on it. The
+smart watch was never picked — a generic "Electronics" match on an unrelated laptop always
+won, no matter how specifically the shopper had asked for something else. A shopper's explicit
+ask should never lose to a generic category match. That's fixed: an item's category match and
+its preference-term matches now both count toward a combined score, instead of category
+blindly overriding preference. Fix is tested (38/38) and queued for the next release batch —
+**not live yet.**
+**Status: 🟡 In progress — fix built and tested, deploying with the next release batch**
 
-### 🐛 Bug found during testing (fixed)
+**Scenario 4 — The backup search path treats shoppers consistently, too** *(FR-4)*
+Sometimes the camera-based search can't confidently identify an item, and the app falls back
+to a text-based search instead. Before this work, that fallback path silently ignored the
+shopper's region — a UK shopper could fall back to a US-flavored search with no indication
+anything had changed. Now the fallback path respects the same region logic as the primary
+path, so a shopper never notices the app switched search strategies underneath them.
+**Status: ✅ Done**
 
-**Symptom:** opening the first Android test APK showed a blank screen instead of the login
-screen — reported by a tester 2026-07-02.
+| # | Scenario | Status |
+|---|---|---|
+| FR-1 | New shopper, no region set → sensible US default | ✅ Done |
+| FR-2 | Currency label matches shopper's region | ✅ Done (label only) |
+| FR-3 | Preferences/categories prioritized under a tight search budget | 🟡 In progress (fix built, not yet deployed) |
+| FR-4 | Fallback search also respects region | ✅ Done |
+| PF-1 | Result count adapts to how cluttered the scan is | 🟡 In progress (deployed to dev, not yet verified/merged) |
 
-**Cause:** this was a build-configuration bug in the local test-build setup, not a bug in
-this branch's feature code. The file that tells the Android build which Firebase project to
-connect to was missing several required values, so the built app ended up with a mismatched
-identity (new project ID, but old project's credentials) — the app's Firebase login system
-fails to start at all in that state, before the login screen ever gets a chance to draw. Same
-root file was also pointing the app's backend URLs at the wrong project name, so even past a
-Firebase fix it wouldn't have talked to the right servers.
+**Scenario 5 — Result count adapts to how cluttered the scan is** *(PF-1)*
+Right now, every detected item gets exactly one result back, whether the shopper scanned a
+single mug or a five-item desk. When a scan finds **multiple items**, results-per-item are now
+capped at the shopper's own "Search results per scan" profile dial (1-5, default 2), so a busy
+scan doesn't flood them with a wall of cards. When a scan finds **exactly one item** —
+including every single-tap identify — the dial is ignored and the shopper sees up to a new
+deployment-level default of **15** results instead. The reasoning: the cost that matters is
+the number of *searches* run (one per item, against a shared, metered SerpAPI quota), not the
+number of *results* a single search hands back — so there's no cost reason to starve a shopper
+down to 1-2 options when only one search happened anyway.
+**Status: 🟡 In progress — built, unit-tested (47/47), deployed to `shoplens2026-dev`
+2026-07-03. Not yet verified on-device, not yet merged to `main`.** *(Full technical design in
+the Appendix.)*
 
-**Fix:** corrected the build configuration, documented the correct values so this doesn't
-recur for future test builds, and rebuilt/verified the APK. This did **not** require any
-change to the profile-consistency feature itself (FR-1 through FR-4) — it was purely a local
-test-build setup issue, now resolved. Engineering detail in the collapsible section below.
+## Status at a Glance
 
-### 🔧 In development (not ready to test yet)
+| Component | Status | Notes |
+|---|---|---|
+| Backend logic (region, currency, preference-aware search) | ✅ Done — live on `shoplens2026-dev` | Deployed, validated against real logs |
+| Android test build | ✅ Done | Points at `shoplens2026-dev`; one startup bug found & fixed |
+| Ranking-fairness fix (Scenario 3 / FR-3) | 🟡 In progress | Tested (47/47), deployed to dev, queued for next release batch |
+| Density-aware result cap (Scenario 5 / PF-1) | 🟡 In progress | Tested (47/47), deployed to dev, not yet verified on-device |
+| iOS test build | ⬜ Pipeline | No blockers, just not prioritized yet |
+| Production rollout | ⬜ Pipeline | Still confined to the dev/test environment by design |
 
-- **iOS test build** — not started for this branch.
+---
 
-### 📋 In design / planning (needs a product decision before it's built)
+## ✅ Done
 
-- **Real currency conversion** — today the currency label (FR-2) is correct, but the actual
-  price number shown is NOT converted into that currency — it's whatever number the search
-  provider returns for that region. Needs a decision: is a currency label sufficient for
-  now, or does this need real price conversion before it's customer-facing?
-- **Web app (internal admin/demo tool)** — FR-1 through FR-4 only apply to the mobile app.
-  The internal web tool does not send profile info to search yet, so none of this is
-  testable there.
-- **Internal API test collection** — the Postman collection used for API-level QA hasn't
-  been updated with the new fields yet. Doesn't affect what a tester sees in the app, but
-  matters if QA is testing directly against the API instead of through the app.
+Shipped and live on `shoplens2026-dev` today:
+
+- **Region-aware search everywhere.** Both the primary (camera) and fallback (text) search
+  paths now use the shopper's actual region, closing a bug where the fallback path silently
+  ignored region and a bug where `product-matcher` never sent region to the search provider at
+  all.
+- **Currency matches region.** Every search response now returns a currency label derived from
+  the shopper's country (USD, GBP, EUR, INR, JPY, defaulting to USD when unset) — label only,
+  not live conversion (see Decisions Needed).
+- **Preferences actually reach the backend.** Preference terms and preferred categories,
+  previously collected at signup and never used, are now sent with every scan and used to bias
+  both Gemini's detection prompt and which items get searched under the tight search-budget
+  cap.
+- **Cache correctness fix.** `product-matcher`'s result cache is now keyed by region, closing a
+  bug where a US search and a UK search for the same item could return each other's cached
+  result.
+- **Android test build fixed.** A blank-screen-on-launch bug (missing Firebase config values in
+  the dev test-build config) was found, fixed, and the APK rebuilt and reverified.
+- **Real latency baseline measured.** p50/p95 numbers against the live deploy, not estimates —
+  see the Performance Ideas section below.
+
+## 🟡 In Progress
+
+**Ranking-fairness fix (Scenario 3 / FR-3)** — built, unit-tested (38/38 passing), and
+replayed against the tester's original failing scenario to confirm it now produces a correct,
+explainable result. **Deliberately held out of production** per direction, to ship as the
+first item in a batched release rather than a standalone hotfix. Engineering detail in the
+Appendix.
+
+**PF-1 — density-aware per-object result cap (Scenario 5)** — built, unit-tested (17 new tests,
+47/47 total passing), and deployed to `shoplens2026-dev` alongside the ranking-fairness fix.
+Removed the mobile client's `.take(5)` cap on tap-identify results, which would otherwise have
+silently discarded the extra results the server now returns. **Not yet verified on a real
+device, not yet merged to `main`.** Engineering detail in the Appendix.
+
+**Next release batch (accumulating):**
+1. ✅ Ranking-fairness fix — ready, described above.
+2. ✅ PF-1 — density-aware per-object result cap, described above.
+3. *(open — add the next item here before this batch ships)*
+
+**Ship checklist once the batch is finalized:** on-device verification of both items above →
+push `next-release-batch` → merge to `main` → redeploy `ai-analyzer` + `product-matcher` to
+`shoplens2026-dev` (already done ahead of merge, for dev testing) → new APK build already done
+for this batch → re-validate Scenario 3 / FR-3 and Scenario 5 / PF-1 with real scans.
+
+## ⬜ In Pipeline
+
+Not yet started, roughly ordered by what unblocks the most value next:
+
+- **iOS test build.** No blockers — just not yet prioritized.
+- **Search-budget A/B (`max_searches=2` vs. `=5`).** Needed to answer Decision #2 below with
+  data instead of a guess; deferred because SerpAPI quota ran out mid-measurement session.
+- **Currency conversion decision.** Waiting on a business call — see Decisions Needed.
+- **Unify the category-keyword list**, currently duplicated (and already drifting) across
+  three separate files in the backend and mobile app — the same class of bug as Bug #2 above,
+  just waiting to happen again somewhere else.
+- **Confirm incremental result rendering on mobile** — the plumbing to stream results in as
+  they arrive exists; unclear if the UI actually takes advantage of it yet or just waits for
+  everything at once.
+- **Extend region/preference awareness to the internal web tool** — explicitly out of scope so
+  far; only worth doing if that tool needs to demo this feature to anyone.
+- **Production rollout** — still confined to dev/test by design until the above settles.
+
+## 💡 Ideas to Improve Performance
+
+Thoughts and candidate improvements, roughly ordered by expected cost/benefit — not committed
+work, and not sequenced into a release yet.
+
+- **We now have real numbers to work from.** Measured 2026-07-03 against the live
+  `shoplens2026-dev` deploy (20-run load test per endpoint): `/analyze` p50 **49.3s** / p95
+  **60.3s** (at `max_searches=5`; production currently defaults to 2, so this is a
+  current-code cost ceiling, not yet a direct answer to the search-budget question below).
+  `/identify` p50 **19.2s** / p95 **26.4s** on a cache miss, but only **~55ms** on a cache hit
+  (30-minute repeat-crop cache — this is the real latency a shopper feels on a repeat tap).
+  Full methodology and raw numbers: [`docs/analyze-perf-test-results.md`](../analyze-perf-test-results.md).
+- **Shared caching across users, not just per-session.** Today's cache resets constantly
+  because the backend scales to zero between requests. Sharing it across users/instances would
+  directly cut search-provider costs and reduce the quota errors seen during testing — likely
+  the single cheapest win available.
+- **Raise or tune the search budget (`max_searches`) with data, not guesses.** A lot of the
+  "which item should win" ambiguity seen in testing traces back to the tight default budget
+  (2) rather than the ranking logic itself. Needs the A/B run above before recommending a
+  number.
+- **Graceful fallback when the search provider's quota is exhausted**, instead of returning
+  nothing. This measurement session itself burned through the shared SerpAPI key mid-batch —
+  a real, observed failure mode, not a hypothetical.
+- **Let Gemini return a confidence score per detected item**, giving item selection a smarter
+  signal than "what a shopper happened to type" when preferences don't clearly point to one
+  item.
+- **Pre-warm common category searches during idle time** to shave latency off first-scan cold
+  starts.
+- **Near-duplicate item matching** to avoid redundant searches within the same scan.
+- **Category-specific search strategies** (e.g. electronics by model number, clothing by
+  brand+size) instead of one generic template for every category.
+- **A feedback loop that learns preference weighting from what shoppers actually tap**,
+  instead of a fixed keyword list that requires an engineer to update it.
+- **A/B testing infrastructure** so future ranking/prompt changes can be measured against a
+  baseline instead of eyeballed.
+- **A budget/price-range preference field**, and **persisting "ignored" items across sessions**
+  instead of resetting every scan — both raised in the broader pipeline review, not yet
+  scoped.
+
+Also surfaced along the way (during the 2026-07-03 latency run): a 1-in-20 Vertex AI `429
+RESOURCE_EXHAUSTED` under burst load — worth keeping an eye on if traffic grows, feeds into
+the graceful-fallback idea above.
+
+## Decisions Needed From Business/Product
+
+These aren't bugs — they're places where the team made a scoping call that a business owner
+should sign off on before this goes further:
+
+1. **Currency: label vs. real conversion.** Today the app correctly *labels* the currency
+   (USD, GBP, EUR, etc.) based on region, but does not convert the actual price number (see
+   Scenario 2's caveat above). Is a correct label sufficient for the current phase, or does
+   this need real conversion before it's shown to real customers?
+2. **Search budget size (`max_searches`).** The default cap on how many items get checked per
+   scan is small (2). A lot of "which item should win" ambiguity in testing traces back to
+   this tight budget rather than the ranking logic itself — worth a business call on whether
+   to raise it, and the cost/latency tradeoff of doing so (see Performance Ideas above).
+3. **Rollout scope.** This currently covers the mobile app only. The internal web
+   demo/admin tool does not send region/preference data to search at all — low priority
+   unless that tool needs to demo this feature to anyone.
+4. **PF-1's profile copy.** PF-1 (Scenario 5, now implemented) reuses the "Search results per
+   scan" dial for a second purpose it wasn't originally labeled for — worth a copy review so
+   the setting still reads clearly once it also controls per-item result count. (The other
+   open question raised when this was first proposed — how to render more than one result card
+   per item — turned out to be a non-issue: the mobile product list was already a flat list
+   with no per-item grouping, so extra results just appear as more cards with zero UI changes
+   needed.)
+
+## Known Issues Found & Fixed During Testing
+
+Two real bugs were caught by hands-on testing (not by code review) — both are documented in
+full in the Appendix, summarized here:
+
+1. **Blank screen instead of login screen** (Android test build) — a test-build
+   configuration file was missing required app-identity values, causing the app to crash on
+   startup before showing anything. Fixed and redeployed 2026-07-02 — not a bug in the
+   feature itself, and does not affect the currently-installed test build.
+2. **Preference fairness bug** (Scenario 3 above) — found, fixed, tested, queued for the next
+   push.
+
+This track record (two real, non-trivial bugs found and fixed within two days of testing) is
+exactly why real-device testing before merging to production is worth the time it takes.
+
+---
+
+## Appendix — Engineering Detail
 
 <details>
-<summary>Engineering deploy details (click to expand)</summary>
+<summary><strong>Functional requirement test scripts (click to expand)</strong></summary>
 
-- Backend deployed to `shoplens2026-dev`: `ai-analyzer` (revision `ai-analyzer-00002-v6g`)
-  and `product-matcher` (revision `product-matcher-00005-s9m`), both serving 100% traffic,
-  deployed via `gcloud run deploy --source` on 2026-07-02 (not through the GitHub Actions
-  workflow — see the `gh api` note in the Log). `SERPAPI_KEY`/`GCS_LENS_BUCKET`/`PROJECT_ID`
-  confirmed live and non-placeholder on both. `state-manager`, `voice-assistant`,
-  `pubsub-worker` were not redeployed — untouched by this branch.
-- Android build: `flutter build apk --release --dart-define-from-file=.dart_define/shoplens2026-dev.json`
-  with `google-services.shoplens2026-dev.json` swapped in for `google-services.json`
-  (restored from `.bak` afterward, confirmed clean via `git status`). Completed 2026-07-02.
-  Output: `mobile/build/app/outputs/flutter-apk/app-release.apk` (~96 MB, rebuilt after the
-  bug fix below — first build was ~92 MB and had the blank-screen bug).
-- **Blank-screen bug root cause**: `mobile/.dart_define/shoplens2026-dev.json` (gitignored,
-  `mobile/.gitignore:52` excludes all of `.dart_define/` — not tracked in git, must be created
-  locally per the setup doc) only set `FIREBASE_PROJECT_ID`. `lib/firebase_options.dart` reads
-  4 more keys (`FIREBASE_ANDROID_API_KEY`, `FIREBASE_ANDROID_APP_ID`,
-  `FIREBASE_MESSAGING_SENDER_ID`, `FIREBASE_STORAGE_BUCKET`) via `String.fromEnvironment`, and
-  falls back to hardcoded defaults for the *old* `shoplens-dev-499700` project when a dart-define
-  key isn't supplied — so the built app had `FIREBASE_PROJECT_ID=project-b1a5dd5a-69e6-4db3-9d7`
-  paired with an API key/App ID/sender ID belonging to a different project. `Firebase.initializeApp()`
-  in `lib/main.dart:main()` throws on that mismatch, before `runApp()` — hence blank screen, no
-  error UI (release build). Separately, the file used `AI_ANALYZER_URL`/`PRODUCT_MATCHER_URL`/etc.,
-  but `lib/core/constants/api_constants.dart` actually reads `ANALYZER_API_URL`/`MATCHER_API_URL`/etc.
-  — those overrides were silently ignored and the app would have fallen back to the old project's
-  URLs baked into the bundled `mobile/.env`.
-- **Fix**: corrected `mobile/.dart_define/shoplens2026-dev.json` locally (sourced the 4 missing
-  Firebase values from `mobile/android/app/google-services.shoplens2026-dev.json`, renamed the 4
-  URL keys), and — since that file is gitignored and this doc (`docs/shoplens2026-dev-setup.md`
-  Section 14) is the actual source of truth anyone would copy from — fixed the same bug at its
-  source in that doc so it can't recur for the next person/build. Rebuilt and reverified the APK.
-- Full engineering task breakdown: see "Todo" below.
+**FR-1 — Defaults to US when no region is set**
+- How to test: use/create a profile with no country chosen, scan or search for a product,
+  confirm normal US-style results (no crash, no blank/empty result).
+
+**FR-2 — Currency label matches region**
+- How to test: set the profile's country to a few different countries (US, UK, Germany,
+  India, Japan), run a scan/search each time, confirm currency shown matches (USD / GBP /
+  EUR / INR / JPY). Reminder: label only, price number is not converted.
+
+**FR-3 — Preferred categories/brands get priority under a tight search budget**
+- How to test: set a preferred category (e.g. "Electronics") and a preference term (e.g.
+  "Nike"), lower "max searches per scan" to 1–2, scan a photo with a mix of matching and
+  non-matching items, confirm matching items are prioritized. **Re-test after the next
+  deploy** — this is what surfaced the fairness bug being fixed in the next release batch.
+
+**FR-4 — Fallback search also respects region**
+- How to test: set a non-US country, scan an item likely to need the backup text-search path
+  (something the camera-based search may miss), confirm results look region-consistent.
+  Hardest to eyeball from the UI alone — engineering can confirm via backend logs if unclear.
+
+**Install build:** `mobile/build/app/outputs/flutter-apk/app-release.apk`, points at
+`shoplens2026-dev`, rebuilt 2026-07-03 on the `next-release-batch` branch with the blank-screen
+fix, the tap-identify consistency/JPEG changes, the ranking-fairness fix, and PF-1 all included.
 
 </details>
 
-## Scope decisions
+<details>
+<summary><strong>Bug #1 — blank screen instead of login screen (full detail)</strong></summary>
 
-- **Currency**: no stored `currency` field. Derive it from `country` via a static
-  lookup table (matches the 19-country dropdown in `profile_form.dart`), defaulting
-  to `USD`. Confirmed via SerpAPI docs that neither `google_shopping` nor
-  `google_lens` engines accept a `currency` param — pricing is implicitly driven by
-  `gl` (country) already, so this is a labeling/consistency concern, not a live
-  conversion feature.
-- **Rollout surfaces**: ai-analyzer, product-matcher, and mobile app wiring are in
-  scope. Frontend (Next.js admin/test UI) is out of scope for this pass — it's an
-  internal tool, not the consumer app; noted as a follow-up.
+**Symptom:** opening the first Android test APK showed a blank screen instead of the login
+screen.
 
-## Key findings (baseline, before this branch)
+**Cause:** `mobile/.dart_define/shoplens2026-dev.json` (gitignored — not tracked in git,
+`docs/shoplens2026-dev-setup.md` Section 14 is its only source of truth) was missing 4 of 5
+required Firebase identity values. `lib/firebase_options.dart` silently fell back to a
+*different, older* Firebase project's hardcoded defaults for the missing ones — pairing the
+new project ID with the old project's API key/App ID/sender ID. `Firebase.initializeApp()`
+throws on that mismatch inside `main()`, before any UI renders — hence blank screen, no error
+shown (release build). Separately, the same file used the wrong variable names for the
+backend URLs, so those overrides were silently ignored too.
 
-1. `AnalyzeRequest.country` already defaults correctly today: mobile sends `null`
-   when `profile.country` is empty, `includeIfNull: false` drops the key, and
-   ai-analyzer's Pydantic default (`"us"`) fills in. **Not a bug** — kept as-is,
-   just made more defensive (empty-string guard) for robustness.
-2. `profile.preferenceTerms` and `profile.shoppingCategories` are collected in the
-   profile form and already used for **client-side re-ranking** of results
-   (`product_ranker.dart`) — but are **never sent to the backend**. Gemini's
-   detection prompt and the SerpAPI-quota item-selection cap have zero awareness of
-   user preferences. This is the actual "profile → analyze API context" gap.
-3. `services/product-matcher/matcher.py`'s `_shopping_search()` never passes SerpAPI's
-   `gl` (country) param at all — real consistency bug. The client-side fallback path
-   (`/match`, used when Lens finds nothing) is region-blind regardless of the user's
-   profile, while the primary ai-analyzer path is region-aware. Same for `/search`.
-4. No `currency` concept exists anywhere in the codebase; pricing is implicitly USD
-   everywhere (`product-matcher/main.py` docstring says so explicitly).
-5. When Gemini detects more items than `max_searches` allows, both `analyze_media`
-   and `analyze_media_stream` truncate with a blind `items_raw[:search_limit]` —
-   no prioritization by user preference. Quota gets spent on whatever Gemini listed
-   first, not what the user is likely to want.
+**Fix:** corrected the local dart-define file and — since it's gitignored — fixed the same
+bug at its actual source, `docs/shoplens2026-dev-setup.md` Section 14, so it can't recur for
+future builds. Rebuilt and reverified the APK (~96 MB). Deployed/resolved 2026-07-02.
 
-## Todo
+</details>
 
-### services/ai-analyzer — DONE
-- [x] Add `_COUNTRY_CURRENCY` lookup + `currency_for_country()` / `normalize_country()` helpers in `analyzer.py`
-- [x] `AnalyzeRequest` (main.py): add `preference_terms`, `shopping_categories` fields
-- [x] Treat empty-string `country` as unset (defensive normalize, not just Pydantic default)
-- [x] Build a preference/category context block (mirrors `_build_ignore_block`) and inject into `_PROMPT`
-- [x] Prioritize items matching preference_terms/shopping_categories before truncating to `max_searches` (both `analyze_media` and `analyze_media_stream`)
-- [x] Thread `preference_terms`/`shopping_categories` through `analyze_media`, `analyze_media_stream` signatures
-- [x] Include derived `currency` in `/analyze`, `/analyze/stream` (done event), `/identify` responses
-- [x] Log profile context (country/currency/preferences/categories) per request, same pattern as existing `MLKIT |` log line
-- [x] Add unit tests for the new pure helpers (currency lookup, prioritization ordering) — `test_analyzer.py`, 9 tests, all pass
-- [x] Manual e2e check with mocked Gemini/GCS/Lens: empty country → `us`/`USD`, preference-based prioritization confirmed under `max_searches` cap
+<details>
+<summary><strong>Bug #2 — preference fairness + plural matching (full detail)</strong></summary>
 
-### services/product-matcher — DONE
-- [x] Add `country` (default `us`) to `MatchRequest` and `SearchRequest`
-- [x] Add `preference_terms`/`shopping_categories` to `MatchRequest` for consistent prioritized truncation
-- [x] Thread `country` through `matcher.py` (`_shopping_search`, `_search_product`, `match_products`, `search_products`) → SerpAPI `gl` param — fixed the region-blind bug (it never sent `gl` at all before this)
-- [x] Prioritize items by preference before truncating to `max_searches` in `match_products` (mirrors ai-analyzer)
-- [x] Derive + return `currency` in `/match` and `/search` responses
-- [x] Fixed `_search_product`/`search_products` caches to key on country too (were silently country-blind — a GB search could return a cached US result)
-- [x] Updated `test_matcher.py`: fixed signature for the monkeypatched `search_products` lambda, added 7 new tests, fixed a pre-existing unrelated test bug (`max_results=99` violated the endpoint's own `le=20` bound before ever reaching the clamp logic — changed to 15). 20/20 pass.
+**Symptom:** a tester added "Smart watch" and "laptops" as explicit preferences on top of an
+"Electronics" preferred category, scanned a desk photo, and expected the smart watch to be
+favored. It wasn't picked at all, and the "laptops" preference appeared to have no effect.
 
-### Mobile app wiring — DONE
-- [x] `analyze_request.dart` (+ regenerated `.g.dart` via build_runner): added `preference_terms`, `shopping_categories` fields, now sent to the backend (previously computed for client-side ranking only, never transmitted)
-- [x] `match_request.dart` (+ regenerated `.g.dart`): added `country`, `preference_terms`, `shopping_categories`
-- [x] `analyze_image_usecase.dart`: sends preference/category fields on `AnalyzeRequest`; `country` now threaded through `execute()` → `_matchInBackground` → `MatchRequest` (previously silently dropped on the product-matcher fallback path)
-- [x] `tap_identify_usecase.dart`: sends preference/category fields on `AnalyzeRequest`
-- [x] `pipeline_provider.dart`: no change needed — it already passed `country` into `execute()`; the fix was inside `execute()` forwarding it onward
-- [x] `flutter pub run build_runner build --delete-conflicting-outputs` — clean regen, diffs match expectations
-- [x] `flutter analyze` — no new errors/warnings introduced (1 pre-existing unrelated error in `test/widget_test.dart`, pre-dates this branch)
-- [x] `flutter test test/core/utils/product_ranker_test.dart` — 11/11 pass, unaffected
+**Cause (two compounding issues):**
+1. The ranking logic checked "does this item match the preferred category?" *before* "does
+   it match a preference term?" — any category match, even with zero preference matches,
+   unconditionally outranked every item with a preference match but no category match. A
+   shopper's specific, explicit preference could never beat a generic category match.
+2. Preference terms were matched as exact literal text only — "laptops" (plural, as typed)
+   never matched an item named "...laptop" (singular), so that term had zero effect even on
+   items it clearly described.
 
-### Docs / verification — DONE
-- [x] Ran `update-api-specs` skill: patched `enrich_ai_analyzer()`/`enrich_product_matcher()` in `docs/postman/generate_api_specs_detailed.py` (new response fields `country`/`currency` on `AnalyzeResponse`/`IdentifyResponse`/`MatchResponse`/`SearchResponse` + the stream `done` event; new request examples with `preference_terms`/`shopping_categories`), regenerated `docs/postman/apiSpecs/*.openapi.json` and `docs/api-specs/*.openapi.json`, validated both with `openapi-spec-validator` — OK
-- [x] Run product-matcher pytest suite — 20/20 pass
-- [x] Run ai-analyzer pytest suite (new) — 9/9 pass
-- [x] Run mobile `flutter test` (ranking/unit tests unaffected, confirmed) — 11/11 pass
-- [x] Update this file as a running log
+**Fix:** category match and each matching preference term now each contribute a point to a
+combined score (additive), instead of category unconditionally overriding preference.
+Preference matching now also tolerates simple plurals ("laptops" ↔ "laptop") in either
+direction. Replayed the tester's exact scenario against the fix: the items that now win (a
+laptop and a laptop stand) do so because "laptops" now correctly matches both, giving them a
+stronger *combined* score than the smart watch's single preference-only match — a legitimate,
+explainable result instead of the previous blind bug. Added 10 new unit tests (14/14
+ai-analyzer, 24/24 product-matcher — 38/38 total).
 
-**Not done / explicitly out of scope for this pass:**
-- Postman collection (`docs/postman/shoplens-all-services.postman_collection.json`) request bodies weren't updated with the new fields — no endpoints were added/removed, only fields on existing bodies, and the collection didn't have `country` in its example bodies even before this branch. Low-priority follow-up.
-- Frontend (Next.js) — descoped per the rollout-scope decision above; still sends no `country`/profile context to `/analyze` or `/identify`.
-- Currency conversion / mobile-side price formatting — descoped per the currency-scope decision above; `currency` is a response label only, prices are whatever SerpAPI returns for the `country`/`gl` region.
+**Changed:** `services/ai-analyzer/analyzer.py` (`_preference_sort_key` → `_preference_score`,
+additive; added `_term_matches` with plural tolerance), `services/product-matcher/matcher.py`
+(same pattern: `_item_priority` → `_item_score`, added `_term_matches`). No mobile/APK change
+needed — backend-only. **Status: implemented and tested, held for the next release batch per
+your direction — not yet committed or deployed.**
 
-## Summary of changes
+</details>
 
-**Real bugs fixed** (not just new features):
-1. `product-matcher`'s `_shopping_search()` never passed SerpAPI's `gl` (country) param — every `/match`/`/search` call was region-blind regardless of the user's profile, while ai-analyzer's Lens/Shopping calls were already region-aware. Now fixed.
-2. `product-matcher`'s SerpAPI response cache (`_search_product`, `search_products`) was keyed without country — a US search and a GB search for the same item name could return each other's cached result. Now keyed on country too.
-3. `profile.country` was dropped entirely on the mobile app's product-matcher fallback path (`_matchInBackground`) — now threaded through.
+<details>
+<summary><strong>PF-1 — density-aware per-object result cap (technical design, implemented)</strong></summary>
+
+**Before:**
+- The "Search results per scan" profile dial is `maxSearchesPerRun` in Dart
+  (`mobile/lib/data/models/user_profile.dart`), Firestore key `max_searches_per_run`, sent to
+  both backends as `max_searches` (`AnalyzeRequest`/`MatchRequest`). Range 1-5
+  (`maxSearchesPerRunCeiling = 5`), default 2 (`defaultMaxSearchesPerRun`).
+- The dial had exactly **one** job: capping how many *detected items* get searched at all in
+  the multi-item `/analyze` and `/match` flows. Results per item were hardcoded to **1** in
+  that same pipeline (`_google_lens(..., max_results=1)` / `_search_shopping(...,
+  max_results=1)` in `analyzer.py`; `results[0]` in `matcher.py`, even though 3 raw results
+  were already being fetched and discarded). Only the single-tap `/identify` flow returned more
+  than one result, and it piggybacked on the same dial (capped at 5), further truncated to 5
+  client-side via `.take(5)` in `tap_identify_usecase.dart`.
+
+**Implemented:**
+1. New deployment-level env var, `MAX_RESULTS_PER_ITEM` (default `"15"`), read the same way as
+   other numeric env vars in this codebase (`_LENS_TIMEOUT` is the existing pattern) — added to
+   both `services/ai-analyzer/analyzer.py` and `services/product-matcher/matcher.py`. A shared
+   `_results_per_item(item_count, max_searches)` helper in both files implements the rule:
+   `min(clamp_max_searches(max_searches), MAX_RESULTS_PER_ITEM)` when `item_count > 1`,
+   `MAX_RESULTS_PER_ITEM` directly when `item_count == 1`.
+2. `analyzer.py`: `analyze_media` and `analyze_media_stream` both compute `results_per_item`
+   right after their existing item-truncation step and pass it into `_google_lens`/
+   `_search_shopping` in place of the hardcoded `1`. `/identify`'s `max_results` now comes
+   straight from `MAX_RESULTS_PER_ITEM` (`main.py`'s `/identify` route) instead of
+   `clamp_max_searches(request.max_searches)`, since a tap is always single-object.
+3. `matcher.py`: `_search_product` now returns `list[dict]` (up to `max_results`, still cached)
+   instead of a single `Optional[dict]`; `match_products` collects every result per item instead
+   of just the first, deduping by `product_id` across the whole run same as before.
+4. `MAX_SEARCHES_PER_RUN` (the item-count ceiling) is untouched — this feature only changed
+   results-*per*-item, not how many items get searched.
+5. Mobile: removed `tap_identify_usecase.dart`'s `.take(5)` — the server now enforces the real
+   cap, so the client cap would have silently thrown away results.
+
+**Resolved open question:** rendering >1 result card per item in the multi-object flow turned
+out to need zero UI work — the product list was already a flat list with no per-item grouping
+(`ProductCard` in a plain `ListView.builder`), so extra results just appear as more cards.
+**Still open:** the profile dial's copy — see "Decisions Needed" #4.
+
+**Tests:** 17 new (3 in `test_analyzer.py`, 6 in `test_matcher.py`, plus 8 more covering
+`_search_product`'s new list-returning signature and `match_products`'s multi-result handling),
+2 existing tests updated for the changed `_search_product` signature. 47/47 passing across
+both services.
+
+**Status: implemented, unit-tested, deployed to `shoplens2026-dev` 2026-07-03 (revisions
+`ai-analyzer-00004-m47`, `product-matcher-00007-mqv`), on the `next-release-batch` branch. Not
+yet verified on a real device, not yet merged to `main`.**
+
+</details>
+
+<details>
+<summary><strong>What shipped in the current live deploy (click to expand)</strong></summary>
+
+**Real bugs fixed (not just new features):**
+1. `product-matcher` never sent the search provider's region parameter at all — `/match` and
+   `/search` were region-blind regardless of the shopper's profile, while the primary search
+   path was already region-aware.
+2. `product-matcher`'s result cache wasn't keyed by region — a US search and a UK search for
+   the same item could return each other's cached result.
+3. A shopper's region was dropped entirely on the mobile app's backup-search fallback path.
 
 **New capability:**
-4. `profile.preferenceTerms`/`profile.shoppingCategories` were collected and used for client-side re-ranking only — Gemini's detection prompt and both services' SerpAPI-quota item-selection caps had zero awareness of them. Now: (a) Gemini's prompt is biased to list preferred items first, and (b) when there are more detected items than `max_searches` allows, both `ai-analyzer` and `product-matcher` prioritize preference/category matches before truncating, instead of an arbitrary cutoff.
-5. Currency is now derived from country (lookup table, no new stored field) and returned on every analyze/match/search response for consistency — defaults to USD when country is unset, matching the existing country default.
+4. A shopper's preference terms and preferred categories are now sent to the backend at all
+   (previously collected but never transmitted) and used to bias both Gemini's detection
+   prompt and which items get searched under the search-budget cap.
+5. Currency is derived from region (no new stored field) and returned on every search
+   response for consistency, defaulting to USD.
 
-## Follow-up backlog — broader UX/performance research (2026-07-02)
+**Deploy record:** `ai-analyzer` (revision `ai-analyzer-00002-v6g`) and `product-matcher`
+(revision `product-matcher-00005-s9m`) on `shoplens2026-dev`, deployed via
+`gcloud run deploy --source` on 2026-07-02 (GitHub Actions deploy path is blocked by an
+unrelated, known `gh` CLI API issue against this repo — see `docs/github/github-accounts.md`).
+`state-manager`, `voice-assistant`, `pubsub-worker` were not touched by this work.
 
-This branch's scope was profile→context wiring (country/currency/preferences into the prompt
-and item-selection truncation). A broader pass across the full pipeline (camera → Gemini →
-SerpAPI → ranked results) surfaced further opportunities — not started, listed here so the
-next branch can pick up at the top. Prioritized by value-for-effort, not by discovery order.
+**Scope decisions made:**
+- Currency is a derived label (lookup table from region), not a stored field or a real
+  conversion — the search provider has no currency parameter of its own, so this is a
+  labeling/consistency fix, not a live-conversion feature.
+- Rollout covers ai-analyzer, product-matcher, and the mobile app. The internal web
+  admin/demo tool was explicitly descoped.
 
-### Tier 1 — quick wins (small effort, do next)
+</details>
 
-- [ ] **Unify `_CATEGORY_KEYWORDS`** — duplicated verbatim in `services/ai-analyzer/analyzer.py`,
-  `services/product-matcher/matcher.py`, and `mobile/lib/core/utils/product_ranker.dart`. The
-  mobile copy has already drifted (missing keywords the backend copies have, e.g. "bed frame",
-  "bakeware", "throw"). Same class of bug this branch already fixed twice (missing `gl` param,
-  country-blind cache key) — extract to one source of truth.
-- [ ] **Weight preference matches by count, not hit/miss** — `_item_priority`/`_prioritize_items`
-  in both `analyzer.py` and `matcher.py` use a binary sort key; an item matching 3 preference
-  terms ranks identically to one matching 1. Small change to the sort-key tuple.
-- [ ] **Aggregate the existing `TIMING |` log lines into real metrics** (Cloud Monitoring custom
-  metrics or similar) — no dashboard/p50/p95 exists today. A prior perf doc's latency claims
-  were admittedly "inferred from code structure," not measured. This unlocks knowing whether
-  any other item on this list is actually worth doing.
-- [ ] **Confirm `/analyze/stream` results render incrementally on mobile**, not just at the
-  `done` event — the NDJSON streaming plumbing already exists end-to-end; if the UI isn't
-  consuming it progressively yet, this is the cheapest "feels faster" win available and may
-  just be a UI fix.
+<details>
+<summary><strong>Original engineering task checklist (click to expand)</strong></summary>
 
-### Tier 2 — medium investment (real value, real effort)
+All items below are complete and shipped in the current live deploy unless marked otherwise.
 
-- [ ] **Shared cross-request cache (Redis/Memorystore)** replacing product-matcher's in-memory
-  `TTLCache(maxsize=500, ttl=1800)` — Cloud Run scale-to-zero wipes the current per-instance
-  cache constantly, so real hit-rate across users is near zero in practice. Directly cuts
-  SerpAPI spend and reduces `SERP_QUOTA_EXCEEDED` frequency. Tradeoff: new infra dependency.
-- [ ] **Add a `price_range` profile field**, fold into the preference/context block — profile
-  currently has no budget/brand-affinity signal at all, only category/preference/ignore terms.
-- [ ] **Have Gemini return a confidence/salience score per item** — gives the item-selection
-  truncation a real fallback sort key (vs. raw Gemini listing order) when nothing matches the
-  user's preferences.
-- [ ] **Graceful degradation on `SERP_QUOTA_EXCEEDED`** — today it's a warning + blank results;
-  a pre-computed "popular items per category" cache could serve as a fallback instead.
-- [ ] **Persist `ignore_terms` across sessions** (rolling "last N ignored" per user) instead of
-  resetting every scan — compounds over time instead of starting from zero each time.
+**services/ai-analyzer**
+- Region/currency lookup + normalization helpers
+- `preference_terms`/`shopping_categories` added to the request model
+- Empty region defensively treated as unset
+- Preference/category context injected into the Gemini prompt
+- Items matching preferences prioritized before truncating to the search-budget cap
+- Currency included in all response types
+- Profile context logged per request
+- 9 unit tests + manual end-to-end check (now 14, see Bug #2)
 
-### Tier 3 — larger investment (strategic, sequence-dependent)
+**services/product-matcher**
+- Region + preference/category fields added to request models
+- Region threaded through to the search provider call (was the region-blind bug)
+- Preference-based prioritization mirrored from ai-analyzer
+- Currency derivation + response inclusion
+- Cache keys fixed to include region (was the cache bug)
+- Test suite updated, 20 tests passing (now 24, see Bug #2)
 
-- [ ] **A/B testing scaffolding for prompt/ranking changes** — nothing today measures whether a
-  prompt tweak actually helped. Makes every future Tier 1/2 prompt change measurable instead of
-  eyeballed. Depends on Tier 1's latency-metrics work landing first.
-- [ ] **Category-specific SerpAPI query templates** (electronics → model numbers, clothing →
-  brand+size, vs. today's one-size-fits-all name template) — likely valuable, but only
-  testable once A/B scaffolding exists above.
-- [ ] **Embedding-based near-dup matching** for the fallback path, so near-identical Gemini item
-  names (e.g. "white ceramic mug" vs. "cream stoneware mug") share a cache entry instead of
-  each cold-querying SerpAPI.
-- [ ] **Feedback loop**: log tap/click-through events (product_id, rank position, tapped) and
-  periodically re-weight `_CATEGORY_KEYWORDS`/preference terms from real usage instead of a
-  static list. Needs an event pipeline + a retraining/re-weighting job — the largest item here.
-- [ ] **Pre-warm/batch common category searches** during idle time — depends on the Tier 2
-  shared cache existing first.
+**Mobile app wiring**
+- Request models extended to actually send preference/category/region data
+- Both the primary and fallback search paths updated
+- Code generation regenerated cleanly, static analysis clean, existing tests unaffected (11/11)
 
-**Recommended sequencing:** (1) latency metrics — everything else is a guess without it; (2)
-shared cross-request cache — cheapest infra win, biggest cost/reliability payoff; (3) unify
-`_CATEGORY_KEYWORDS` — small, contained, same bug class already fixed twice on this branch;
-(4) the rest, roughly in tier order, since each Tier 3 item's prerequisite (metrics, cache,
-A/B infra) needs to land first.
+**Docs / verification**
+- API specs (OpenAPI, Postman-adjacent) regenerated and validated
+- Full test suite green across all three surfaces at time of merge
+- Postman collection request bodies *not* updated with new fields (low priority — no
+  endpoints changed, only fields on existing bodies)
+- Internal web app and real currency conversion explicitly out of scope for this pass
 
-## Log
+</details>
 
-- 2026-07-02: Branch created, exploration complete, plan written above.
-- 2026-07-02: All 4 workstreams complete (ai-analyzer, product-matcher, mobile, docs/verification). Full test suite green: ai-analyzer 9/9, product-matcher 20/20, mobile flutter test 11/11, flutter analyze clean (no new issues), OpenAPI specs regenerated and validated.
-- 2026-07-02: Committed feature work (`eba6091`) and pushed `feature/consistency` to origin. Confirmed `origin/main` unchanged (`7c3e828`) and already an ancestor of this branch — nothing to merge.
-- 2026-07-02: Deployed `ai-analyzer` + `product-matcher` to `shoplens2026-dev` via `gcloud run deploy --source` (GitHub Actions path blocked by the `gh api` 404 issue). Verified `SERPAPI_KEY` present/non-placeholder on both without printing the value. Started release APK build pointed at `shoplens2026-dev`.
-- 2026-07-02: Release APK build finished (`mobile/build/app/outputs/flutter-apk/app-release.apk`, ~92 MB). Restored original `google-services.json` from backup, confirmed clean working tree. Ready for testers — moved from "In development" to "Ready to test" above.
-- 2026-07-02: Researched broader end-to-end pipeline performance/consistency opportunities beyond this branch's profile-context scope (latency visibility, caching, ranking signal quality, architectural options). Added as a prioritized "Follow-up backlog" section above for the next branch — nothing in it implemented yet.
-- 2026-07-02: Tester reported blank screen instead of login screen on the first Android APK. Root-caused to an incomplete/wrong `mobile/.dart_define/shoplens2026-dev.json` (mismatched Firebase project identity + wrong backend URL variable names) — not a bug in this branch's feature code. Fixed the local dart-define file and its documented source (`docs/shoplens2026-dev-setup.md` Section 14) so it can't recur, rebuilt the APK (~96 MB), restored `google-services.json` again, confirmed clean working tree.
+<details>
+<summary><strong>Full activity log (click to expand)</strong></summary>
+
+- 2026-07-02: Branch created, exploration complete, plan written.
+- 2026-07-02: All engineering workstreams complete (ai-analyzer, product-matcher, mobile,
+  docs/verification). Full test suite green.
+- 2026-07-02: Feature work committed and pushed to a feature branch.
+- 2026-07-02: Backend deployed to `shoplens2026-dev` directly via `gcloud` (GitHub Actions
+  path blocked by a known `gh` CLI API issue). Confirmed the search-provider key was present
+  and valid without ever printing its value. Started the Android test build.
+- 2026-07-02: Android test build finished (~92 MB).
+- 2026-07-02: Broader end-to-end research pass added as a prioritized backlog for future work
+  (now folded into "In Pipeline" / "Ideas to Improve Performance" above).
+- 2026-07-02: Tester reported blank screen instead of login screen. Root-caused, fixed, APK
+  rebuilt (~96 MB) and reverified.
+- 2026-07-02: Feature branch merged into `main` (clean fast-forward) and pushed. Live
+  `shoplens2026-dev` deploy already matched this code.
+- 2026-07-02/03: Walked a tester through two production log excerpts on request, confirming
+  the new logic was live and correctly prioritizing category-matching items under the
+  search-budget cap.
+- 2026-07-03: Tester's expanded preference test surfaced the fairness bug (Bug #2 / Scenario
+  3). Found, fixed, tested (38/38), replayed against the original scenario to confirm the new
+  result is legitimate. **Held back from deployment** per direction to bundle into the next
+  release batch rather than ship as a standalone hotfix.
+- 2026-07-03: Doc reorganized — added shopper-facing scenario narratives for QA/client
+  visibility, merged the roadmap and research backlog into one "Plan of Action."
+- 2026-07-03: Measured real `/analyze` and `/identify` p50/p95 latency against the live
+  `shoplens2026-dev` deploy (20-run load test each, cache-busted for `/identify`) — see
+  [`docs/analyze-perf-test-results.md`](../analyze-perf-test-results.md).
+  Closes the "real latency numbers" near-term roadmap item; the search-budget A/B (2 vs. 5)
+  needed to fully answer Decision #2 is still open, deferred after this session's SerpAPI
+  quota ran out again.
+- 2026-07-03: Doc restructured into Done / In Progress / In Pipeline / Ideas to Improve
+  Performance sections for clearer client- and status-at-a-glance reading.
+- 2026-07-03: Captured PF-1 (density-aware per-object result cap) as a fully specified,
+  not-yet-started feature — reuses the existing "Search results per scan" dial for multi-object
+  scans, adds a new `MAX_RESULTS_PER_ITEM` deployment default (15) for single-object scans.
+  Raised two open questions (profile copy, multi-result UI) under Decisions Needed.
+- 2026-07-03: Implemented PF-1 (17 new tests, 47/47 total passing) and mobile's
+  `tap_identify_usecase.dart` cleanup, committed to `next-release-batch`. Discovered the
+  multi-result-card UI question was moot — the product list was already flat. Redeployed
+  `ai-analyzer`/`product-matcher` to `shoplens2026-dev` (revisions `ai-analyzer-00004-m47`,
+  `product-matcher-00007-mqv`) alongside the already-deployed ranking-fairness fix, and rebuilt
+  the Android APK with both changes. **Held on `next-release-batch`, not merged to `main`, per
+  direction — dev deploy and APK are for verification, not a production release.**
+
+</details>

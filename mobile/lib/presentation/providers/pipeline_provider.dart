@@ -130,6 +130,14 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
         mlkitContext:       mlkitContext,
       );
       state = PipelineState(status: PipelineStatus.success, imageBytes: bytes, fromLiveScan: _fromLiveScan);
+    } on AnalyzerException catch (e) {
+      state = PipelineState(
+        status: e.code == AnalyzerErrorCode.networkTimeout ? PipelineStatus.timeout : PipelineStatus.error,
+        errorMessage: e.displayMessage,
+        errorCode: e.code,
+        isRetryable: e.isRetryable,
+        fromLiveScan: _fromLiveScan,
+      );
     } catch (e) {
       state = PipelineState(status: PipelineStatus.error, errorMessage: e.toString(), fromLiveScan: _fromLiveScan);
     }

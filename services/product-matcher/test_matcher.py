@@ -80,15 +80,29 @@ def test_search_products_returns_empty_list_on_no_results(monkeypatch):
     assert matcher.search_products("nonexistent item") == []
 
 
-def test_search_product_still_returns_single_best_match(monkeypatch):
+def test_search_product_defaults_to_single_best_match(monkeypatch):
     matcher._cache.clear()
     payload = {"shopping_results": [{"title": "Best Match", "source": "Store", "extracted_price": 9.99}]}
     monkeypatch.setattr(matcher._session, "get", lambda *a, **k: _FakeResponse(payload))
 
-    product = matcher._search_product("widget")
+    products = matcher._search_product("widget")
 
-    assert product["name"] == "Best Match"
-    assert product["price"] == 9.99
+    assert len(products) == 1
+    assert products[0]["name"] == "Best Match"
+    assert products[0]["price"] == 9.99
+
+
+def test_search_product_returns_up_to_max_results(monkeypatch):
+    matcher._cache.clear()
+    payload = {"shopping_results": [
+        {"title": f"Item {i}", "source": "Store", "extracted_price": float(i)} for i in range(5)
+    ]}
+    monkeypatch.setattr(matcher._session, "get", lambda *a, **k: _FakeResponse(payload))
+
+    products = matcher._search_product("widget", max_results=3)
+
+    assert len(products) == 3
+    assert [p["name"] for p in products] == ["Item 0", "Item 1", "Item 2"]
 
 
 def test_fetch_thumbnail_returns_bytes_and_content_type(monkeypatch):
@@ -219,12 +233,12 @@ def test_match_products_prioritizes_preference_terms_under_cap(monkeypatch):
     matcher._cache.clear()
     seen_queries = []
 
-    def fake_search_product(item, country=matcher.DEFAULT_COUNTRY):
+    def fake_search_product(item, country=matcher.DEFAULT_COUNTRY, max_results=1):
         seen_queries.append(item)
-        return {
+        return [{
             "product_id": f"pid-{item}", "name": item, "price": 1.0,
             "image_url": "", "purchase_url": "", "seller": "Store", "category": "General",
-        }
+        }]
 
     monkeypatch.setattr(matcher, "_search_product", fake_search_product)
 
@@ -237,6 +251,110 @@ def test_match_products_prioritizes_preference_terms_under_cap(monkeypatch):
     assert seen_queries == ["Nike running shoes"]
     assert result["country"] == "us"
     assert result["currency"] == "USD"
+
+
+def test_results_per_item_uses_dial_when_multiple_items():
+    assert matcher._results_per_item(3, max_searches=2) == 2
+    assert matcher._results_per_item(3, max_searches=None) == matcher.MAX_SEARCHES_PER_RUN
+
+
+def test_results_per_item_ignores_dial_for_single_item():
+    assert matcher._results_per_item(1, max_searches=2) == matcher.MAX_RESULTS_PER_ITEM
+
+
+def test_results_per_item_multi_item_never_exceeds_dial_ceiling():
+    # An out-of-range dial value clamps to MAX_SEARCHES_PER_RUN (5) before the
+    # MAX_RESULTS_PER_ITEM (15) ceiling is even considered — the dial's own
+    # ceiling is tighter, so it's what wins here.
+    assert matcher._results_per_item(3, max_searches=999) == matcher.MAX_SEARCHES_PER_RUN
+
+
+def test_match_products_returns_multiple_results_for_single_item(monkeypatch):
+    matcher._cache.clear()
+    seen_max_results = []
+
+    def fake_search_product(item, country=matcher.DEFAULT_COUNTRY, max_results=1):
+        seen_max_results.append(max_results)
+        return [
+            {"product_id": f"pid-{item}-{i}", "name": f"{item} {i}", "price": float(i),
+             "image_url": "", "purchase_url": "", "seller": "Store", "category": "General"}
+            for i in range(max_results)
+        ]
+
+    monkeypatch.setattr(matcher, "_search_product", fake_search_product)
+
+    result = matcher.match_products(["stand mixer"], max_searches=2)
+
+    assert seen_max_results == [matcher.MAX_RESULTS_PER_ITEM]
+    assert len(result["matched_products"]) == matcher.MAX_RESULTS_PER_ITEM
+
+
+def test_match_products_caps_results_per_item_to_dial_when_multiple_items(monkeypatch):
+    matcher._cache.clear()
+    seen_max_results = []
+
+    def fake_search_product(item, country=matcher.DEFAULT_COUNTRY, max_results=1):
+        seen_max_results.append(max_results)
+        return [
+            {"product_id": f"pid-{item}-{i}", "name": f"{item} {i}", "price": float(i),
+             "image_url": "", "purchase_url": "", "seller": "Store", "category": "General"}
+            for i in range(max_results)
+        ]
+
+    monkeypatch.setattr(matcher, "_search_product", fake_search_product)
+
+    result = matcher.match_products(["stand mixer", "silicone spatula"], max_searches=2)
+
+    assert seen_max_results == [2, 2]
+    assert len(result["matched_products"]) == 4
+
+
+def test_prioritize_items_category_no_longer_unconditionally_beats_preference():
+    # Regression test for a real bug found in production testing: a
+    # category-only match (laptop, via the "Electronics" keyword list) must
+    # not automatically outrank a preference-only match (smart watch, via an
+    # explicit preference term) — they should score equally (1 point each)
+    # and fall back to original relative order, not have category strictly
+    # dominate preference.
+    items = [
+        "black rubber strap smart watch",     # preference only -> score 1
+        "black metal frame portable laptop",  # category only -> score 1
+    ]
+    result = matcher._prioritize_items(
+        items, preference_terms=["smart watch"], shopping_categories=["Electronics"],
+    )
+    assert result == ["black rubber strap smart watch", "black metal frame portable laptop"]
+
+
+def test_prioritize_items_dual_match_beats_single_match():
+    items = [
+        "black plastic full-size keyboard",          # category only -> 1
+        "black rubber strap smart watch",            # preference only -> 1
+        "Nike black electronics gaming keyboard",    # category + preference -> 2
+    ]
+    result = matcher._prioritize_items(
+        items, preference_terms=["nike", "smart watch"], shopping_categories=["Electronics"],
+    )
+    assert result == [
+        "Nike black electronics gaming keyboard",
+        "black plastic full-size keyboard",
+        "black rubber strap smart watch",
+    ]
+
+
+def test_term_matches_handles_plural_and_singular():
+    assert matcher._term_matches("laptops", "black metal frame portable laptop") is True
+    assert matcher._term_matches("laptop", "grey metal ergonomic laptop stand") is True
+    assert matcher._term_matches("nike", "nike black running shoes") is True
+    assert matcher._term_matches("laptops", "wireless mouse") is False
+
+
+def test_item_score_sums_category_and_multiple_preference_matches():
+    item = "nike black electronics gaming laptop"
+    assert matcher._item_score(item, ["nike", "laptops"], ["electronics"]) == 3
+    assert matcher._item_score(item, [], ["electronics"]) == 1
+    assert matcher._item_score(item, ["nike"], []) == 1
+    assert matcher._item_score("plain white mug", ["nike"], ["electronics"]) == 0
 
 
 def test_currency_for_country_known_and_default():

@@ -30,7 +30,7 @@ _LOCATION     = os.environ.get("LOCATION", "us-central1")
 _DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
 _GCS_LENS_BUCKET        = os.environ.get("GCS_LENS_BUCKET", "")
 _SERPAPI_KEY            = os.environ.get("SERPAPI_KEY", "")
-_LENS_TIMEOUT           = int(os.environ.get("LENS_TIMEOUT_SECONDS", "12"))
+_LENS_TIMEOUT           = int(os.environ.get("LENS_TIMEOUT_SECONDS", "60"))
 # Skip Gemini description on /identify by default — Lens works fine without it
 # and Gemini adds 3-6s to every tap. Set to "false" to re-enable.
 _IDENTIFY_SKIP_GEMINI   = os.environ.get("IDENTIFY_SKIP_GEMINI", "true").lower() not in ("0", "false", "no")
@@ -40,6 +40,16 @@ _IDENTIFY_SKIP_GEMINI   = os.environ.get("IDENTIFY_SKIP_GEMINI", "true").lower()
 # busy frame. Per-user profile preference (1-5) is clamped against this.
 MAX_SEARCHES_PER_RUN = 5
 
+# Deployment-level cap on how many results come back per item. The user's 1-5
+# "search results per scan" profile dial only limits results-per-item when a
+# run is searching MULTIPLE items (keeps a busy scan from flooding the
+# shopper with cards); a single-item run — including every /identify tap,
+# which is always exactly one object — ignores the dial and uses this
+# instead, since only one search call runs either way. SerpAPI is billed per
+# search, not per result row, so there's no cost reason to cap a lone search
+# down to 1-5 results.
+MAX_RESULTS_PER_ITEM = int(os.environ.get("MAX_RESULTS_PER_ITEM", "15"))
+
 _tls = threading.local()
 
 
@@ -47,6 +57,16 @@ def clamp_max_searches(requested: int | None) -> int:
     if requested is None:
         return MAX_SEARCHES_PER_RUN
     return max(1, min(int(requested), MAX_SEARCHES_PER_RUN))
+
+
+def _results_per_item(item_count: int, max_searches: int | None) -> int:
+    """How many results to fetch for each item being searched this run.
+    Multi-item runs stay dial-limited (clamped to MAX_RESULTS_PER_ITEM as a
+    safety ceiling); a single-item run uses the deployment default directly,
+    ignoring the dial."""
+    if item_count > 1:
+        return min(clamp_max_searches(max_searches), MAX_RESULTS_PER_ITEM)
+    return MAX_RESULTS_PER_ITEM
 
 
 # Currency has no dedicated field anywhere in the system — it's derived from
@@ -275,10 +295,38 @@ def _build_preference_block(
     return "".join(lines)
 
 
-def _preference_sort_key(item: dict, preference_terms: list[str], shopping_categories: list[str]) -> tuple:
-    """Higher-priority items sort first. Used to pick which detected items get
-    a Lens search when there are more items than max_searches allows — without
-    this, truncation is an arbitrary function of Gemini's listing order.
+def _term_matches(term: str, name: str) -> bool:
+    """Case-insensitive substring match with naive singular/plural tolerance —
+    a preference term typed as "laptops" should match an item name containing
+    "laptop" and vice versa. Handles the common English trailing-s plural
+    without pulling in a stemming library; not exhaustive (won't handle
+    "watches" -> "watch"-style -es plurals), but covers the common case."""
+    term = term.lower()
+    if term in name:
+        return True
+    if term.endswith("s") and term[:-1] in name:
+        return True
+    if not term.endswith("s") and (term + "s") in name:
+        return True
+    return False
+
+
+def _preference_score(item: dict, preference_terms: list[str], shopping_categories: list[str]) -> int:
+    """Higher score sorts first. Used to pick which detected items get a Lens
+    search when there are more items than max_searches allows — without this,
+    truncation is an arbitrary function of Gemini's listing order.
+
+    Additive, not lexicographic: a category hit and each matching preference
+    term each contribute one point. A previous version used a (category_hit,
+    preference_hit) tuple sort key, which meant ANY category match — even with
+    zero preference matches — ranked above EVERY item with a preference match
+    but no category match. That silently made an explicit, specific user
+    preference (e.g. "Smart watch") powerless against a generic category
+    match (e.g. "Electronics" catching a laptop), which is backwards — a
+    direct preference-term hit is at least as strong a signal as a category
+    hit. Summing lets an item that matches on both outrank one that matches
+    on only one, without either dimension being able to unconditionally
+    dominate the other.
 
     Category matching goes through _CATEGORY_KEYWORDS (same keyword lists
     _infer_category uses) rather than a literal substring check — a category
@@ -288,10 +336,8 @@ def _preference_sort_key(item: dict, preference_terms: list[str], shopping_categ
     category_hit = any(
         kw in name for cat in shopping_categories for kw in _CATEGORY_KEYWORDS.get(cat, [])
     )
-    preference_hit = any(term.lower() in name for term in preference_terms)
-    # False < True, so "not hit" sorts after "hit" when negated to an int and
-    # used ascending — 0 (matched) before 1 (unmatched).
-    return (0 if category_hit else 1, 0 if preference_hit else 1)
+    preference_matches = sum(1 for term in preference_terms if _term_matches(term, name))
+    return (1 if category_hit else 0) + preference_matches
 
 
 def _prioritize_items(
@@ -303,8 +349,9 @@ def _prioritize_items(
     cats = _normalize_terms(shopping_categories)
     if not prefs and not cats:
         return items_raw
-    # Stable sort — preserves Gemini's relative ordering within each priority tier.
-    return sorted(items_raw, key=lambda item: _preference_sort_key(item, prefs, cats))
+    # Stable sort — preserves Gemini's relative ordering within each score tier.
+    # Negate the score since sorted() is ascending and we want highest-first.
+    return sorted(items_raw, key=lambda item: -_preference_score(item, prefs, cats))
 
 
 def _parse_items_with_boxes(text: str) -> list[dict]:
@@ -706,7 +753,7 @@ def identify_crop(
     image_mime_type: str | None = None,
     query: str = "",
     country: str = "us",
-    max_results: int = 5,
+    max_results: int = MAX_RESULTS_PER_ITEM,
 ) -> tuple[list[dict], list[str]]:
     """Identify a pre-cropped image via Gemini description → GCS → Google Lens.
     Skips Gemini bounding-box detection (region already selected), but uses Gemini
@@ -926,6 +973,9 @@ def analyze_media(
         logger.info("Capping Lens searches: %d detected → %d (limit=%d)", len(items_raw), search_limit, search_limit)
         items_raw = items_raw[:search_limit]
 
+    results_per_item = _results_per_item(len(items_raw), max_searches)
+    logger.info("Results per item: %d (items=%d, dial=%s)", results_per_item, len(items_raw), max_searches)
+
     # Decode raw image bytes once for cropping
     products: list[dict] = []
     _t_items_start = time.monotonic()
@@ -963,12 +1013,13 @@ def analyze_media(
                           "total": time.monotonic() - _t_item_start}
                 return [], item_warnings, False, timing
 
-            # One listing per detected object — total listings == number of
-            # objects searched, matching the user-configured max_searches.
-            # Cleanup handled by the bucket's 1-day lifecycle rule, not an
-            # explicit delete here, so it's off the request's critical path.
+            # Up to results_per_item listings per detected object — dial-capped
+            # when multiple objects are being searched, deployment-capped when
+            # this is the only one. Cleanup handled by the bucket's 1-day
+            # lifecycle rule, not an explicit delete here, so it's off the
+            # request's critical path.
             _t_lens_start = time.monotonic()
-            matched = _google_lens(gcs_url, query=name, country=country, max_results=1)
+            matched = _google_lens(gcs_url, query=name, country=country, max_results=results_per_item)
             _t_lens = time.monotonic() - _t_lens_start
 
             _t_shopping = 0.0
@@ -978,7 +1029,7 @@ def analyze_media(
                 logger.warning("No Lens results for '%s' — trying Shopping fallback", name)
                 if _SERPAPI_KEY:
                     _t_shopping_start = time.monotonic()
-                    matched = _search_shopping(name, country=country, max_results=1)
+                    matched = _search_shopping(name, country=country, max_results=results_per_item)
                     _t_shopping = time.monotonic() - _t_shopping_start
                 if matched:
                     logger.info("Shopping fallback matched '%s' → %d result(s)", name, len(matched))
@@ -1122,6 +1173,8 @@ def analyze_media_stream(
         items_raw = _prioritize_items(items_raw, preference_terms, shopping_categories)
         items_raw = items_raw[:search_limit]
 
+    results_per_item = _results_per_item(len(items_raw), max_searches)
+
     final_warnings: list[str] = []
 
     if not (image_data and _GCS_LENS_BUCKET and _SERPAPI_KEY):
@@ -1158,13 +1211,13 @@ def analyze_media_stream(
             logger.warning(msg)
             item_warnings.append(msg)
             return [], item_warnings, False
-        matched = _google_lens(gcs_url, query=name, country=country, max_results=1)
+        matched = _google_lens(gcs_url, query=name, country=country, max_results=results_per_item)
         if matched:
             logger.info("Lens matched '%s' -> %d result(s)", name, len(matched))
         else:
             logger.warning("No Lens results for '%s' — trying Shopping fallback", name)
             if _SERPAPI_KEY:
-                matched = _search_shopping(name, country=country, max_results=1)
+                matched = _search_shopping(name, country=country, max_results=results_per_item)
             if matched:
                 logger.info("Shopping fallback matched '%s' → %d result(s)", name, len(matched))
             else:

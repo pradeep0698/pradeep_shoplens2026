@@ -47,9 +47,13 @@ dependencies:
   # Environment config
   flutter_dotenv:       ^5.1.0
 
-  # App/build version info — reads the real per-platform version
-  # (APK versionName, iOS Info.plist, web version.json), all of
-  # which Flutter derives from the `version:` field above.
+  # Local persistence — works on Android, iOS, macOS, and web
+  shared_preferences:   ^2.3.0
+
+  # Hashing — used for image deduplication in recent searches
+  crypto:               ^3.0.3
+
+  # App/build version info
   package_info_plus:    ^8.0.0
 
   # Data models
@@ -60,13 +64,7 @@ dependencies:
   record:               ^7.1.0
   web_socket_channel:   ^3.0.1
   permission_handler:   ^11.3.0
-  # flutter_pcm_sound has zero web support; flutter_sound's stream-playback
-  # path (alpha-quality on web, stable on Android/iOS/macOS) covers all the
-  # platforms this app targets with one package.
   flutter_sound:        ^9.27.0
-  # Used directly (not just transitively via record_web/flutter_sound_web) to
-  # probe the browser's real AudioContext sample rate — see
-  # core/utils/web_audio_sample_rate_web.dart.
   web:                  ^1.1.0
 
 dev_dependencies:

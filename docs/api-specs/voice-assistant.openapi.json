@@ -1,1 +1,393 @@
-{"openapi":"3.1.0","info":{"title":"Voice Preference Assistant","version":"0.1.0"},"paths":{"/voice/session/start":{"post":{"summary":"Start Session","operationId":"start_session_voice_session_start_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/SessionStartRequest","default":{"mode":"preferences","language":"English"}}}}},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/voice/session/event":{"post":{"summary":"Session Event","operationId":"session_event_voice_session_event_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/SessionEventRequest"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/voice/session/finalize":{"post":{"summary":"Finalize Session","operationId":"finalize_session_voice_session_finalize_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/SessionFinalizeRequest"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/health":{"get":{"summary":"Health","operationId":"health_health_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}}},"components":{"schemas":{"HTTPValidationError":{"properties":{"detail":{"items":{"$ref":"#/components/schemas/ValidationError"},"type":"array","title":"Detail"}},"type":"object","title":"HTTPValidationError"},"SessionEventRequest":{"properties":{"session_id":{"type":"string","title":"Session Id"},"event_type":{"type":"string","title":"Event Type"},"payload":{"additionalProperties":true,"type":"object","title":"Payload","default":{}}},"type":"object","required":["session_id","event_type"],"title":"SessionEventRequest"},"SessionFinalizeRequest":{"properties":{"session_id":{"type":"string","title":"Session Id"},"confirmed_patch":{"additionalProperties":true,"type":"object","title":"Confirmed Patch"}},"type":"object","required":["session_id","confirmed_patch"],"title":"SessionFinalizeRequest"},"SessionStartRequest":{"properties":{"mode":{"type":"string","title":"Mode","default":"preferences"},"language":{"type":"string","title":"Language","default":"English"}},"type":"object","title":"SessionStartRequest"},"ValidationError":{"properties":{"loc":{"items":{"anyOf":[{"type":"string"},{"type":"integer"}]},"type":"array","title":"Location"},"msg":{"type":"string","title":"Message"},"type":{"type":"string","title":"Error Type"}},"type":"object","required":["loc","msg","type"],"title":"ValidationError"}}}}
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Voice Preference Assistant",
+    "description": "Gemini Live-powered voice assistant for managing user shopping preferences.\n\n**Authentication:** All `/voice/session/*` endpoints require a Firebase ID token in the `Authorization: Bearer {token}` header. Obtain a token via `user.getIdToken()` in the Firebase Auth SDK.\n\n**Session flow:**\n1. `POST /voice/session/start` \u2014 create session, get `session_id` and WebSocket URL\n2. Connect to `wss://{host}/voice/session/{session_id}/stream` \u2014 real-time voice exchange\n3. `POST /voice/session/finalize` \u2014 commit confirmed preference changes to Firestore\n\n**WebSocket note:** The `/voice/session/{session_id}/stream` WebSocket endpoint is not testable via HTTP clients. Use the mobile app or a WebSocket client.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/voice/session/start": {
+      "post": {
+        "tags": [
+          "Voice Session"
+        ],
+        "summary": "Start a voice preference session",
+        "description": "Creates a new Gemini Live session for the authenticated user. Returns a `session_id` and the relative WebSocket URL to connect to for real-time voice interaction.\n\n**Requires:** `Authorization: Bearer {firebase_id_token}`",
+        "operationId": "start_session_voice_session_start_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionStartRequest",
+                "default": {
+                  "mode": "preferences",
+                  "language": "English"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid Firebase ID token"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/session/event": {
+      "post": {
+        "tags": [
+          "Voice Session"
+        ],
+        "summary": "Send a session event",
+        "description": "Posts a structured event to an active voice session. Currently logged but not acted upon server-side \u2014 reserved for future UI-to-session signalling.\n\n**Requires:** `Authorization: Bearer {firebase_id_token}`",
+        "operationId": "session_event_voice_session_event_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionEventRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Event received",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid Firebase ID token"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/session/finalize": {
+      "post": {
+        "tags": [
+          "Voice Session"
+        ],
+        "summary": "Finalize session and save preferences",
+        "description": "Commits the confirmed preference changes from the voice session to Firestore, then closes the session. Call this after the WebSocket stream disconnects and the user has reviewed the proposed changes.\n\n**Requires:** `Authorization: Bearer {firebase_id_token}`",
+        "operationId": "finalize_session_voice_session_finalize_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionFinalizeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Preferences saved and session closed",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid Firebase ID token"
+          },
+          "500": {
+            "description": "Firestore write failed"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Health check",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Service liveness and active Gemini model",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "PreferencePatch": {
+        "properties": {
+          "preference_terms": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preference Terms",
+            "description": "Product attributes the user prefers"
+          },
+          "ignore_terms": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ignore Terms",
+            "description": "Product names/terms to exclude from results"
+          },
+          "allergies": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allergies",
+            "description": "Food allergies"
+          },
+          "dietary_restrictions": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dietary Restrictions",
+            "description": "Dietary restrictions (e.g. vegan, gluten-free)"
+          },
+          "max_searches_per_run": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Searches Per Run",
+            "description": "Maximum SerpAPI searches per analyze call"
+          }
+        },
+        "type": "object",
+        "title": "PreferencePatch"
+      },
+      "SessionEventRequest": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "Session ID from /voice/session/start"
+          },
+          "event_type": {
+            "type": "string",
+            "title": "Event Type",
+            "description": "Event type identifier (e.g. 'user_message', 'ui_action')"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload",
+            "description": "Arbitrary event payload"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "event_type"
+        ],
+        "title": "SessionEventRequest"
+      },
+      "SessionFinalizeRequest": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id",
+            "description": "Session ID from /voice/session/start"
+          },
+          "confirmed_patch": {
+            "$ref": "#/components/schemas/PreferencePatch",
+            "description": "The preference changes confirmed by the user during the voice session to persist to Firestore"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "confirmed_patch"
+        ],
+        "title": "SessionFinalizeRequest",
+        "examples": [
+          {
+            "confirmed_patch": {
+              "allergies": [
+                "nuts"
+              ],
+              "dietary_restrictions": [
+                "vegan"
+              ],
+              "ignore_terms": [
+                "plastic"
+              ],
+              "max_searches_per_run": 5,
+              "preference_terms": [
+                "organic",
+                "non-stick"
+              ]
+            },
+            "session_id": "abc12345"
+          }
+        ]
+      },
+      "SessionStartRequest": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "title": "Mode",
+            "description": "Session mode: `'preferences'` for first-run onboarding or updating dietary restrictions/allergies; `'search'` for voice-driven product search within an active shopping session.",
+            "default": "preferences"
+          },
+          "language": {
+            "type": "string",
+            "title": "Language",
+            "description": "Display name from SUPPORTED_LANGUAGES (e.g. 'Spanish'). Unknown values fall back to 'English'.",
+            "default": "English"
+          }
+        },
+        "type": "object",
+        "title": "SessionStartRequest"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Voice Session",
+      "description": "Voice preference session lifecycle"
+    },
+    {
+      "name": "System",
+      "description": "Health and diagnostics"
+    }
+  ]
+}

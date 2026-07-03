@@ -1,1 +1,384 @@
-{"openapi":"3.1.0","info":{"title":"Product Matching Service","version":"0.1.0"},"paths":{"/match":{"post":{"summary":"Match","operationId":"match_match_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/MatchRequest"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/search":{"post":{"summary":"Search","operationId":"search_search_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/SearchRequest"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/thumbnail":{"get":{"summary":"Thumbnail","operationId":"thumbnail_thumbnail_get","parameters":[{"name":"url","in":"query","required":true,"schema":{"type":"string","title":"Url"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/debug/{item}":{"get":{"summary":"Debug","operationId":"debug_debug__item__get","parameters":[{"name":"item","in":"path","required":true,"schema":{"type":"string","title":"Item"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/debug-raw/{item}":{"get":{"summary":"Debug Raw","operationId":"debug_raw_debug_raw__item__get","parameters":[{"name":"item","in":"path","required":true,"schema":{"type":"string","title":"Item"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/health":{"get":{"summary":"Health","operationId":"health_health_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}}},"components":{"schemas":{"HTTPValidationError":{"properties":{"detail":{"items":{"$ref":"#/components/schemas/ValidationError"},"type":"array","title":"Detail"}},"type":"object","title":"HTTPValidationError"},"MatchRequest":{"properties":{"items":{"items":{"type":"string"},"type":"array","title":"Items"},"ignore_terms":{"items":{"type":"string"},"type":"array","title":"Ignore Terms","default":[]},"max_searches":{"type":"integer","title":"Max Searches","default":5}},"type":"object","required":["items"],"title":"MatchRequest"},"SearchRequest":{"properties":{"query":{"type":"string","title":"Query"},"max_results":{"type":"integer","title":"Max Results","default":5}},"type":"object","required":["query"],"title":"SearchRequest"},"ValidationError":{"properties":{"loc":{"items":{"anyOf":[{"type":"string"},{"type":"integer"}]},"type":"array","title":"Location"},"msg":{"type":"string","title":"Message"},"type":{"type":"string","title":"Error Type"}},"type":"object","required":["loc","msg","type"],"title":"ValidationError"}}}}
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Product Matcher",
+    "description": "SerpAPI-powered Google Shopping search and product matching service.\n\nTakes a list of detected item names and returns the best matching purchasable products. Also exposes a thumbnail proxy endpoint that adds CORS headers to Google's CDN images so the Flutter web client can render them.\n\n**Auth:** none required \u2014 CORS is open (`*`).",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/match": {
+      "post": {
+        "tags": [
+          "Matching"
+        ],
+        "summary": "Match items to products",
+        "description": "For each item name in `items`, runs a Google Shopping search via SerpAPI and returns the best matching product. Items with no results appear in `unmatched`.\n\nThis is the primary endpoint called by the AI Analyzer and Pub/Sub Worker.",
+        "operationId": "match_match_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Matching complete \u2014 check `unmatched` for items with no results",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "500": {
+            "description": "SerpAPI error"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search": {
+      "post": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Search for products by query",
+        "description": "Direct Google Shopping search for a freetext query. Returns up to `max_results` products.",
+        "operationId": "search_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/thumbnail": {
+      "get": {
+        "tags": [
+          "Search"
+        ],
+        "summary": "Proxy a product thumbnail image",
+        "description": "Fetches a product thumbnail from Google's image CDN and re-serves it with `Access-Control-Allow-Origin: *`. Required because Google's CDN omits CORS headers, which blocks Flutter web from fetching thumbnails directly.",
+        "operationId": "thumbnail_thumbnail_get",
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "Fully-qualified Google CDN image URL",
+              "title": "Url"
+            },
+            "description": "Fully-qualified Google CDN image URL"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Image bytes with CORS header",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "502": {
+            "description": "Failed to fetch from upstream CDN"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/debug/{item}": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Debug \u2014 match single item",
+        "description": "Runs `_search_product` for a single item and returns the raw internal result. For development only.",
+        "operationId": "debug_debug__item__get",
+        "parameters": [
+          {
+            "name": "item",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Item"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/debug-raw/{item}": {
+      "get": {
+        "tags": [
+          "Debug"
+        ],
+        "summary": "Debug \u2014 raw SerpAPI response",
+        "description": "Calls SerpAPI directly for the given item and returns the first `shopping_results` entry with all keys. Useful for inspecting what SerpAPI returns before our parsing logic runs.",
+        "operationId": "debug_raw_debug_raw__item__get",
+        "parameters": [
+          {
+            "name": "item",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Item"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Health check",
+        "description": "Returns `ok` when SERPAPI_KEY is set, `degraded` (503) when it's missing.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Service healthy",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "503": {
+            "description": "Missing required environment variable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "MatchRequest": {
+        "properties": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "List of detected item/product names to search for"
+          },
+          "ignore_terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Ignore Terms",
+            "description": "Terms to exclude from search results"
+          },
+          "max_searches": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Max Searches",
+            "description": "Maximum SerpAPI calls to make",
+            "default": 5
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "MatchRequest",
+        "examples": [
+          {
+            "ignore_terms": [],
+            "items": [
+              "stand mixer",
+              "silicone spatula"
+            ],
+            "max_searches": 5
+          }
+        ]
+      },
+      "SearchRequest": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query",
+            "description": "Freetext product search query"
+          },
+          "max_results": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Max Results",
+            "description": "Maximum number of products to return",
+            "default": 5
+          }
+        },
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "SearchRequest"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Matching",
+      "description": "Batch item-to-product matching"
+    },
+    {
+      "name": "Search",
+      "description": "Direct product search"
+    },
+    {
+      "name": "Debug",
+      "description": "Single-item SerpAPI debugging"
+    },
+    {
+      "name": "System",
+      "description": "Health and diagnostics"
+    }
+  ]
+}

@@ -6,6 +6,135 @@ analyze pipeline's context/prompt, default region to `us` and derive currency fr
 country when not set, and improve result relevance by fine-tuning the context/prompt
 and the item-selection logic that decides what gets searched under the SerpAPI quota cap.
 
+## What to test (for QA / Business)
+
+Plain-language functional requirements — use this section to test the feature without
+needing to read code. Environment: **shoplens2026-dev** backend is live, and an Android
+test build (.apk) pointed at it is ready — see below for the install file.
+
+### ✅ Ready to test now
+
+**FR-1 — New users (or anyone without a country set) default to the US**
+- What changed: if a shopper's profile has no country selected, search now behaves as if
+  "United States" were selected — instead of behaving inconsistently or unpredictably.
+- How to test: use/create a profile with no country chosen (or clear an existing one), scan
+  or search for a product, confirm you get normal results (US retailers/pricing), not an
+  error or empty result.
+- Pass/fail: no crashes, no blank results, results look like a normal US search.
+
+**FR-2 — Currency shown matches the shopper's country**
+- What changed: the app now reports a currency (USD, GBP, EUR, INR, JPY, etc.) that matches
+  whatever country is set on the shopper's profile. No country set → USD.
+- How to test: set the profile's country to a few different countries (US, UK, Germany,
+  India, Japan) one at a time, run a scan/search each time, confirm the currency reported
+  matches that country (USD / GBP / EUR / INR / JPY respectively).
+- Known limitation (see "In design/planning"): this is a currency **label** only — the
+  price number itself is not converted, so don't test/expect converted prices yet.
+
+**FR-3 — Personalized results: preferred categories/brands get priority**
+- What changed: if a shopper has set "Preferred Categories" (e.g. Electronics, Furniture)
+  or free-text style/brand preferences on their profile, and a scan finds more items than
+  the app can look up in one go, the app now looks up the shopper's preferred items first
+  instead of picking arbitrarily.
+- How to test:
+  1. Set a profile's preferred category to, say, "Electronics" and add a preference term
+     like "Nike."
+  2. Lower "max searches per scan" in the profile to a small number (1–2).
+  3. Scan/upload a photo with a mix of preferred and non-preferred items (e.g. electronics
+     next to furniture, or a Nike item next to a plain item).
+- Pass/fail: results favor the preferred category/brand item(s); a non-preferred item may
+  be skipped if the search budget runs out, but a preferred one should not be skipped in
+  favor of a non-preferred one.
+
+**FR-4 — Backup ("fallback") search also respects the shopper's country**
+- What changed: previously, if the camera-based visual search didn't find a match, the
+  app's backup text search always searched as if the shopper were in the US — regardless of
+  their real profile country. That's fixed now.
+- How to test: set profile country to a non-US country, scan an item likely to need the
+  fallback search (something generic/unusual that the visual search may miss), and check
+  results look consistent with that region.
+- Note: this is the hardest one to eyeball from the UI alone — if a tester can't tell
+  whether it worked, flag it here and engineering can confirm via backend logs.
+
+**Install build**
+- Android test APK (points at `shoplens2026-dev`): `mobile/build/app/outputs/flutter-apk/app-release.apk`
+  (~96 MB), rebuilt 2026-07-02 from this branch **with a blank-screen bug fixed** (see below).
+  Side-load onto a test device to run FR-1 through FR-4 above.
+- **If you already installed an earlier copy of this APK and got a blank screen instead of the
+  login screen, uninstall/reinstall with this rebuilt one** — that was a real bug (not a test
+  failure), now fixed. See "Bug found during testing" below for details.
+
+### 🐛 Bug found during testing (fixed)
+
+**Symptom:** opening the first Android test APK showed a blank screen instead of the login
+screen — reported by a tester 2026-07-02.
+
+**Cause:** this was a build-configuration bug in the local test-build setup, not a bug in
+this branch's feature code. The file that tells the Android build which Firebase project to
+connect to was missing several required values, so the built app ended up with a mismatched
+identity (new project ID, but old project's credentials) — the app's Firebase login system
+fails to start at all in that state, before the login screen ever gets a chance to draw. Same
+root file was also pointing the app's backend URLs at the wrong project name, so even past a
+Firebase fix it wouldn't have talked to the right servers.
+
+**Fix:** corrected the build configuration, documented the correct values so this doesn't
+recur for future test builds, and rebuilt/verified the APK. This did **not** require any
+change to the profile-consistency feature itself (FR-1 through FR-4) — it was purely a local
+test-build setup issue, now resolved. Engineering detail in the collapsible section below.
+
+### 🔧 In development (not ready to test yet)
+
+- **iOS test build** — not started for this branch.
+
+### 📋 In design / planning (needs a product decision before it's built)
+
+- **Real currency conversion** — today the currency label (FR-2) is correct, but the actual
+  price number shown is NOT converted into that currency — it's whatever number the search
+  provider returns for that region. Needs a decision: is a currency label sufficient for
+  now, or does this need real price conversion before it's customer-facing?
+- **Web app (internal admin/demo tool)** — FR-1 through FR-4 only apply to the mobile app.
+  The internal web tool does not send profile info to search yet, so none of this is
+  testable there.
+- **Internal API test collection** — the Postman collection used for API-level QA hasn't
+  been updated with the new fields yet. Doesn't affect what a tester sees in the app, but
+  matters if QA is testing directly against the API instead of through the app.
+
+<details>
+<summary>Engineering deploy details (click to expand)</summary>
+
+- Backend deployed to `shoplens2026-dev`: `ai-analyzer` (revision `ai-analyzer-00002-v6g`)
+  and `product-matcher` (revision `product-matcher-00005-s9m`), both serving 100% traffic,
+  deployed via `gcloud run deploy --source` on 2026-07-02 (not through the GitHub Actions
+  workflow — see the `gh api` note in the Log). `SERPAPI_KEY`/`GCS_LENS_BUCKET`/`PROJECT_ID`
+  confirmed live and non-placeholder on both. `state-manager`, `voice-assistant`,
+  `pubsub-worker` were not redeployed — untouched by this branch.
+- Android build: `flutter build apk --release --dart-define-from-file=.dart_define/shoplens2026-dev.json`
+  with `google-services.shoplens2026-dev.json` swapped in for `google-services.json`
+  (restored from `.bak` afterward, confirmed clean via `git status`). Completed 2026-07-02.
+  Output: `mobile/build/app/outputs/flutter-apk/app-release.apk` (~96 MB, rebuilt after the
+  bug fix below — first build was ~92 MB and had the blank-screen bug).
+- **Blank-screen bug root cause**: `mobile/.dart_define/shoplens2026-dev.json` (gitignored,
+  `mobile/.gitignore:52` excludes all of `.dart_define/` — not tracked in git, must be created
+  locally per the setup doc) only set `FIREBASE_PROJECT_ID`. `lib/firebase_options.dart` reads
+  4 more keys (`FIREBASE_ANDROID_API_KEY`, `FIREBASE_ANDROID_APP_ID`,
+  `FIREBASE_MESSAGING_SENDER_ID`, `FIREBASE_STORAGE_BUCKET`) via `String.fromEnvironment`, and
+  falls back to hardcoded defaults for the *old* `shoplens-dev-499700` project when a dart-define
+  key isn't supplied — so the built app had `FIREBASE_PROJECT_ID=project-b1a5dd5a-69e6-4db3-9d7`
+  paired with an API key/App ID/sender ID belonging to a different project. `Firebase.initializeApp()`
+  in `lib/main.dart:main()` throws on that mismatch, before `runApp()` — hence blank screen, no
+  error UI (release build). Separately, the file used `AI_ANALYZER_URL`/`PRODUCT_MATCHER_URL`/etc.,
+  but `lib/core/constants/api_constants.dart` actually reads `ANALYZER_API_URL`/`MATCHER_API_URL`/etc.
+  — those overrides were silently ignored and the app would have fallen back to the old project's
+  URLs baked into the bundled `mobile/.env`.
+- **Fix**: corrected `mobile/.dart_define/shoplens2026-dev.json` locally (sourced the 4 missing
+  Firebase values from `mobile/android/app/google-services.shoplens2026-dev.json`, renamed the 4
+  URL keys), and — since that file is gitignored and this doc (`docs/shoplens2026-dev-setup.md`
+  Section 14) is the actual source of truth anyone would copy from — fixed the same bug at its
+  source in that doc so it can't recur for the next person/build. Rebuilt and reverified the APK.
+- Full engineering task breakdown: see "Todo" below.
+
+</details>
+
 ## Scope decisions
 
 - **Currency**: no stored `currency` field. Derive it from `country` via a static
@@ -96,11 +225,77 @@ and the item-selection logic that decides what gets searched under the SerpAPI q
 4. `profile.preferenceTerms`/`profile.shoppingCategories` were collected and used for client-side re-ranking only — Gemini's detection prompt and both services' SerpAPI-quota item-selection caps had zero awareness of them. Now: (a) Gemini's prompt is biased to list preferred items first, and (b) when there are more detected items than `max_searches` allows, both `ai-analyzer` and `product-matcher` prioritize preference/category matches before truncating, instead of an arbitrary cutoff.
 5. Currency is now derived from country (lookup table, no new stored field) and returned on every analyze/match/search response for consistency — defaults to USD when country is unset, matching the existing country default.
 
+## Follow-up backlog — broader UX/performance research (2026-07-02)
+
+This branch's scope was profile→context wiring (country/currency/preferences into the prompt
+and item-selection truncation). A broader pass across the full pipeline (camera → Gemini →
+SerpAPI → ranked results) surfaced further opportunities — not started, listed here so the
+next branch can pick up at the top. Prioritized by value-for-effort, not by discovery order.
+
+### Tier 1 — quick wins (small effort, do next)
+
+- [ ] **Unify `_CATEGORY_KEYWORDS`** — duplicated verbatim in `services/ai-analyzer/analyzer.py`,
+  `services/product-matcher/matcher.py`, and `mobile/lib/core/utils/product_ranker.dart`. The
+  mobile copy has already drifted (missing keywords the backend copies have, e.g. "bed frame",
+  "bakeware", "throw"). Same class of bug this branch already fixed twice (missing `gl` param,
+  country-blind cache key) — extract to one source of truth.
+- [ ] **Weight preference matches by count, not hit/miss** — `_item_priority`/`_prioritize_items`
+  in both `analyzer.py` and `matcher.py` use a binary sort key; an item matching 3 preference
+  terms ranks identically to one matching 1. Small change to the sort-key tuple.
+- [ ] **Aggregate the existing `TIMING |` log lines into real metrics** (Cloud Monitoring custom
+  metrics or similar) — no dashboard/p50/p95 exists today. A prior perf doc's latency claims
+  were admittedly "inferred from code structure," not measured. This unlocks knowing whether
+  any other item on this list is actually worth doing.
+- [ ] **Confirm `/analyze/stream` results render incrementally on mobile**, not just at the
+  `done` event — the NDJSON streaming plumbing already exists end-to-end; if the UI isn't
+  consuming it progressively yet, this is the cheapest "feels faster" win available and may
+  just be a UI fix.
+
+### Tier 2 — medium investment (real value, real effort)
+
+- [ ] **Shared cross-request cache (Redis/Memorystore)** replacing product-matcher's in-memory
+  `TTLCache(maxsize=500, ttl=1800)` — Cloud Run scale-to-zero wipes the current per-instance
+  cache constantly, so real hit-rate across users is near zero in practice. Directly cuts
+  SerpAPI spend and reduces `SERP_QUOTA_EXCEEDED` frequency. Tradeoff: new infra dependency.
+- [ ] **Add a `price_range` profile field**, fold into the preference/context block — profile
+  currently has no budget/brand-affinity signal at all, only category/preference/ignore terms.
+- [ ] **Have Gemini return a confidence/salience score per item** — gives the item-selection
+  truncation a real fallback sort key (vs. raw Gemini listing order) when nothing matches the
+  user's preferences.
+- [ ] **Graceful degradation on `SERP_QUOTA_EXCEEDED`** — today it's a warning + blank results;
+  a pre-computed "popular items per category" cache could serve as a fallback instead.
+- [ ] **Persist `ignore_terms` across sessions** (rolling "last N ignored" per user) instead of
+  resetting every scan — compounds over time instead of starting from zero each time.
+
+### Tier 3 — larger investment (strategic, sequence-dependent)
+
+- [ ] **A/B testing scaffolding for prompt/ranking changes** — nothing today measures whether a
+  prompt tweak actually helped. Makes every future Tier 1/2 prompt change measurable instead of
+  eyeballed. Depends on Tier 1's latency-metrics work landing first.
+- [ ] **Category-specific SerpAPI query templates** (electronics → model numbers, clothing →
+  brand+size, vs. today's one-size-fits-all name template) — likely valuable, but only
+  testable once A/B scaffolding exists above.
+- [ ] **Embedding-based near-dup matching** for the fallback path, so near-identical Gemini item
+  names (e.g. "white ceramic mug" vs. "cream stoneware mug") share a cache entry instead of
+  each cold-querying SerpAPI.
+- [ ] **Feedback loop**: log tap/click-through events (product_id, rank position, tapped) and
+  periodically re-weight `_CATEGORY_KEYWORDS`/preference terms from real usage instead of a
+  static list. Needs an event pipeline + a retraining/re-weighting job — the largest item here.
+- [ ] **Pre-warm/batch common category searches** during idle time — depends on the Tier 2
+  shared cache existing first.
+
+**Recommended sequencing:** (1) latency metrics — everything else is a guess without it; (2)
+shared cross-request cache — cheapest infra win, biggest cost/reliability payoff; (3) unify
+`_CATEGORY_KEYWORDS` — small, contained, same bug class already fixed twice on this branch;
+(4) the rest, roughly in tier order, since each Tier 3 item's prerequisite (metrics, cache,
+A/B infra) needs to land first.
+
 ## Log
 
 - 2026-07-02: Branch created, exploration complete, plan written above.
 - 2026-07-02: All 4 workstreams complete (ai-analyzer, product-matcher, mobile, docs/verification). Full test suite green: ai-analyzer 9/9, product-matcher 20/20, mobile flutter test 11/11, flutter analyze clean (no new issues), OpenAPI specs regenerated and validated.
-
-## Log
-
-- 2026-07-02: Branch created, exploration complete, plan written above.
+- 2026-07-02: Committed feature work (`eba6091`) and pushed `feature/consistency` to origin. Confirmed `origin/main` unchanged (`7c3e828`) and already an ancestor of this branch — nothing to merge.
+- 2026-07-02: Deployed `ai-analyzer` + `product-matcher` to `shoplens2026-dev` via `gcloud run deploy --source` (GitHub Actions path blocked by the `gh api` 404 issue). Verified `SERPAPI_KEY` present/non-placeholder on both without printing the value. Started release APK build pointed at `shoplens2026-dev`.
+- 2026-07-02: Release APK build finished (`mobile/build/app/outputs/flutter-apk/app-release.apk`, ~92 MB). Restored original `google-services.json` from backup, confirmed clean working tree. Ready for testers — moved from "In development" to "Ready to test" above.
+- 2026-07-02: Researched broader end-to-end pipeline performance/consistency opportunities beyond this branch's profile-context scope (latency visibility, caching, ranking signal quality, architectural options). Added as a prioritized "Follow-up backlog" section above for the next branch — nothing in it implemented yet.
+- 2026-07-02: Tester reported blank screen instead of login screen on the first Android APK. Root-caused to an incomplete/wrong `mobile/.dart_define/shoplens2026-dev.json` (mismatched Firebase project identity + wrong backend URL variable names) — not a bug in this branch's feature code. Fixed the local dart-define file and its documented source (`docs/shoplens2026-dev-setup.md` Section 14) so it can't recur, rebuilt the APK (~96 MB), restored `google-services.json` again, confirmed clean working tree.

@@ -651,13 +651,43 @@ NEXT_PUBLIC_VOICE_ASSISTANT_URL=https://voice-assistant-115535290381.us-central1
 
 ### `mobile/.dart_define/shoplens2026-dev.json`
 
+**Gitignored — not tracked in git** (`mobile/.gitignore` excludes the whole `.dart_define/`
+directory), so this file must be created locally and this doc is the only source of truth
+for its shape. An earlier version of this doc was missing 5 of the 9 required keys — the
+resulting incomplete file builds an APK that shows a **blank screen instead of the login
+screen**, because `Firebase.initializeApp()` throws in `main()` (before any UI renders) when
+`FIREBASE_PROJECT_ID` doesn't match the Firebase API key/App ID/sender ID it's paired with.
+Undefined dart-define keys silently fall back to `lib/firebase_options.dart`'s hardcoded
+defaults, which point at the *old* `shoplens-dev-499700` project — hence the mismatch.
+
+Backend URL keys must be named `ANALYZER_API_URL` / `MATCHER_API_URL` / `STATE_API_URL` /
+`VOICE_ASSISTANT_API_URL` — that's what `lib/core/constants/api_constants.dart` actually
+reads via `String.fromEnvironment(...)`. (`AI_ANALYZER_URL` etc., used in an earlier version
+of this doc, are not read anywhere — they'd be silently ignored, and the app would fall back
+to whatever URLs are in the bundled `mobile/.env`, which point at the old project.)
+
+Get the four `FIREBASE_ANDROID_*`/`FIREBASE_MESSAGING_SENDER_ID`/`FIREBASE_STORAGE_BUCKET`
+values from `mobile/android/app/google-services.shoplens2026-dev.json` (also gitignored,
+already present in this checkout — download fresh from Firebase console > Project settings >
+Your apps > Android if it's ever missing):
+- `FIREBASE_ANDROID_API_KEY` ← `client[0].api_key[0].current_key`
+- `FIREBASE_ANDROID_APP_ID` ← `client[0].client_info.mobilesdk_app_id`
+- `FIREBASE_MESSAGING_SENDER_ID` ← `project_info.project_number`
+- `FIREBASE_STORAGE_BUCKET` ← `project_info.storage_bucket`
+
 ```json
 {
+  "ANALYZER_API_URL": "https://ai-analyzer-115535290381.us-central1.run.app",
+  "MATCHER_API_URL": "https://product-matcher-115535290381.us-central1.run.app",
+  "STATE_API_URL": "https://state-manager-115535290381.us-central1.run.app",
+  "VOICE_ASSISTANT_API_URL": "https://voice-assistant-115535290381.us-central1.run.app",
+
   "FIREBASE_PROJECT_ID": "project-b1a5dd5a-69e6-4db3-9d7",
-  "AI_ANALYZER_URL": "https://ai-analyzer-115535290381.us-central1.run.app",
-  "PRODUCT_MATCHER_URL": "https://product-matcher-115535290381.us-central1.run.app",
-  "STATE_MANAGER_URL": "https://state-manager-115535290381.us-central1.run.app",
-  "VOICE_ASSISTANT_URL": "https://voice-assistant-115535290381.us-central1.run.app"
+  "FIREBASE_MESSAGING_SENDER_ID": "<project_info.project_number from google-services.shoplens2026-dev.json>",
+  "FIREBASE_STORAGE_BUCKET": "<project_info.storage_bucket from google-services.shoplens2026-dev.json>",
+
+  "FIREBASE_ANDROID_API_KEY": "<client[0].api_key[0].current_key from google-services.shoplens2026-dev.json>",
+  "FIREBASE_ANDROID_APP_ID": "<client[0].client_info.mobilesdk_app_id from google-services.shoplens2026-dev.json>"
 }
 ```
 

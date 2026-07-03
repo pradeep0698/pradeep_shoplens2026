@@ -50,4 +50,3 @@ app.*.map.json
 
 # Per-environment dart-define files (contain API keys — never commit)
 .dart_define/
-lib/firebase_options.dart

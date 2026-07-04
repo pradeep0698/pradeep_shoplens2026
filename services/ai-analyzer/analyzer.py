@@ -596,21 +596,26 @@ def _search_shopping(query: str, country: str = "us", max_results: int = 5) -> l
             if _is_serp_quota_error(data):
                 _tls.serp_quota_exhausted = True
             return []
-        results = data.get("shopping_results", [])
-        products = []
-        for r in results[:max_results]:
+        candidates = []
+        for r in data.get("shopping_results", []):
             name   = r.get("title", "")
             seller = r.get("source", "")
-            price  = _parse_price(str(r.get("extracted_price") or r.get("price", "0")))
-            products.append({
+            link   = r.get("link") or r.get("product_link") or ""
+            if not name or not link:
+                continue
+            if not _is_product_name(name) or not _is_shopping_url(link):
+                continue
+            price = _parse_price(str(r.get("extracted_price") or r.get("price", "0")))
+            candidates.append({
                 "name":         _clean_product_name(name, seller),
                 "price":        price,
                 "image_url":    r.get("thumbnail", ""),
-                "purchase_url": r.get("link") or r.get("product_link") or "",
+                "purchase_url": link,
                 "seller":       seller,
                 "product_id":   _make_product_id(seller, name),
                 "category":     _infer_category(name, seller),
             })
+        products = _rank_by_quality(candidates, max_results)
         if products:
             logger.info("Shopping fallback matched '%s' → %d result(s)", query, len(products))
         else:
@@ -675,36 +680,76 @@ def _parse_price(raw: str) -> float:
         return 0.0
 
 
-_ARTICLE_PATH_RE = re.compile(
+_NON_PRODUCT_PATH_RE = re.compile(
     r"/(article|articles|blog|blogs|news|story|stories|post|posts|"
-    r"editorial|guide|guides|review|reviews|how-to|listicle|magazine)/",
+    r"editorial|guide|guides|review|reviews|how-to|listicle|magazine|"
+    r"questionandanswer|question-and-answer|faq|qa|support|help|"
+    r"shop|sch)/",
     re.IGNORECASE,
+)
+
+# eBay's own search-keyword query param — a /sch/ or bare-query hit with this
+# present is a search-results page, not a single listing, even when the path
+# itself looks plausible.
+_SEARCH_QUERY_PARAM_RE = re.compile(r"(?:^|[?&])(_nkw|q|keywords|search)=", re.IGNORECASE)
+
+# Found 2026-07-04: a real "SORRY, THIS ITEM IS SOLD!" listing passed the
+# existing checks (no "?", under 10 words, under 100 chars) and was returned
+# to a shopper as if it were purchasable.
+_UNAVAILABLE_PHRASES = (
+    "sold out", "item is sold", "no longer available", "out of stock",
+    "currently unavailable", "listing has ended", "item not found",
 )
 
 
 def _is_product_name(name: str) -> bool:
-    """Return False if the name looks like a page title or question rather than a product."""
+    """Return False if the name looks like a page title, question, or a
+    listing that isn't actually purchasable (sold out, no longer available)."""
     if "?" in name:
         return False
     if len(name.split()) > 10:
         return False
     if len(name) > 100:
         return False
+    lowered = name.lower()
+    if any(phrase in lowered for phrase in _UNAVAILABLE_PHRASES):
+        return False
     return True
 
 
 def _is_shopping_url(url: str) -> bool:
-    """Return False if the URL is a social media, content platform, or article link."""
+    """Return False if the URL is a social media, content platform, article,
+    Q&A/support page, or a search/category-listing page rather than a single
+    product. Found 2026-07-04: a Galaxus Q&A page
+    (.../questionandanswer/...) and an eBay seller-storefront search
+    (.../shop/...?_nkw=...) both passed the old, narrower check."""
     try:
         parsed = urllib.parse.urlparse(url)
         host   = parsed.netloc.lower().lstrip("www.")
         if any(host == d or host.endswith("." + d) for d in _BLOCKED_DOMAINS):
             return False
-        if _ARTICLE_PATH_RE.search(parsed.path):
+        if _NON_PRODUCT_PATH_RE.search(parsed.path):
+            return False
+        if _SEARCH_QUERY_PARAM_RE.search(parsed.query):
             return False
         return True
     except Exception:
         return True
+
+
+def _rank_by_quality(candidates: list[dict], max_results: int) -> list[dict]:
+    """Priced results (price > 0) first; unpriced ones (SerpAPI gave us no
+    price data — a real listing, just missing a number) only fill remaining
+    slots. Found 2026-07-04: a request with 15 valid candidates but only 3
+    priced ones still showed all 12 $0.00 results, since the old code just
+    took SerpAPI's own order. Preserves SerpAPI's relative order within each
+    tier — this only re-groups by price, it doesn't re-rank within a tier."""
+    priced   = [c for c in candidates if c["price"] > 0]
+    unpriced = [c for c in candidates if c["price"] <= 0]
+    selected = priced[:max_results]
+    if len(selected) < max_results:
+        selected += unpriced[:max_results - len(selected)]
+    return selected
 
 
 def _clean_product_name(name: str, seller: str) -> str:
@@ -788,11 +833,10 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
         logger.warning("Lens visual_matches fetch failed: %s", exc)
         data = {}
 
+    candidates: list[dict] = []
     for r in data.get("visual_matches", []):
-        if len(results) >= MAX:
-            break
-        name      = r.get("title", "")
-        link      = r.get("link", "")
+        name = r.get("title", "")
+        link = r.get("link", "")
         if not name or not link:
             continue
         if not _is_product_name(name) or not _is_shopping_url(link):
@@ -801,8 +845,14 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
         price_val = price_obj.get("extracted_value", 0) if isinstance(price_obj, dict) else 0
         price     = _parse_price(str(price_val)) if price_val else 0.0
         logger.info("Lens match: '%s' price=%.2f url=%s", name, price, link)
-        results.append(_build_result(r, price))
-    logger.info("Lens (visual_matches): %d result(s)", len(results))
+        candidates.append(_build_result(r, price))
+
+    results  = _rank_by_quality(candidates, MAX)
+    n_priced = sum(1 for c in candidates if c["price"] > 0)
+    logger.info(
+        "Lens (visual_matches): %d candidate(s) (%d priced, %d unpriced) -> %d selected",
+        len(candidates), n_priced, len(candidates) - n_priced, len(results),
+    )
 
     if not results:
         logger.warning("Lens: no usable results for %s", image_url)

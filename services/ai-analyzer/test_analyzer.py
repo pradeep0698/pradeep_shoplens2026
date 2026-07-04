@@ -14,6 +14,56 @@ def test_session_retry_does_not_wrap_read_timeouts():
     assert adapter.max_retries.read is False
 
 
+def test_is_product_name_rejects_unavailable_listings():
+    # Real case from a 2026-07-04 log: passed the old checks (no "?", under
+    # 10 words, under 100 chars) and was returned to a shopper as if it were
+    # purchasable.
+    assert analyzer._is_product_name("SORRY, THIS ITEM IS SOLD!") is False
+    assert analyzer._is_product_name("Item no longer available") is False
+    assert analyzer._is_product_name("Fitbit Versa 4 Fitness Smartwatch") is True
+
+
+def test_is_shopping_url_rejects_qa_and_search_pages():
+    # Real cases from the same log: a Q&A/support page and an eBay
+    # seller-storefront search both passed the old, narrower check.
+    assert analyzer._is_shopping_url(
+        "https://www.galaxus.at/en/s1/questionandanswer/which-measurements-415206"
+    ) is False
+    assert analyzer._is_shopping_url(
+        "https://www.ebay.com/shop/fitbit-sense-pebble?_nkw=fitbit+sense+pebble"
+    ) is False
+    assert analyzer._is_shopping_url("https://www.ebay.com/itm/127531574126") is True
+    assert analyzer._is_shopping_url("https://www.mercari.com/us/item/m98187824392/") is True
+
+
+def test_rank_by_quality_prefers_priced_and_skips_unpriced_when_enough_good_ones():
+    candidates = [
+        {"name": "unpriced 1", "price": 0.0},
+        {"name": "unpriced 2", "price": 0.0},
+        {"name": "priced 1", "price": 52.0},
+        {"name": "priced 2", "price": 64.0},
+        {"name": "priced 3", "price": 79.0},
+    ]
+    # Enough priced results to fill the cap — unpriced ones excluded entirely,
+    # not just sorted last. This is the exact scenario from the 2026-07-04
+    # log: 3 priced Mercari results should have been the whole result set for
+    # a 3-result cap, not diluted with $0.00 eBay listings.
+    result = analyzer._rank_by_quality(candidates, max_results=3)
+    assert [c["name"] for c in result] == ["priced 1", "priced 2", "priced 3"]
+
+
+def test_rank_by_quality_backfills_with_unpriced_when_not_enough_good_ones():
+    candidates = [
+        {"name": "unpriced 1", "price": 0.0},
+        {"name": "unpriced 2", "price": 0.0},
+        {"name": "priced 1", "price": 52.0},
+    ]
+    # Only one priced result but the cap is 3 — backfill with unpriced ones
+    # rather than returning fewer results than requested.
+    result = analyzer._rank_by_quality(candidates, max_results=3)
+    assert [c["name"] for c in result] == ["priced 1", "unpriced 1", "unpriced 2"]
+
+
 def test_normalize_country_defaults_empty_to_us():
     assert analyzer.normalize_country(None) == "us"
     assert analyzer.normalize_country("") == "us"

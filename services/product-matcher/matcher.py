@@ -190,6 +190,20 @@ def _parse_price(raw: str) -> float:
         return 0.0
 
 
+def _rank_by_quality(candidates: list[dict], max_results: int) -> list[dict]:
+    """Mirrors services/ai-analyzer/analyzer.py's _rank_by_quality: priced
+    results (price > 0) first; unpriced ones (SerpAPI gave us no price data)
+    only fill remaining slots, so a request with enough good matches doesn't
+    surface $0.00 listings just because they came first in SerpAPI's own
+    order. Preserves SerpAPI's relative order within each tier."""
+    priced   = [c for c in candidates if c["price"] > 0]
+    unpriced = [c for c in candidates if c["price"] <= 0]
+    selected = priced[:max_results]
+    if len(selected) < max_results:
+        selected += unpriced[:max_results - len(selected)]
+    return selected
+
+
 def _parse_shopping_result(r: dict, fallback_name: str) -> dict:
     name   = r.get("title", fallback_name)
     seller = r.get("source", "")
@@ -246,7 +260,8 @@ def _shopping_search(query: str, num: int, country: str = DEFAULT_COUNTRY) -> li
         logger.warning("No shopping results for '%s'", query)
         return []
 
-    return [_parse_shopping_result(r, query) for r in results[:num]]
+    candidates = [_parse_shopping_result(r, query) for r in results]
+    return _rank_by_quality(candidates, num)
 
 
 def _search_product(item: str, country: str = DEFAULT_COUNTRY, max_results: int = 1) -> list[dict]:

@@ -16,6 +16,27 @@ def test_session_retry_does_not_wrap_read_timeouts():
     assert adapter.max_retries.read is False
 
 
+def test_rank_by_quality_prefers_priced_and_skips_unpriced_when_enough_good_ones():
+    candidates = [
+        {"name": "unpriced 1", "price": 0.0},
+        {"name": "unpriced 2", "price": 0.0},
+        {"name": "priced 1", "price": 52.0},
+        {"name": "priced 2", "price": 64.0},
+        {"name": "priced 3", "price": 79.0},
+    ]
+    result = matcher._rank_by_quality(candidates, max_results=3)
+    assert [c["name"] for c in result] == ["priced 1", "priced 2", "priced 3"]
+
+
+def test_rank_by_quality_backfills_with_unpriced_when_not_enough_good_ones():
+    candidates = [
+        {"name": "unpriced 1", "price": 0.0},
+        {"name": "priced 1", "price": 52.0},
+    ]
+    result = matcher._rank_by_quality(candidates, max_results=3)
+    assert [c["name"] for c in result] == ["priced 1", "unpriced 1"]
+
+
 class _FakeResponse:
     def __init__(self, payload: dict, status: int = 200):
         self._payload = payload
@@ -106,8 +127,11 @@ def test_search_product_defaults_to_single_best_match(monkeypatch):
 
 def test_search_product_returns_up_to_max_results(monkeypatch):
     matcher._cache.clear()
+    # Prices start at 1, not 0 — a $0.00 item is now correctly treated as
+    # "unpriced" by _rank_by_quality and deprioritized, which isn't what this
+    # test is checking (see test_rank_by_quality_* for that behavior).
     payload = {"shopping_results": [
-        {"title": f"Item {i}", "source": "Store", "extracted_price": float(i)} for i in range(5)
+        {"title": f"Item {i}", "source": "Store", "extracted_price": float(i + 1)} for i in range(5)
     ]}
     monkeypatch.setattr(matcher._session, "get", lambda *a, **k: _FakeResponse(payload))
 

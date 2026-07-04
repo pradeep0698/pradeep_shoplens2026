@@ -1,6 +1,22 @@
 import analyzer
 
 
+def test_google_lens_appends_shopping_hint_to_query(monkeypatch):
+    captured = {}
+
+    def fake_serp_get(url, params, read_timeout, label):
+        captured["params"] = params
+        return {"visual_matches": []}
+
+    monkeypatch.setattr(analyzer, "_serp_get", fake_serp_get)
+
+    analyzer._google_lens("https://example.com/img.jpg", query="Black Nike sneaker")
+    assert captured["params"]["q"] == "Black Nike sneaker this is for shopping, include price and links"
+
+    analyzer._google_lens("https://example.com/img.jpg", query="")
+    assert captured["params"]["q"] == "this is for shopping, include price and links"
+
+
 def test_session_retry_does_not_wrap_read_timeouts():
     # read=False (the literal bool) is required, NOT 0 or None — both of
     # those still route a read-timeout through urllib3's retry-accounting,

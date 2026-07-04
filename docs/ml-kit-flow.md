@@ -38,6 +38,21 @@ _Last updated 2026-06-26. Covers the live scan tap path and the Scan All path wi
 > to crop that exact object out of the captured photo before anything goes to
 > the cloud.
 
+> **2026-07-04 update:** the diagram below (last redrawn 2026-06-26) shows
+> Gemini description and GCS upload always running in parallel before Lens.
+> That's no longer the default — Gemini is now only spent as an **adaptive
+> hedge**: `identify_crop()` uploads to GCS, then kicks off Lens immediately.
+> If Lens hasn't answered within `LENS_HEDGE_DELAY_SECONDS` (25s default), it
+> starts the Gemini description *concurrently with the still-running Lens
+> call* rather than waiting for Lens to finish or time out first. Once Gemini
+> has a query, if Lens still hasn't answered, Shopping starts too, also
+> concurrently with Lens. Whichever source produces usable products first
+> wins; if Lens answers at any point with results, Gemini/Shopping are never
+> used. On the common fast path (Lens answers within 25s) Gemini is never
+> touched at all — cheaper than the diagram implies. `IDENTIFY_SKIP_GEMINI`
+> is now a kill-switch for the whole hedge, not a toggle for the parallel
+> branch shown below. See `services/ai-analyzer/analyzer.py`'s `identify_crop()`.
+
 ```
 Mobile: user taps object
         │
@@ -303,6 +318,7 @@ GCS upload OK: https://storage.googleapis.com/shoplens-dev-lens-tmp/abc123.jpg
 # Lens result:
 Lens (visual_matches): 3 result(s)
 
-# Timing breakdown (always last):
-TIMING | total=28.09s describe_and_upload=11.39s lens=16.69s shopping=0.00s
+# Timing breakdown (always last) — post-2026-07-04 hedge shape;
+# see the update note near the top of the TAP PATH section:
+TIMING | total=28.09s upload=0.31s lens=27.6s gemini=3.9s shopping=0.00s hedge_triggered=True lens_timed_out=False quota_exhausted=False
 ```

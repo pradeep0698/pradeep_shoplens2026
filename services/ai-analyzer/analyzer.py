@@ -11,7 +11,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 from typing import Optional
 
@@ -33,9 +33,16 @@ _DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
 _GCS_LENS_BUCKET        = os.environ.get("GCS_LENS_BUCKET", "")
 _SERPAPI_KEY            = os.environ.get("SERPAPI_KEY", "")
 _LENS_TIMEOUT           = int(os.environ.get("LENS_TIMEOUT_SECONDS", "60"))
-# Skip Gemini description on /identify by default — Lens works fine without it
-# and Gemini adds 3-6s to every tap. Set to "false" to re-enable.
-_IDENTIFY_SKIP_GEMINI   = os.environ.get("IDENTIFY_SKIP_GEMINI", "true").lower() not in ("0", "false", "no")
+# If Lens hasn't answered /identify by this mark, start Gemini (for a search
+# query) concurrently with the still-running Lens call rather than waiting
+# out the full LENS_TIMEOUT_SECONDS before ever trying a fallback.
+_LENS_HEDGE_DELAY_SECONDS = float(os.environ.get("LENS_HEDGE_DELAY_SECONDS", "25"))
+# Hard kill-switch for the /identify Gemini+Shopping hedge (outage / cost
+# control) — independent of how well the adaptive hedge itself behaves. Only
+# ever spent once Lens is already past _LENS_HEDGE_DELAY_SECONDS, so leaving
+# it enabled costs nothing on the common fast-Lens path. Set to "true" to
+# force /identify back to Lens-only, no hedge, ever.
+_IDENTIFY_SKIP_GEMINI   = os.environ.get("IDENTIFY_SKIP_GEMINI", "false").lower() not in ("0", "false", "no")
 
 # Hard ceiling on SerpAPI (Lens) calls per analyze_media() run, regardless of
 # what the caller requests — protects the shared SerpAPI quota from a single
@@ -894,6 +901,39 @@ def _perceptual_cache_key(img_bytes: bytes, country: str) -> str:
     return format(int(bits, 2), "016x") + ":" + country
 
 
+# Shared, long-lived pool for identify_crop's Lens/Gemini/Shopping hedge. Not
+# a per-call `with ThreadPoolExecutor()` — exiting that context calls
+# shutdown(wait=True), which would block identify_crop's return on a
+# still-running (up to 60s) Lens future even after a faster result already
+# resolved things. Threads here are reused across requests AND across roles
+# (lens/gemini/shopping), so every callable submitted to this pool must reset
+# its own _tls flags on entry — see _lens_worker/_shopping_worker below.
+_identify_pool = ThreadPoolExecutor(
+    max_workers=int(os.environ.get("IDENTIFY_POOL_WORKERS", "30")),
+    thread_name_prefix="identify-hedge",
+)
+
+
+def _lens_worker(gcs_url: str, query: str, country: str, max_results: int) -> tuple[list[dict], bool, bool]:
+    """Runs _google_lens on a pool thread and captures the _tls flags it sets
+    from inside that same thread before returning them explicitly — _tls is
+    threading.local(), so identify_crop's calling thread cannot see flags a
+    different (pool) thread set. Resets both flags on entry since pool
+    threads are reused across requests and roles."""
+    _tls.lens_timed_out = False
+    _tls.serp_quota_exhausted = False
+    products = _google_lens(gcs_url, query=query, country=country, max_results=max_results)
+    return products, getattr(_tls, "lens_timed_out", False), getattr(_tls, "serp_quota_exhausted", False)
+
+
+def _shopping_worker(query: str, country: str, max_results: int) -> tuple[list[dict], bool]:
+    """Same rationale as _lens_worker — only needed when Shopping runs on a
+    pool thread concurrently with a still-in-flight Lens call."""
+    _tls.serp_quota_exhausted = False
+    products = _search_shopping(query, country=country, max_results=max_results)
+    return products, getattr(_tls, "serp_quota_exhausted", False)
+
+
 def identify_crop(
     *,
     image_data: str,
@@ -932,68 +972,137 @@ def identify_crop(
     img.save(buf, format="JPEG", quality=85)
     jpeg_bytes = buf.getvalue()
 
-    _t_describe_upload_start = time.monotonic()
-    if _IDENTIFY_SKIP_GEMINI:
-        # Skip Gemini description — saves 3-6s per tap. Lens still works well
-        # on the image alone; set IDENTIFY_SKIP_GEMINI=false to re-enable.
-        logger.info("identify_crop: Gemini description skipped (IDENTIFY_SKIP_GEMINI=true)")
-        gcs_url = _upload_gcs(jpeg_bytes)
-        gemini_query = ""
-    else:
-        # Gemini description and GCS upload are independent — run concurrently.
-        with ThreadPoolExecutor(max_workers=2) as _pool:
-            _describe_future = _pool.submit(_describe_crop, jpeg_bytes)
-            _upload_future = _pool.submit(_upload_gcs, jpeg_bytes)
-            gemini_query = _describe_future.result()
-            gcs_url = _upload_future.result()
-    _t_describe_upload = time.monotonic() - _t_describe_upload_start
-
-    effective_query = gemini_query or query
+    _t_upload_start = time.monotonic()
+    gcs_url = _upload_gcs(jpeg_bytes)
+    _t_upload = time.monotonic() - _t_upload_start
 
     if not gcs_url:
         msg = "identify_crop: GCS upload failed — visual search skipped"
         logger.warning(msg)
         _warnings.append(msg)
         logger.info(
-            "TIMING | total=%.2fs describe_and_upload=%.2fs lens=0.00s shopping=0.00s",
-            time.monotonic() - _t_total_start, _t_describe_upload,
+            "TIMING | total=%.2fs upload=%.2fs lens=0.00s gemini=0.00s shopping=0.00s "
+            "hedge_triggered=False lens_timed_out=False quota_exhausted=False",
+            time.monotonic() - _t_total_start, _t_upload,
         )
         return [], _warnings
 
     # Cleanup handled by the bucket's 1-day lifecycle rule, not an explicit
     # delete here, so it's off the request's critical path.
-    _tls.lens_timed_out = False
+    #
+    # Adaptive hedge: kick off Lens immediately and don't block on it
+    # unconditionally. If it hasn't answered by _LENS_HEDGE_DELAY_SECONDS,
+    # start Gemini (for a search query) concurrently with the still-running
+    # Lens call instead of waiting out the full LENS_TIMEOUT_SECONDS before
+    # ever trying a fallback. Once Gemini has a query, check Lens again — use
+    # it if it answered, otherwise start Shopping too, concurrently with
+    # Lens. Return as soon as any source has usable products.
+    effective_query        = query
+    hedge_triggered         = False
+    shopping_attempted      = False
+    lens_result:     tuple[list[dict], bool, bool] | None = None  # (products, timed_out, quota)
+    shopping_result: tuple[list[dict], bool] | None        = None  # (products, quota)
+    products: list[dict]    = []
+    _t_gemini               = 0.0
+    _t_shopping             = 0.0
+
     _t_lens_start = time.monotonic()
-    products = _google_lens(gcs_url, query=effective_query, country=country, max_results=max_results)
-    _t_lens = time.monotonic() - _t_lens_start
+    lens_future = _identify_pool.submit(_lens_worker, gcs_url, query, country, max_results)
+    done, _pending = wait({lens_future}, timeout=_LENS_HEDGE_DELAY_SECONDS)
 
-    # If Lens timed out and Gemini was skipped (no query), probe SerpAPI quota
-    # first — if exhausted, skip Gemini + Shopping entirely (both would hang).
-    # Only if quota is confirmed available, run Gemini to get a description and
-    # then fall through to the Shopping fallback below.
-    _t_shopping = 0.0
-    if (not products
-            and not effective_query
-            and getattr(_tls, "lens_timed_out", False)
-            and not getattr(_tls, "serp_quota_exhausted", False)
-            and _SERPAPI_KEY):
-        if _probe_serp_quota():
-            logger.info("identify_crop: Lens timed out with no query — running Gemini as recovery")
-            _t_recovery_start = time.monotonic()
-            effective_query = _describe_crop(jpeg_bytes)
-            _t_describe_upload += time.monotonic() - _t_recovery_start
-            if effective_query:
-                logger.info("identify_crop: Gemini recovery → '%s', trying Shopping", effective_query)
+    if lens_future in done:
+        # Fast path (the common case) — Lens answered before the hedge mark,
+        # so Gemini is never touched at all.
+        lens_result = lens_future.result()
+        _t_lens = time.monotonic() - _t_lens_start
+        products = lens_result[0]
+    else:
+        can_hedge = (not _IDENTIFY_SKIP_GEMINI) and bool(_SERPAPI_KEY)
+        if can_hedge and not _probe_serp_quota():
+            can_hedge = False
+            logger.warning("identify_crop: skipping Gemini + Shopping hedge — SerpAPI quota exhausted")
+
+        if not can_hedge:
+            # Nothing to overlap Lens's remaining wait with — ride it out to
+            # its own LENS_TIMEOUT_SECONDS cap, same as today.
+            lens_result = lens_future.result()
+            _t_lens = time.monotonic() - _t_lens_start
+            products = lens_result[0]
         else:
-            logger.warning("identify_crop: skipping Gemini + Shopping — SerpAPI quota exhausted")
+            hedge_triggered = True
+            logger.info(
+                "identify_crop: Lens still running after %.0fs — starting Gemini hedge",
+                _LENS_HEDGE_DELAY_SECONDS,
+            )
+            _t_gemini_start = time.monotonic()
+            describe_future = _identify_pool.submit(_describe_crop, jpeg_bytes)
+            shopping_future = None
+            gemini_query: str | None = None
 
-    if not products and effective_query and _SERPAPI_KEY:
+            pending = {lens_future, describe_future}
+            while pending:
+                completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for f in completed:
+                    if f is lens_future:
+                        lens_result = f.result()
+                        _t_lens = time.monotonic() - _t_lens_start
+                    elif f is describe_future:
+                        gemini_query = f.result() or ""
+                        _t_gemini = time.monotonic() - _t_gemini_start
+                    elif f is shopping_future:
+                        shopping_result = f.result()
+
+                if lens_result and lens_result[0]:
+                    logger.info("identify_crop: Lens answered during hedge — using Lens result")
+                    break
+                if shopping_result and shopping_result[0]:
+                    logger.info("identify_crop: Shopping hedge answered first — using Shopping result")
+                    break
+                if lens_result is not None and shopping_result is not None:
+                    break  # both resolved, both empty — nothing left to try
+                if (gemini_query is not None and shopping_future is None
+                        and not (lens_result and lens_result[0])):
+                    effective_query = gemini_query or query
+                    if effective_query and _SERPAPI_KEY:
+                        logger.info(
+                            "identify_crop: Gemini hedge → '%s', starting Shopping alongside Lens",
+                            effective_query,
+                        )
+                        _t_shopping_start = time.monotonic()
+                        shopping_future = _identify_pool.submit(
+                            _shopping_worker, effective_query, country, max_results,
+                        )
+                        pending.add(shopping_future)
+                        shopping_attempted = True
+
+            if lens_result and lens_result[0]:
+                products = lens_result[0]
+            elif shopping_result and shopping_result[0]:
+                products = shopping_result[0]
+                _t_shopping = time.monotonic() - _t_shopping_start
+            elif shopping_attempted:
+                _t_shopping = time.monotonic() - _t_shopping_start
+
+            if lens_result is None:
+                # Still running in the background after we returned via a
+                # faster source — this is elapsed time spent waiting, not a
+                # completion time; Lens's own eventual outcome is logged
+                # independently by _google_lens/_serp_get when it finishes.
+                _t_lens = time.monotonic() - _t_lens_start
+
+    lens_timed_out           = lens_result[1] if lens_result else False
+    lens_quota_exhausted     = lens_result[2] if lens_result else False
+    shopping_quota_exhausted = shopping_result[1] if shopping_result else False
+
+    if not products and effective_query and _SERPAPI_KEY and not shopping_attempted:
         logger.info("Lens found nothing — trying Shopping fallback for '%s'", effective_query)
         _t_shopping_start = time.monotonic()
         products = _search_shopping(effective_query, country=country, max_results=max_results)
+        shopping_quota_exhausted = shopping_quota_exhausted or getattr(_tls, "serp_quota_exhausted", False)
         _t_shopping = time.monotonic() - _t_shopping_start
 
-    if getattr(_tls, "serp_quota_exhausted", False):
+    quota_exhausted = lens_quota_exhausted or shopping_quota_exhausted
+    if quota_exhausted:
         logger.warning("SERP API quota exhausted — no product matches returned")
         _warnings.append("SERP_QUOTA_EXCEEDED")
 
@@ -1002,9 +1111,14 @@ def identify_crop(
         logger.warning(msg)
         _warnings.append(msg)
 
+    # Once hedged, lens/gemini/shopping run concurrently, so their durations
+    # can legitimately sum to more than `total` — total is the only
+    # authoritative wall-clock number below.
     logger.info(
-        "TIMING | total=%.2fs describe_and_upload=%.2fs lens=%.2fs shopping=%.2fs",
-        time.monotonic() - _t_total_start, _t_describe_upload, _t_lens, _t_shopping,
+        "TIMING | total=%.2fs upload=%.2fs lens=%.2fs gemini=%.2fs shopping=%.2fs "
+        "hedge_triggered=%s lens_timed_out=%s quota_exhausted=%s",
+        time.monotonic() - _t_total_start, _t_upload, _t_lens, _t_gemini, _t_shopping,
+        hedge_triggered, lens_timed_out, quota_exhausted,
     )
     _identify_cache[cache_key] = (products, _warnings)
     return products, _warnings

@@ -76,7 +76,8 @@ async def _log_startup_config() -> None:
     _key_fp = hashlib.sha256(_key.encode()).hexdigest()[:8] if _key else "(empty)"
     logger.info(
         "ai-analyzer starting | project_id=%s location=%s model=%s "
-        "gcs_lens_bucket=%s serpapi_key_len=%d serpapi_key_fp=%s lens_timeout=%ss skip_gemini=%s",
+        "gcs_lens_bucket=%s serpapi_key_len=%d serpapi_key_fp=%s lens_timeout=%ss "
+        "lens_hedge_delay=%ss skip_gemini=%s",
         os.environ.get("PROJECT_ID") or "(unset)",
         os.environ.get("LOCATION", "us-central1"),
         get_active_model(),
@@ -84,7 +85,8 @@ async def _log_startup_config() -> None:
         len(_key),
         _key_fp,
         os.environ.get("LENS_TIMEOUT_SECONDS", "60"),
-        os.environ.get("IDENTIFY_SKIP_GEMINI", "true"),
+        os.environ.get("LENS_HEDGE_DELAY_SECONDS", "25"),
+        os.environ.get("IDENTIFY_SKIP_GEMINI", "false"),
     )
     if not _key:
         logger.error("SERPAPI_KEY is empty or unset — every SerpAPI call will fail")

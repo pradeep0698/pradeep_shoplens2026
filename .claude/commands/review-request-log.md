@@ -22,13 +22,24 @@ containing `req=`, or just read the tail of recent logs).
 ## Checks to run — go through all of these, not just the obvious one
 
 ### 1. Timing breakdown vs. known baselines
-Extract every phase from the `TIMING` / `TIMING (stream)` line (`gemini=`, `describe_and_upload=`,
-`items_phase=`/`lens=`/`shopping=`, `total=`). Compare against the measured baselines in
+Extract every phase from the `TIMING` / `TIMING (stream)` line. `/analyze` and `/analyze/stream`
+use `gemini=`, `items_phase=`, `items=`, `total=`. `/identify` changed shape on 2026-07-04 when the
+Lens/Gemini/Shopping hedge shipped (see §2's regression note below) — current lines use `upload=`,
+`lens=`, `gemini=`, `shopping=`, `total=`, plus three flags: `hedge_triggered=` (whether Lens was
+still running past `LENS_HEDGE_DELAY_SECONDS`, default 25s, and Gemini+Shopping were raced against
+it), `lens_timed_out=` (Lens's own HTTP call hit `LENS_TIMEOUT_SECONDS`, 60s), and
+`quota_exhausted=`. Older lines (pre-2026-07-04) instead show `describe_and_upload=`, `lens=`,
+`shopping=` with no hedge fields — treat those as the prior sequential design, not a parsing error.
+Once hedged (`hedge_triggered=true`), `lens`/`gemini`/`shopping` can legitimately overlap in
+wall-clock time and sum to more than `total` — that's by design, not an arithmetic bug; `total` is
+the only authoritative wall-clock number. Compare `total` against the measured baselines in
 `docs/analyze-perf-test-results.md`: `/analyze` p50 49.3s / p95 60.3s (at `max_searches=5`);
-`/identify` p50 19.2s / p95 26.4s on a cache miss, ~55ms on a cache hit. A single phase eating most
-of `total` is normal (SerpAPI is the usual bottleneck, not a bug) — only flag it as a **regression**
-if `total` is meaningfully outside the p95, or if a phase that should be fast (Gemini detection,
-GCS upload, crop) is unexpectedly slow.
+`/identify` p50 19.2s / p95 26.4s on a cache miss, ~55ms on a cache hit — note these `/identify`
+baselines predate the hedge change and may no longer reflect typical behavior (fast-path taps
+should be unaffected, but a slow-Lens tail that now hedges via Shopping should generally finish
+faster than before, not slower). A single phase eating most of `total` is normal (SerpAPI is the
+usual bottleneck, not a bug) — only flag it as a **regression** if `total` is meaningfully outside
+the p95, or if a phase that should be fast (Gemini detection, GCS upload, crop) is unexpectedly slow.
 
 ### 2. SerpAPI call health
 For every `SerpAPI [<label>] status=...` / `SerpAPI [<label>] request failed: type=...` line:
@@ -42,9 +53,10 @@ For every `SerpAPI [<label>] status=...` / `SerpAPI [<label>] request failed: ty
   message, that's the exact regression fixed on 2026-07-04 (`Retry(read=0)` silently wrapping
   timeouts) — if it reappears, someone changed `read=False` back to `0`/`None` in
   `_build_session()` (`services/ai-analyzer/analyzer.py`, `services/product-matcher/matcher.py`).
-  This matters because `_google_lens()`'s `except _req.exceptions.Timeout` catch (which sets
-  `_tls.lens_timed_out`, gating the `/identify` Gemini-recovery path) silently stops firing if the
-  exception type is wrong.
+  This still matters for `/identify`'s `lens_timed_out=` log field to be accurate, but as of the
+  2026-07-04 hedge change it no longer gates *whether* the Gemini+Shopping hedge fires — that's now
+  a plain wall-clock check (`Lens hasn't answered within LENS_HEDGE_DELAY_SECONDS`), independent of
+  which exception type Lens eventually raises or whether it raises one at all.
 - If `docs/issues/issues-from-logs.md` or the `serpapi_call_duration_seconds` log-based metric
   (Cloud Monitoring, created 2026-07-04) already covers a pattern you're seeing, reference it
   instead of re-deriving it from scratch.

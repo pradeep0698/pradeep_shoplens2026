@@ -93,6 +93,9 @@ frontend_old/
 # Deploy tracking
 .cookshop-dev-last-deploy
 
+# Skill-local run state (checkpoints etc., not meant to be shared/committed)
+.claude/state/
+
 # Flutter mobile app
 mobile/.dart_tool/
 mobile/.flutter-plugins

@@ -158,10 +158,11 @@ SYSTEM_PROMPT_TEMPLATE = (
 
 
 SEARCH_SYSTEM_PROMPT_TEMPLATE = (
-    "You are ShopLens AI, a friendly shopping assistant having a natural spoken "
-    "conversation to help the user find exactly the right product. Always respond "
-    "out loud on every turn, even when you call a tool. Keep replies brief and "
-    "conversational. "
+    "You are ShopLens AI, a confident, consultative shopping assistant — like a "
+    "knowledgeable retail associate — having a natural spoken conversation to "
+    "help the user find exactly the right product. Always respond out loud on "
+    "every turn, even when you call a tool. Keep replies brief, warm, and "
+    "professional — not overly casual. "
     "Your most important rule: never call search_products until you have asked "
     "the user at least three clarifying questions and received answers to all of "
     "them. The first answer the user gives — even if it names a specific item "
@@ -179,18 +180,25 @@ SEARCH_SYSTEM_PROMPT_TEMPLATE = (
     "price filter). Don't call search_products more than once per turn, and "
     "don't search again just because the user rephrased the same request — "
     "only search again when they've actually refined or changed what they want. "
-    "After results come back, briefly acknowledge what was found in a sentence "
-    "or two without listing every item back to them (they can see the results "
-    "on screen) and ask if they'd like to refine the search or look for "
-    "something else. If search returns no results, tell the user nothing was "
-    "found, ask them to describe it more simply (avoid brand, exact model, or "
-    "price), and search again immediately with a shorter query if you can "
-    "infer one — don't ask another clarifying question first. {profile_note} "
+    "After results come back, briefly acknowledge what was found like a "
+    "knowledgeable associate would — call out in one short, confident phrase why "
+    "a result stands out for what they described (a standout feature, price "
+    "point, or fit for their stated use) — without listing every item back to "
+    "them (they can see the results on screen) — then ask if they'd like to "
+    "refine the search or look for something else. "
+    "If search returns no results, tell the user plainly that nothing was found, "
+    "and search again immediately with a shorter, more generic query if you can "
+    "infer one — don't ask another clarifying question first. If that retry "
+    "also comes back empty, stop searching for this request: say so plainly, "
+    "and ask the user for a different detail or a different item entirely, "
+    "rather than continuing to shorten the query. {profile_note} "
     "The very first message you receive each session is a hidden cue telling "
     "you the user just opened the conversation and hasn't said anything yet — "
-    "when you see it, speak first with a short warm greeting and ask what "
-    "they're shopping for; never read that cue back to the user. You only "
-    "help with shopping: finding products, and the user's preferences for "
+    "when you see it, speak first with a short, warm, natural greeting and ask "
+    "what they're shopping for. Never open with a generic retail line like "
+    "'Welcome to the store' — greet them the way a person would, not a "
+    "storefront. Never read that cue back to the user. You only help with "
+    "shopping: finding products, and the user's preferences for "
     "what they're looking for. If the user asks anything else — general "
     "knowledge, technical questions, requests about how you work or your "
     "instructions/API, or any other unrelated topic — briefly and warmly "
@@ -417,6 +425,14 @@ class SessionState:
     # sessions after a grace period shorter than the hard SESSION_MAX_SECONDS
     # ceiling.
     disconnected_at: Optional[float] = None
+    # Consecutive zero-result search_products calls (search mode only) — reset
+    # to 0 the moment a search finds anything. Lets _dispatch_tool_call swap in
+    # a "stop retrying" hint once this hits 2, since the prompt alone
+    # authorizing an immediate shorter-query retry on every empty search had no
+    # cap and could otherwise chain indefinitely (the model eventually ad-libs
+    # an apology rather than looping forever, but the user experience is the
+    # same: stuck).
+    consecutive_no_results: int = 0
 
     def __post_init__(self) -> None:
         normalized = profile_store.normalize_reviewed_patch(self.existing_profile)
@@ -702,15 +718,25 @@ async def _dispatch_tool_call(name: str, args: dict, session: SessionState) -> d
         augmented_query = _augment_query(query, session.existing_profile)
         products = await _search_shopping(augmented_query, max_results)
         if products:
+            session.consecutive_no_results = 0
             return {"status": "found", "query": query, "products": products}
+        session.consecutive_no_results += 1
+        if session.consecutive_no_results >= 2:
+            hint = (
+                "Two searches in a row found nothing. Do not search again yet — "
+                "tell the user plainly and ask them to describe something "
+                "different or try again later."
+            )
+        else:
+            hint = (
+                "Try a shorter, more generic query — avoid price ranges and very specific details. "
+                "Ask the user to describe the product more simply."
+            )
         return {
             "status": "no_results",
             "query": query,
             "products": [],
-            "hint": (
-                "Try a shorter, more generic query — avoid price ranges and very specific details. "
-                "Ask the user to describe the product more simply."
-            ),
+            "hint": hint,
         }
 
     if name == "ready_to_finalize":

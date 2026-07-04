@@ -617,6 +617,39 @@ async def test_dispatch_search_products_clamps_max_results_to_ceiling(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_dispatch_search_products_caps_retries_after_two_consecutive_no_results(monkeypatch):
+    """The prompt alone tells the model to auto-retry immediately with a
+    shorter query on a no-results search — with no cap, a run of genuinely
+    empty searches let the model chain retries indefinitely. The hint must
+    switch to telling the model to stop once two searches in a row come back
+    empty, and a later found search must reset the counter."""
+
+    async def fake_search_empty(query, max_results):
+        return []
+
+    monkeypatch.setattr(live_session, "_search_shopping", fake_search_empty)
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={}, mode="search")
+
+    first = await _dispatch_tool_call("search_products", {"query": "lamp"}, session)
+    assert first["status"] == "no_results"
+    assert "describe the product more simply" in first["hint"]
+    assert session.consecutive_no_results == 1
+
+    second = await _dispatch_tool_call("search_products", {"query": "lamp"}, session)
+    assert second["status"] == "no_results"
+    assert "do not search again yet" in second["hint"].lower()
+    assert session.consecutive_no_results == 2
+
+    async def fake_search_found(query, max_results):
+        return [{"name": "Lamp", "price": 19.99}]
+
+    monkeypatch.setattr(live_session, "_search_shopping", fake_search_found)
+    third = await _dispatch_tool_call("search_products", {"query": "lamp"}, session)
+    assert third["status"] == "found"
+    assert session.consecutive_no_results == 0
+
+
+@pytest.mark.asyncio
 async def test_dispatch_search_products_ignores_blank_query():
     session = SessionState(session_id="s1", uid="user-1", existing_profile={}, mode="search")
 

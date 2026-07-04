@@ -152,6 +152,18 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         state = state.copyWith(patch: startResponse.profile);
       }
 
+      // Player must be fully open (and _player assigned) before the socket is
+      // connected/subscribed below — otherwise the backend's near-immediate
+      // greeting audio can arrive while _handleFrame's `_player?.isReady`
+      // check is still false, silently dropping the leading audio bytes.
+      final player = VoiceAudioPlayer();
+      await player.open();
+      if (!_isCurrent(generation)) {
+        await player.close();
+        return;
+      }
+      _player = player;
+
       await _socket.connect(ApiConstants.voiceAssistantWsUrl(startResponse.wsUrl));
       if (!_isCurrent(generation)) return;
       _frameSubscription = _socket.frames.listen(
@@ -162,14 +174,6 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           if (_isCurrent(generation)) _handleSocketError(error);
         },
       );
-
-      final player = VoiceAudioPlayer();
-      await player.open();
-      if (!_isCurrent(generation)) {
-        await player.close();
-        return;
-      }
-      _player = player;
 
       // On web, record_web ignores RecordConfig.sampleRate and silently
       // captures at whatever rate the browser's AudioContext settles on

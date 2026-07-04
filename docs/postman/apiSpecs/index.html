@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ShopLens API Specs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+  <style>body { margin: 0; } .topbar { display: none !important; }</style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    window.onload = () => {
+      window.ui = SwaggerUIBundle({
+        urls: [
+          {url: "./ai-analyzer.openapi.json", name: "AI Analyzer"},
+          {url: "./product-matcher.openapi.json", name: "Product Matcher"},
+          {url: "./state-manager.openapi.json", name: "State Manager"},
+          {url: "./voice-assistant.openapi.json", name: "Voice Assistant"},
+          {url: "./pubsub-worker.openapi.json", name: "Pub/Sub Worker"}
+        ],
+        "urls.primaryName": "AI Analyzer",
+        dom_id: "#swagger-ui",
+        presets: [SwaggerUIBundle.presets.apis],
+        layout: "BaseLayout",
+        deepLinking: true,
+      });
+    };
+  </script>
+</body>
+</html>

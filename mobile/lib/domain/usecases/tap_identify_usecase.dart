@@ -32,21 +32,25 @@ class TapIdentifyUseCase {
     // describe the crop (for a better Lens query), but skips the full-image
     // detection pass, making it faster than the full /analyze pipeline.
     final analyzeResponse = await _analyzer.identifyCrop(AnalyzeRequest(
-      imageData:     encodeImageToBase64(croppedBytes),
-      imageMimeType: 'image/png',
-      ignoreTerms:   ignoreTerms,
-      transcript:    '',
-      query:         query,
-      country:       country,
-      maxSearches:   maxSearches,
-      mlkitContext:  mlkitContext,
+      imageData:          encodeImageToBase64(croppedBytes),
+      imageMimeType:      'image/jpeg',
+      ignoreTerms:        ignoreTerms,
+      transcript:         '',
+      query:              query,
+      country:            country,
+      maxSearches:        maxSearches,
+      preferenceTerms:    preferenceTerms,
+      shoppingCategories: shoppingCategories,
+      mlkitContext:       mlkitContext,
     ));
 
     if (analyzeResponse.products.isEmpty) return null;
 
+    // No client-side cap here — the server already limits result count via
+    // MAX_RESULTS_PER_ITEM (a single tap is always a single-object search, so
+    // it gets the deployment default rather than the multi-object dial).
     final ranked = rankProducts(analyzeResponse.products, shoppingCategories,
             preferenceTerms: preferenceTerms, isExactMatchSource: true)
-        .take(5)
         .toList();
 
     // Merge with whatever's already in the session instead of overwriting —

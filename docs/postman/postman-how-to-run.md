@@ -111,6 +111,17 @@ installed (fastapi, pydantic, etc.) but does **not** need real GCP
 credentials, since client objects (Firestore, GCS, Vertex/genai) are all
 constructed lazily inside route handlers, not at import time.
 
+## Detailed, visualizable API specs
+
+`docs/postman/apiSpecs/` has a richer set of OpenAPI specs than
+`docs/api-specs/` above — full response schemas/examples for every status
+code, named request-body examples, a `servers` block, and Voice Assistant's
+Firebase auth documented as a security scheme. Includes a Swagger UI
+`index.html` to browse all 5 services interactively. See
+`docs/postman/apiSpecs/README.md` for how to view it and
+`.claude/commands/update-api-specs.md` (`/update-api-specs`) for how to keep
+it in sync after an API change.
+
 ## Known issues / expected non-200s
 
 These are not bugs — they're either intentional negative tests or

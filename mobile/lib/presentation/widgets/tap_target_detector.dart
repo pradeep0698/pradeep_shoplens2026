@@ -3,9 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
-import '../../core/services/vision_service.dart';
 import '../../core/utils/tap_crop_utils.dart';
-import '../../data/models/analyzer_error.dart';
 
 /// Wraps any widget that renders an image. On first tap a resizable bounding
 /// box (Google Lens style) appears centered on the tap. The user drags the
@@ -17,17 +15,20 @@ class TapTargetDetector extends StatefulWidget {
     required this.imageBytes,
     required this.boxFit,
     required this.onIdentify,
-    required this.onStateChanged,
+    required this.onSelectionChanged,
     required this.child,
     this.rippleColor,
   });
 
   final Uint8List imageBytes;
   final BoxFit boxFit;
-  /// Called with cropped PNG bytes when the user triggers identification.
-  /// Returns the matched product name, or null if nothing was found.
-  final Future<String?> Function(Uint8List croppedBytes) onIdentify;
-  final void Function(TapIdentifyState state) onStateChanged;
+  /// Called with cropped JPEG bytes when the user triggers identification.
+  /// Loading/success/error state is the caller's responsibility (e.g. via a
+  /// shared pipeline provider) — this widget only owns box selection.
+  final Future<void> Function(Uint8List croppedBytes) onIdentify;
+  /// Called whenever the selection box appears, moves to a new tap, or is
+  /// dismissed — lets the parent rebuild anything that reads [hasSelection].
+  final VoidCallback onSelectionChanged;
   final Widget child;
   final Color? rippleColor;
 
@@ -100,7 +101,7 @@ class TapTargetDetectorState extends State<TapTargetDetector>
       final tap = details.localPosition;
       if (_boxRect != null && !_boxRect!.contains(tap)) {
         setState(() { _showBox = false; _boxRect = null; });
-        widget.onStateChanged(const TapIdentifyIdle());
+        widget.onSelectionChanged();
       }
       return;
     }
@@ -124,7 +125,7 @@ class TapTargetDetectorState extends State<TapTargetDetector>
           _showBox = true;
           _boxRect = Rect.fromLTWH(left, top, _kDefaultBoxSize, _kDefaultBoxSize);
         });
-        widget.onStateChanged(const TapIdentifyIdle());
+        widget.onSelectionChanged();
       }
     });
   }
@@ -197,7 +198,7 @@ class TapTargetDetectorState extends State<TapTargetDetector>
 
     final savedRect = _boxRect!;
     setState(() { _busy = true; _showBox = false; _boxRect = null; });
-    widget.onStateChanged(const TapIdentifyLoading());
+    widget.onSelectionChanged();
 
     try {
       final imageRect = TapCropUtils.widgetRectToImageRect(
@@ -213,11 +214,16 @@ class TapTargetDetectorState extends State<TapTargetDetector>
         imageSize:  _imageSize!,
       );
 
-      final productName = await widget.onIdentify(cropped);
-      if (mounted) widget.onStateChanged(TapIdentifySuccess(productName: productName));
+      // onIdentify (pipelineProvider.identifyTappedObject) catches its own
+      // network errors and reports them via PipelineStatusBar, so nothing
+      // to surface here beyond a local cropping failure.
+      await widget.onIdentify(cropped);
     } catch (e) {
-      final message = e is AnalyzerException ? e.displayMessage : e.toString();
-      if (mounted) widget.onStateChanged(TapIdentifyError(message));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Crop failed: $e')),
+        );
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -225,7 +231,7 @@ class TapTargetDetectorState extends State<TapTargetDetector>
 
   void _onDismiss() {
     setState(() { _showBox = false; _boxRect = null; });
-    widget.onStateChanged(const TapIdentifyIdle());
+    widget.onSelectionChanged();
   }
 
   // ── build ─────────────────────────────────────────────────────────────────

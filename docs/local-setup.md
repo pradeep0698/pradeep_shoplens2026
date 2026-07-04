@@ -60,6 +60,14 @@ flutter pub get
 flutter run
 ```
 
+`lib/firebase_options.dart` is committed to git and `lib/main.dart` imports it directly with no
+fallback — do not add it to `.gitignore`. Its hardcoded values are Firebase client config, not
+secrets (Firebase security is enforced by Firestore/Auth rules, not by hiding these), and every
+value is overridable at compile time via `--dart-define-from-file` per environment (see
+`docs/shoplens2026-dev-setup.md` Section 14). Gitignoring it broke fresh checkouts once already
+(2026-07-03) — `flutter build apk` fails immediately with "Error when reading
+'lib/firebase_options.dart'" since there's no generated fallback.
+
 If you ever need to regenerate `lib/firebase_options.dart` or the platform config files yourself (e.g. you have your own Firebase project access and the existing files are missing or stale), run from `mobile/`:
 
 ```bash

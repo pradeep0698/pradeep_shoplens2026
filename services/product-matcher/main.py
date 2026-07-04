@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import os
 from typing import List
@@ -9,7 +10,15 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import requests as _requests
-from matcher import fetch_thumbnail, match_products, search_products, _search_product, _SERPAPI_KEY
+from matcher import (
+    currency_for_country,
+    fetch_thumbnail,
+    match_products,
+    normalize_country,
+    search_products,
+    _search_product,
+    _SERPAPI_KEY,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,6 +42,23 @@ app = FastAPI(
 )
 
 _CORS = {"Access-Control-Allow-Origin": "*"}
+
+
+@app.on_event("startup")
+async def _log_startup_config() -> None:
+    # Fingerprint, not the key itself — a short SHA-256 prefix is safe to log
+    # (irreversible, useless for auth) but still lets you confirm across
+    # environments/deployments that the SERPAPI_KEY actually loaded is the one
+    # you expect, without ever putting real credential material in Cloud
+    # Logging. Length is logged too since 0 is an unambiguous misconfiguration.
+    _key = os.environ.get("SERPAPI_KEY", "")
+    _key_fp = hashlib.sha256(_key.encode()).hexdigest()[:8] if _key else "(empty)"
+    logger.info(
+        "product-matcher starting | serpapi_key_len=%d serpapi_key_fp=%s",
+        len(_key), _key_fp,
+    )
+    if not _key:
+        logger.error("SERPAPI_KEY is empty or unset — every SerpAPI call will fail")
 
 
 @app.exception_handler(Exception)
@@ -63,21 +89,39 @@ class MatchRequest(BaseModel):
     items: List[str] = Field(..., description="List of detected item/product names to search for")
     ignore_terms: List[str] = Field(default_factory=list, description="Terms to exclude from search results")
     max_searches: int = Field(5, ge=1, le=20, description="Maximum SerpAPI calls to make")
+    country: str = Field(
+        "us",
+        description="Two-letter ISO country code for regional product search. Empty/unset defaults to 'us'. "
+                     "Currency is derived from this — see the `currency` field on the response.",
+    )
+    preference_terms: List[str] = Field(
+        default_factory=list,
+        description="Free-text style/brand/material preferences from the user's profile. Used to prioritize "
+                     "which items get a SerpAPI search when there are more items than max_searches allows.",
+    )
+    shopping_categories: List[str] = Field(
+        default_factory=list,
+        description="Preferred shopping categories from the user's profile. Same prioritization role as preference_terms.",
+    )
 
     model_config = {"json_schema_extra": {
-        "examples": [{"items": ["stand mixer", "silicone spatula"], "ignore_terms": [], "max_searches": 5}]
+        "examples": [{
+            "items": ["stand mixer", "silicone spatula"], "ignore_terms": [], "max_searches": 5,
+            "country": "us", "preference_terms": [], "shopping_categories": [],
+        }]
     }}
 
 
 class SearchRequest(BaseModel):
     query: str = Field(..., description="Freetext product search query")
     max_results: int = Field(15, ge=1, le=20, description="Maximum number of products to return")
+    country: str = Field("us", description="Two-letter ISO country code for regional product search. Empty/unset defaults to 'us'.")
 
 
 class ProductItem(BaseModel):
     product_id: str
     name: str
-    price: float | None = Field(None, description="Price in USD")
+    price: float | None = Field(None, description="Price in the currency returned alongside this response (USD unless `country` implies otherwise)")
     image_url: str | None
     purchase_url: str | None
     seller: str | None
@@ -87,6 +131,8 @@ class ProductItem(BaseModel):
 class MatchResponse(BaseModel):
     matched_products: List[ProductItem]
     unmatched: List[str] = Field(..., description="Item names for which no product was found")
+    country: str = Field(..., description="Normalized country used for this request (defaults to 'us')")
+    currency: str = Field(..., description="Currency derived from `country`")
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +155,13 @@ class MatchResponse(BaseModel):
 )
 async def match(request: MatchRequest) -> JSONResponse:
     result = await asyncio.to_thread(
-        match_products, request.items, request.ignore_terms, request.max_searches
+        match_products,
+        request.items,
+        request.ignore_terms,
+        request.max_searches,
+        request.country,
+        request.preference_terms,
+        request.shopping_categories,
     )
     return JSONResponse(content=result)
 
@@ -127,8 +179,9 @@ async def search(request: SearchRequest) -> JSONResponse:
     # specifically for /match's SerpAPI-call-count cap, not /search's result
     # count. Reusing it here silently overrode any requested max_results down
     # to 5 regardless of what the caller asked for.
-    products = await asyncio.to_thread(search_products, request.query, request.max_results)
-    return JSONResponse(content={"products": products})
+    country = normalize_country(request.country)
+    products = await asyncio.to_thread(search_products, request.query, request.max_results, country)
+    return JSONResponse(content={"products": products, "country": country, "currency": currency_for_country(country)})
 
 
 @app.get(

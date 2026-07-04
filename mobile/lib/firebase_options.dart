@@ -58,7 +58,8 @@ class DefaultFirebaseOptions {
         defaultValue: 'AIzaSyBj8i4zQQubbwMCXiAbN8rphiRb9qTmt9s'),
     appId: String.fromEnvironment('FIREBASE_WEB_APP_ID',
         defaultValue: '1:115535290381:web:2874f83aa9285e2698b544'),
-    messagingSenderId: String.fromEnvironment('FIREBASE_WEB_MESSAGING_SENDER_ID',
+    messagingSenderId: String.fromEnvironment(
+        'FIREBASE_WEB_MESSAGING_SENDER_ID',
         defaultValue: '115535290381'),
     projectId: String.fromEnvironment('FIREBASE_WEB_PROJECT_ID',
         defaultValue: 'project-b1a5dd5a-69e6-4db3-9d7'),

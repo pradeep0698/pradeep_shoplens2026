@@ -120,6 +120,19 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
       setState(() => _localError = 'Date of birth is required.');
       return;
     }
+    final dobPattern = RegExp(r'^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$');
+    if (!dobPattern.hasMatch(_dob.text.trim())) {
+      setState(() => _localError = 'Please enter date of birth in YYYY-MM-DD format.');
+      return;
+    }
+    final photoUrl = _photoUrl.text.trim();
+    if (photoUrl.isNotEmpty) {
+      final uri = Uri.tryParse(photoUrl);
+      if (uri == null || !uri.hasScheme || !uri.hasAuthority) {
+        setState(() => _localError = 'Please enter a valid photo URL.');
+        return;
+      }
+    }
 
     await widget.onSave(UserProfile(
       username:           _username.text.trim(),

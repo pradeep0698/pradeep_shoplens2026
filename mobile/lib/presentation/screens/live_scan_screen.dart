@@ -236,7 +236,7 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
         );
         if (cropped != null) {
           imageBytes = cropped;
-          mime       = 'image/png';
+          mime       = 'image/jpeg';
         }
       }
 

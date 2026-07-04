@@ -1,0 +1,267 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pub/Sub Segment Worker",
+    "description": "Internal Cloud Run service that processes GCS Pub/Sub push notifications for new HLS video segments from the live stream.\n\n**This service is not publicly accessible in production.** It is triggered exclusively by Google Cloud Pub/Sub push delivery from the `video-segments-sub` subscription.\n\n**Pipeline per segment:**\n1. Decode the Pub/Sub message to extract the GCS object path\n2. `POST ai-analyzer/analyze` \u2014 Gemini detects shoppable items in the video segment\n3. `POST product-matcher/match` \u2014 SerpAPI finds matching purchasable products\n4. `POST state-manager/session/{id}/products` \u2014 save results to the active session\n\n**Testing:** Use the `/pubsub` endpoint with a simulated Pub/Sub push body (base64-encoded GCS event).",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/pubsub": {
+      "post": {
+        "tags": [
+          "Pub/Sub"
+        ],
+        "summary": "Pub/Sub push webhook",
+        "description": "Receives a Pub/Sub push message from the `video-segments-sub` subscription. Decodes the base64 GCS event, extracts the segment URI, and runs the full analyze \u2192 match \u2192 save pipeline.\n\nNon-HLS files (not `.ts` or `.m3u8`) are skipped immediately with `status: skipped`.",
+        "operationId": "pubsub_webhook_pubsub_post",
+        "responses": {
+          "200": {
+            "description": "Pipeline result or skip reason",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PubSubResponse"
+                },
+                "example": {
+                  "segment_url": "gs://shoplens2026-dev-hls-segments/live/segment001.ts",
+                  "items_detected": 1,
+                  "products_matched": 1,
+                  "status": "pipeline_complete"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed Pub/Sub message (missing data field, or bucket/name undeterminable)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                },
+                "example": {
+                  "detail": "Pub/Sub message contains no data field"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream service (ai-analyzer, product-matcher, or state-manager) request failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                },
+                "example": {
+                  "detail": "ai-analyzer request failed: All connection attempts failed"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PubSubPushBody"
+              },
+              "examples": {
+                "hls_segment_finalized": {
+                  "summary": "New HLS segment written to GCS",
+                  "value": {
+                    "message": {
+                      "data": "eyJidWNrZXQiOiAic2hvcGxlbnMtZGV2LWhscy1zZWdtZW50cyIsICJuYW1lIjogImxpdmUvc2VnbWVudDAwMS50cyJ9",
+                      "messageId": "test-001",
+                      "publishTime": "2026-01-01T00:00:00Z",
+                      "attributes": {
+                        "eventType": "OBJECT_FINALIZE",
+                        "objectId": "live/segment001.ts"
+                      }
+                    },
+                    "subscription": "projects/shoplens2026-dev/subscriptions/video-segments-sub"
+                  }
+                },
+                "non_hls_file_skipped": {
+                  "summary": "A non-.ts/.m3u8 file \u2014 skipped immediately",
+                  "value": {
+                    "message": {
+                      "data": "eyJidWNrZXQiOiAic2hvcGxlbnMtZGV2LWhscy1zZWdtZW50cyIsICJuYW1lIjogImxpdmUvdGh1bWJuYWlsLmpwZyJ9",
+                      "messageId": "test-002",
+                      "publishTime": "2026-01-01T00:00:05Z",
+                      "attributes": {
+                        "eventType": "OBJECT_FINALIZE",
+                        "objectId": "live/thumbnail.jpg"
+                      }
+                    },
+                    "subscription": "projects/shoplens2026-dev/subscriptions/video-segments-sub"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Health check",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                },
+                "example": {
+                  "status": "ok"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Pub/Sub",
+      "description": "Pub/Sub push webhook \u2014 internal use only"
+    },
+    {
+      "name": "System",
+      "description": "Health and diagnostics"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "PubSubMessage": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "string",
+            "description": "Base64-encoded GCS storage event JSON, e.g. {\"bucket\": \"...\", \"name\": \"live/segment001.ts\"}"
+          },
+          "messageId": {
+            "type": "string",
+            "nullable": true
+          },
+          "publishTime": {
+            "type": "string",
+            "nullable": true,
+            "format": "date-time"
+          },
+          "attributes": {
+            "type": "object",
+            "description": "GCS notification attributes",
+            "properties": {
+              "eventType": {
+                "type": "string",
+                "example": "OBJECT_FINALIZE"
+              },
+              "bucketId": {
+                "type": "string"
+              },
+              "objectId": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "required": [
+          "data"
+        ]
+      },
+      "PubSubPushBody": {
+        "type": "object",
+        "description": "Standard Google Cloud Pub/Sub push subscription payload shape",
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/PubSubMessage"
+          },
+          "subscription": {
+            "type": "string",
+            "description": "Full Pub/Sub subscription resource name"
+          }
+        },
+        "required": [
+          "message",
+          "subscription"
+        ]
+      },
+      "PubSubResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pipeline_complete",
+              "skipped",
+              "no_items_detected",
+              "no_products_matched"
+            ]
+          },
+          "segment_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "items_detected": {
+            "type": "integer",
+            "nullable": true
+          },
+          "products_matched": {
+            "type": "integer",
+            "nullable": true
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "Human-readable error message"
+          }
+        },
+        "required": [
+          "detail"
+        ]
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "https://pubsub-worker-82592393149.us-central1.run.app",
+      "description": "cookshop-dev-rajan-prod (live, public)"
+    },
+    {
+      "url": "https://pubsub-worker-115535290381.us-central1.run.app",
+      "description": "shoplens-dev (requires an authenticated Cloud Run invoker \u2014 not publicly callable)"
+    },
+    {
+      "url": "http://localhost:8084",
+      "description": "local (uvicorn main:app)"
+    }
+  ]
+}

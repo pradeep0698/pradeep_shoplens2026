@@ -43,6 +43,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   bool  _onboardingTriggered = false;
   bool  _micPrewarmed = false;
   bool  _savedToRecent = false;
+  bool  _imageCollapsed = false;
 
   @override
   void dispose() {
@@ -77,6 +78,13 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   @override
   Widget build(BuildContext context) {
     ref.listen(pipelineProvider, (prev, next) {
+      // Collapsing the photo only makes sense once results are actually
+      // showing — force it back open for a fresh pick, a new analysis run,
+      // or an error, so the user always sees the image before/while it's
+      // being worked on.
+      if (next.status != PipelineStatus.success) {
+        _imageCollapsed = false;
+      }
       if (next.status == PipelineStatus.analyzing) {
         _productCheckTimer?.cancel();
         setState(() {
@@ -90,6 +98,9 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         _productCheckTimer = Timer(const Duration(seconds: 5), () {
           if (mounted) setState(() => _productCheckSettled = true);
         });
+        // Auto-collapse the photo so the product list gets the full screen —
+        // still one tap away via the collapsed strip below.
+        _imageCollapsed = true;
         // Save image to recent searches once per scan
         if (!_savedToRecent) {
           final bytes    = next.imageBytes;
@@ -197,80 +208,93 @@ class _MainScreenState extends ConsumerState<MainScreen> {
 
           // Image section
           if (pipeline.imageBytes != null) ...[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 320),
-                  child: Stack(
-                    children: [
-                      TapTargetDetector(
-                        key:               _tapKey,
-                        imageBytes:        pipeline.imageBytes!,
-                        boxFit:            BoxFit.contain,
-                        onIdentify:        _onTapIdentify,
-                        onSelectionChanged: () => setState(() {}),
-                        child: Image.memory(
-                          pipeline.imageBytes!,
-                          width: double.infinity,
-                          fit: BoxFit.contain,
-                        ),
-                      ),
-                      if (isBusy)
-                        Positioned.fill(
-                          child: Container(
-                            color: Colors.black.withValues(alpha: 0.5),
-                            child: const Center(
-                              child: CircularProgressIndicator(color: Color(0xFF34D399)),
-                            ),
+            if (_imageCollapsed)
+              _buildCollapsedImageStrip(pipeline.imageBytes!)
+            else ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 320),
+                    child: Stack(
+                      children: [
+                        TapTargetDetector(
+                          key:               _tapKey,
+                          imageBytes:        pipeline.imageBytes!,
+                          boxFit:            BoxFit.contain,
+                          onIdentify:        _onTapIdentify,
+                          onSelectionChanged: () => setState(() {}),
+                          child: Image.memory(
+                            pipeline.imageBytes!,
+                            width: double.infinity,
+                            fit: BoxFit.contain,
                           ),
                         ),
-                    ],
+                        if (isBusy)
+                          Positioned.fill(
+                            child: Container(
+                              color: Colors.black.withValues(alpha: 0.5),
+                              child: const Center(
+                                child: CircularProgressIndicator(color: Color(0xFF34D399)),
+                              ),
+                            ),
+                          ),
+                        if (pipeline.status == PipelineStatus.success)
+                          Positioned(
+                            top: 8,
+                            right: 8,
+                            child: _CollapseButton(
+                              icon: Icons.expand_less,
+                              onTap: () => setState(() => _imageCollapsed = true),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-            if (!isBusy)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                child: Center(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      ElevatedButton.icon(
-                        onPressed: (pipeline.fromLiveScan && !hasSelection)
-                            ? null
-                            : () async {
-                                final tap = _tapKey.currentState;
-                                if (tap != null && tap.hasSelection) {
-                                  await tap.analyzeSelection();
-                                } else if (!pipeline.fromLiveScan) {
-                                  ref.read(pipelineProvider.notifier).analyzeLoaded();
-                                }
-                              },
-                        icon: const Icon(Icons.auto_awesome, size: 18),
-                        label: Text(
-                          pipeline.fromLiveScan ? 'Crop Image' : 'Scan Image',
-                          style: const TextStyle(fontWeight: FontWeight.w700),
+              if (!isBusy)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Center(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: (pipeline.fromLiveScan && !hasSelection)
+                              ? null
+                              : () async {
+                                  final tap = _tapKey.currentState;
+                                  if (tap != null && tap.hasSelection) {
+                                    await tap.analyzeSelection();
+                                  } else if (!pipeline.fromLiveScan) {
+                                    ref.read(pipelineProvider.notifier).analyzeLoaded();
+                                  }
+                                },
+                          icon: const Icon(Icons.auto_awesome, size: 18),
+                          label: Text(
+                            pipeline.fromLiveScan ? 'Crop Image' : 'Scan Image',
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF34D399),
+                            foregroundColor: const Color(0xFF0F172A),
+                            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                          ),
                         ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF34D399),
-                          foregroundColor: const Color(0xFF0F172A),
-                          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                        const SizedBox(width: 8),
+                        InfoTooltipIcon(
+                          message: pipeline.fromLiveScan
+                              ? 'Tap an object first. Crop Image identifies only the selected object.'
+                              : 'Scan Image identifies everything in the image. To identify a specific item, tap it first.',
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      InfoTooltipIcon(
-                        message: pipeline.fromLiveScan
-                            ? 'Tap an object first. Crop Image identifies only the selected object.'
-                            : 'Scan Image identifies everything in the image. To identify a specific item, tap it first.',
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
-              ),
+            ],
           ],
 
           // Video section
@@ -605,4 +629,65 @@ class _MainScreenState extends ConsumerState<MainScreen> {
 
   Future<void> _onTapIdentify(Uint8List croppedBytes) =>
       ref.read(pipelineProvider.notifier).identifyTappedObject(croppedBytes);
+
+  Widget _buildCollapsedImageStrip(Uint8List imageBytes) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+        child: Material(
+          color: const Color(0xFF1E293B),
+          borderRadius: BorderRadius.circular(12),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () => setState(() => _imageCollapsed = false),
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+              ),
+              child: Row(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.memory(imageBytes, width: 40, height: 40, fit: BoxFit.cover),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text(
+                      'View photo',
+                      style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500),
+                    ),
+                  ),
+                  const Icon(Icons.expand_more, color: Color(0xFF94A3B8)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+}
+
+class _CollapseButton extends StatelessWidget {
+  const _CollapseButton({required this.icon, required this.onTap});
+
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(6),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.5),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(icon, color: Colors.white, size: 20),
+        ),
+      ),
+    );
+  }
 }

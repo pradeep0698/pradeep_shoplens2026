@@ -770,6 +770,12 @@ def _clean_product_name(name: str, seller: str) -> str:
     return cleaned if cleaned else name
 
 
+# Appended to every Lens visual_matches query to bias results toward
+# purchasable listings (with a price and a link) instead of general visual
+# lookalikes — informational pages, image galleries, etc.
+_LENS_SHOPPING_HINT = "this is for shopping, include price and links"
+
+
 def _google_lens(image_url: str, query: str = "", country: str = "us", max_results: int = 5) -> list[dict]:
     """Call SerpAPI Google Lens and return up to max_results product matches
     from the visual_matches tab.
@@ -794,8 +800,7 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
         "gl":       country or "us",
         "no_cache": "true",
     }
-    if query:
-        base_params["q"] = query
+    base_params["q"] = f"{query} {_LENS_SHOPPING_HINT}" if query else _LENS_SHOPPING_HINT
 
     def _fetch(type_value: str) -> dict:
         data = _serp_get(

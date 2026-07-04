@@ -24,7 +24,7 @@ class _AuthChangeNotifier extends ChangeNotifier {
       // to voice-assistant (the only backend that sends an Authorization
       // header, see dio_client.dart's voiceDioProvider) pays for a real
       // network round-trip to mint a token instead of reading the cache.
-      unawaited(user?.getIdToken());
+      unawaited(user?.getIdToken().catchError((_) => null));
       notifyListeners();
     });
   }

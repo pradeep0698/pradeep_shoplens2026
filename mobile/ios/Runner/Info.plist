@@ -10,6 +10,11 @@
 		<string>ShopLens uses your microphone so you can set your shopping preferences by voice.</string>
 		<key>CADisableMinimumFrameDurationOnPhone</key>
 		<true/>
+		<!-- Works around a real-device release-mode bug where Impeller paints the
+		     first frame correctly then the surface goes blank/grey on the next
+		     frame. Remove once upstream Impeller fixes land. -->
+		<key>FLTEnableImpeller</key>
+		<false/>
 		<key>CFBundleDevelopmentRegion</key>
 		<string>$(DEVELOPMENT_LANGUAGE)</string>
 		<key>CFBundleDisplayName</key>

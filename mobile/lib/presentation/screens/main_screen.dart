@@ -5,7 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:permission_handler/permission_handler.dart';
+import '../../core/services/vision_service.dart';
+import '../../core/utils/mic_permission.dart';
 import '../../core/utils/image_utils.dart';
 import '../../core/utils/product_ranker.dart';
 import '../../data/models/user_profile.dart';
@@ -41,9 +42,14 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   bool  _productCheckSettled = false;
   Timer? _productCheckTimer;
   bool  _onboardingTriggered = false;
-  bool  _micPrewarmed = false;
   bool  _savedToRecent = false;
   bool  _imageCollapsed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(requestMicrophonePermission());
+  }
 
   @override
   void dispose() {
@@ -60,7 +66,10 @@ class _MainScreenState extends ConsumerState<MainScreen> {
 
     final user = ref.read(authStateProvider).value;
     if (user == null) return;
-    final latest = ref.read(profileProvider).value ?? resolvedProfile;
+    // Re-read the freshest profile rather than reusing the stale snapshot —
+    // a finalized voice session may have already merged new preferences into
+    // Firestore server-side while the overlay was open.
+    final latest = ref.read(profileProvider).valueOrNull ?? resolvedProfile;
     if (latest.voiceOnboardingSeen) return;
     await ref.read(profileRepositoryProvider).save(
           user.uid,
@@ -116,18 +125,13 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     final pipeline           = ref.watch(pipelineProvider);
     final video              = ref.watch(videoProvider);
     final shoppingList       = ref.watch(shoppingListProvider);
-    final profile            = ref.watch(profileProvider).value;
+    final profile            = ref.watch(profileProvider).valueOrNull;
     final shoppingCategories = profile?.shoppingCategories ?? const [];
-    final isAdmin            = ref.watch(isAdminProvider).value ?? false;
+    final isAdmin            = ref.watch(isAdminProvider).valueOrNull ?? false;
     final hasSelection       = _tapKey.currentState?.hasSelection ?? false;
 
     if (profile != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowOnboarding(profile));
-    }
-
-    if (!_micPrewarmed) {
-      _micPrewarmed = true;
-      unawaited(Permission.microphone.request());
     }
 
     final isBusy = pipeline.status == PipelineStatus.analyzing ||

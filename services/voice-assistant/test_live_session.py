@@ -12,6 +12,7 @@ from live_session import (
     SessionRegistry,
     SessionState,
     VOICE_CATEGORIES,
+    _augment_query,
     _auto_save_and_close,
     _classify_clause,
     _dispatch_tool_call,
@@ -25,8 +26,11 @@ from live_session import (
     _profile_note,
     _pump_client_to_gemini,
     _pump_gemini_to_client,
+    _resume_note,
     _run_mock_session,
     _run_pumps,
+    run_voice_session,
+    _sanitize_exclusion_term,
     _send_greeting_trigger,
     _send_timeout_nudge,
     _split_clauses,
@@ -224,6 +228,67 @@ async def test_session_registry_expires_and_evicts_stale_sessions(monkeypatch):
     assert await registry.get(state.session_id) is None
 
 
+def test_session_state_is_disconnect_expired_false_when_still_connected():
+    state = SessionState(session_id="s1", uid="user-1", existing_profile={})
+    assert state.is_disconnect_expired() is False
+
+
+def test_session_state_is_disconnect_expired_false_within_grace_period(monkeypatch):
+    monkeypatch.setattr(live_session, "_DISCONNECT_GRACE_SECONDS", 120)
+    state = SessionState(session_id="s1", uid="user-1", existing_profile={})
+    state.disconnected_at = time.monotonic() - 10
+    assert state.is_disconnect_expired() is False
+
+
+def test_session_state_is_disconnect_expired_true_past_grace_period(monkeypatch):
+    monkeypatch.setattr(live_session, "_DISCONNECT_GRACE_SECONDS", 120)
+    state = SessionState(session_id="s1", uid="user-1", existing_profile={})
+    state.disconnected_at = time.monotonic() - 200
+    assert state.is_disconnect_expired() is True
+
+
+@pytest.mark.asyncio
+async def test_session_registry_get_survives_an_ordinary_disconnect_within_grace(monkeypatch):
+    monkeypatch.setattr(live_session, "_DISCONNECT_GRACE_SECONDS", 120)
+    registry = SessionRegistry()
+    state = await registry.create(uid="user-1", existing_profile={})
+    state.disconnected_at = time.monotonic() - 10
+
+    fetched = await registry.get(state.session_id)
+
+    assert fetched is not None
+    assert fetched.session_id == state.session_id
+
+
+@pytest.mark.asyncio
+async def test_session_registry_get_evicts_after_disconnect_grace_expires(monkeypatch):
+    monkeypatch.setattr(live_session, "_DISCONNECT_GRACE_SECONDS", 120)
+    registry = SessionRegistry()
+    state = await registry.create(uid="user-1", existing_profile={})
+    state.disconnected_at = time.monotonic() - 200
+
+    assert await registry.get(state.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_run_voice_session_does_not_delete_session_on_ordinary_disconnect(monkeypatch):
+    """An ordinary WS disconnect (network blip, backgrounding) must leave the
+    session resumable — only an explicit exit (POST /voice/session/cancel or
+    /finalize in main.py) deletes it. Uses the mock-Gemini path since it
+    needs no faked Vertex AI Live connection: _FakeWebSocket always ends with
+    a websocket.disconnect message, which is exactly the "ordinary disconnect"
+    case being tested here."""
+    monkeypatch.setattr(live_session, "_MOCK_GEMINI", True)
+    registry = SessionRegistry()
+    session = await registry.create(uid="user-1", existing_profile={})
+    ws = _FakeWebSocket([])
+
+    await run_voice_session(ws, session)
+
+    assert session.session_id in registry._sessions
+    assert session.disconnected_at is not None
+
+
 def test_profile_note_empty_profile_says_first_time():
     note = _profile_note({"shopping_categories": [], "preference_terms": [], "ignore_terms": []})
     assert "no saved preferences yet" in note
@@ -298,6 +363,52 @@ def test_system_prompt_appends_language_directive_for_non_english():
         {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "Spanish"
     )
     assert "Conduct this entire conversation in Spanish" in prompt
+
+
+def test_resume_note_empty_transcript_yields_no_note():
+    assert _resume_note([]) == ""
+
+
+def test_resume_note_includes_prior_turns():
+    transcript = [
+        {"role": "user", "text": "I like minimalist furniture"},
+        {"role": "model", "text": "Got it, anything else?"},
+    ]
+    note = _resume_note(transcript)
+    assert "interrupted" in note.lower()
+    assert "I like minimalist furniture" in note
+    assert "Got it, anything else?" in note
+
+
+def test_resume_note_only_keeps_last_20_turns():
+    transcript = [{"role": "user", "text": f"turn {i}"} for i in range(25)]
+    note = _resume_note(transcript)
+    assert "turn 0" not in note
+    assert "turn 24" in note
+
+
+def test_resume_note_truncates_very_long_conversations():
+    transcript = [{"role": "user", "text": "x" * 3000}]
+    note = _resume_note(transcript)
+    assert len(note) < 2500
+
+
+def test_system_prompt_embeds_resume_note_when_transcript_provided():
+    prompt = _system_prompt(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []},
+        "preferences",
+        "English",
+        resume_transcript=[{"role": "user", "text": "I like minimalist furniture"}],
+    )
+    assert "interrupted" in prompt.lower()
+    assert "I like minimalist furniture" in prompt
+
+
+def test_system_prompt_omits_resume_note_for_a_fresh_session():
+    prompt = _system_prompt(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
+    )
+    assert "interrupted" not in prompt.lower()
 
 
 def test_live_config_defaults_to_puck_voice():
@@ -428,6 +539,35 @@ async def test_dispatch_record_preference_ignore_term_removes_matching_category(
     assert session.latest_patch["ignore_terms"] == ["clothes"]
 
 
+def test_sanitize_exclusion_term_collapses_to_hyphenated_token():
+    assert _sanitize_exclusion_term("faux leather") == "faux-leather"
+    assert _sanitize_exclusion_term("kids' toys") == "kids-toys"
+    assert _sanitize_exclusion_term("  extra   spaces  ") == "extra-spaces"
+
+
+def test_augment_query_always_appends_shopping_context_phrase():
+    augmented = _augment_query("desk lamp", {})
+    assert augmented.startswith("desk lamp")
+    assert live_session._SHOPPING_CONTEXT_SUFFIX in augmented
+
+
+def test_augment_query_appends_preferences_when_present():
+    augmented = _augment_query("sneakers", {"preference_terms": ["Nike", "minimalist"]})
+    assert "preferring Nike, minimalist" in augmented
+
+
+def test_augment_query_appends_sanitized_exclusions():
+    augmented = _augment_query("jacket", {"ignore_terms": ["faux leather", "plastic"]})
+    assert "-faux-leather" in augmented
+    assert "-plastic" in augmented
+
+
+def test_augment_query_omits_extras_when_profile_has_none():
+    augmented = _augment_query("sneakers", {"preference_terms": [], "ignore_terms": []})
+    assert "preferring" not in augmented
+    assert "-" not in augmented.replace(live_session._SHOPPING_CONTEXT_SUFFIX, "")
+
+
 @pytest.mark.asyncio
 async def test_dispatch_search_products_calls_search_and_returns_products(monkeypatch):
     captured = {}
@@ -444,7 +584,12 @@ async def test_dispatch_search_products_calls_search_and_returns_products(monkey
 
     result = await _dispatch_tool_call("search_products", {"query": "wireless headphones"}, session)
 
-    assert captured == {"query": "wireless headphones", "max_results": 3}
+    # The backend receives the augmented query (see _augment_query) — the
+    # original, unaugmented query is what's returned to the client so the
+    # augmentation text never leaks into the on-screen "Results for '...'" UI.
+    assert captured["query"].startswith("wireless headphones")
+    assert live_session._SHOPPING_CONTEXT_SUFFIX in captured["query"]
+    assert captured["max_results"] == 3
     assert result == {
         "status": "found",
         "query": "wireless headphones",
@@ -467,8 +612,41 @@ async def test_dispatch_search_products_clamps_max_results_to_ceiling(monkeypatc
 
     result = await _dispatch_tool_call("search_products", {"query": "lamp"}, session)
 
-    assert captured["max_results"] == 5
+    assert captured["max_results"] == 15
     assert result["status"] == "no_results"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_search_products_caps_retries_after_two_consecutive_no_results(monkeypatch):
+    """The prompt alone tells the model to auto-retry immediately with a
+    shorter query on a no-results search — with no cap, a run of genuinely
+    empty searches let the model chain retries indefinitely. The hint must
+    switch to telling the model to stop once two searches in a row come back
+    empty, and a later found search must reset the counter."""
+
+    async def fake_search_empty(query, max_results):
+        return []
+
+    monkeypatch.setattr(live_session, "_search_shopping", fake_search_empty)
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={}, mode="search")
+
+    first = await _dispatch_tool_call("search_products", {"query": "lamp"}, session)
+    assert first["status"] == "no_results"
+    assert "describe the product more simply" in first["hint"]
+    assert session.consecutive_no_results == 1
+
+    second = await _dispatch_tool_call("search_products", {"query": "lamp"}, session)
+    assert second["status"] == "no_results"
+    assert "do not search again yet" in second["hint"].lower()
+    assert session.consecutive_no_results == 2
+
+    async def fake_search_found(query, max_results):
+        return [{"name": "Lamp", "price": 19.99}]
+
+    monkeypatch.setattr(live_session, "_search_shopping", fake_search_found)
+    third = await _dispatch_tool_call("search_products", {"query": "lamp"}, session)
+    assert third["status"] == "found"
+    assert session.consecutive_no_results == 0
 
 
 @pytest.mark.asyncio
@@ -990,10 +1168,22 @@ async def test_pump_gemini_to_client_relays_a_second_turn_after_the_first_comple
 # --- Mock-only heuristics ----------------------------------------------------
 
 
-def test_is_closing_phrase_matches_bare_no():
-    assert _is_closing_phrase("No") is True
+def test_is_closing_phrase_no_longer_matches_ambiguous_bare_words():
+    # Regression guard for the root cause of "asks ~3 questions then jumps
+    # to confirmation": bare single-word answers like "no"/"yes"/"done" are
+    # extremely likely to occur as an ordinary reply to a mid-interview
+    # yes/no follow-up, so they must NOT end the conversation on their own.
+    assert _is_closing_phrase("No") is False
+    assert _is_closing_phrase("Yes") is False
+    assert _is_closing_phrase("Done.") is False
+    assert _is_closing_phrase("Save") is False
+    assert _is_closing_phrase("go ahead") is False
+
+
+def test_is_closing_phrase_still_matches_unambiguous_multi_word_phrases():
     assert _is_closing_phrase("that's all") is True
-    assert _is_closing_phrase("  Done.  ") is True
+    assert _is_closing_phrase("  I'm done.  ") is True
+    assert _is_closing_phrase("save it") is True
 
 
 def test_is_closing_phrase_does_not_match_no_with_content():

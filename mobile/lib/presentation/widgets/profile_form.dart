@@ -1,7 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/models/user_profile.dart';
+import '../../data/repositories/profile_repository.dart';
+import '../providers/auth_provider.dart';
+import '../providers/profile_provider.dart';
+import 'voice_assistant_overlay.dart';
 
-class ProfileForm extends StatefulWidget {
+class ProfileForm extends ConsumerStatefulWidget {
   const ProfileForm({
     super.key,
     required this.profile,
@@ -14,10 +19,10 @@ class ProfileForm extends StatefulWidget {
   final bool           isSaving;
 
   @override
-  State<ProfileForm> createState() => _ProfileFormState();
+  ConsumerState<ProfileForm> createState() => _ProfileFormState();
 }
 
-class _ProfileFormState extends State<ProfileForm> {
+class _ProfileFormState extends ConsumerState<ProfileForm> {
   late TextEditingController _username;
   late TextEditingController _dob;
   late TextEditingController _photoUrl;
@@ -86,6 +91,25 @@ class _ProfileFormState extends State<ProfileForm> {
   List<String> _splitTerms(String raw) =>
       raw.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
 
+  // Opens the same voice-onboarding flow the forced first-run trigger uses
+  // (see main_screen.dart's _maybeShowOnboarding) so users can (re-)run it
+  // any time from Profile settings, not just once on first run.
+  Future<void> _openVoiceSetup() async {
+    await showVoiceAssistantOverlay(context, isOnboarding: true);
+    if (!mounted) return;
+    final user = ref.read(authStateProvider).value;
+    if (user == null) return;
+    // Re-read the freshest profile from the provider rather than trusting
+    // widget.profile — it's prop-drilled from ProfileScreen and not
+    // guaranteed to have rebuilt yet at this point in the async gap.
+    final latest = ref.read(profileProvider).valueOrNull ?? widget.profile;
+    if (latest.voiceOnboardingSeen) return;
+    await ref.read(profileRepositoryProvider).save(
+          user.uid,
+          latest.copyWith(voiceOnboardingSeen: true),
+        );
+  }
+
   Future<void> _submit() async {
     setState(() => _localError = null);
     if (_username.text.trim().isEmpty) {
@@ -130,6 +154,7 @@ class _ProfileFormState extends State<ProfileForm> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          _voiceSetupCard(),
           _field('Username', _username, hint: 'Ava Chen'),
           _field('Date of birth (YYYY-MM-DD)', _dob, hint: '1990-01-01'),
           _field('Photo URL', _photoUrl, hint: 'https://example.com/avatar.jpg'),
@@ -173,6 +198,51 @@ class _ProfileFormState extends State<ProfileForm> {
       ),
     );
   }
+
+  Widget _voiceSetupCard() => Container(
+        margin: const EdgeInsets.only(bottom: 18),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1E293B),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFF34D399).withValues(alpha: 0.3)),
+        ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: _openVoiceSetup,
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF34D399).withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.smart_toy_outlined, color: Color(0xFF34D399), size: 20),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Set up with voice',
+                      style: TextStyle(color: Color(0xFFCBD5E1), fontSize: 13, fontWeight: FontWeight.w500),
+                    ),
+                    SizedBox(height: 4),
+                    Text(
+                      "Tell the assistant your shopping style and we'll fill this in for you.",
+                      style: TextStyle(color: Color(0xFF64748B), fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right, color: Color(0xFF64748B), size: 20),
+            ],
+          ),
+        ),
+      );
 
   Widget _categorySection() => Padding(
         padding: const EdgeInsets.only(bottom: 14),

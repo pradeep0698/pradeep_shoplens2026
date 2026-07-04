@@ -1,0 +1,29 @@
+{"kind":"deck","id":"pr/grjrib","name":"Deck"}
+{"kind":"layout","layoutId":"83035cfc-fc9a-4bdb-b895-897dee1de226","name":"Master","type":"master"}
+{"kind":"layout","layoutId":"1ca92c82-922a-4738-acca-26daedefa820","name":"Title Slide","type":"title"}
+{"kind":"slide","id":"sl/9536yi","slide":1,"title":"Voice assistant roadmap","textShapes":15}
+{"kind":"shape","id":"sh/p0bi9s36","slide":1,"name":"background-glow","bbox":[880,28,320,320]}
+{"kind":"textbox","id":"sh/i9s36hcr","slide":1,"name":"eyebrow","text":"Voice assistant roadmap","textPreview":"Voice assistant roadmap","textChars":23,"textLines":1,"bbox":[72,54,660,44]}
+{"kind":"textbox","id":"sh/bulwval8","slide":1,"name":"title","text":"One profile entry point today, richer personalization over time","textPreview":"One profile entry point today, richer personalization over time","textChars":63,"textLines":1,"bbox":[72,92,740,100]}
+{"kind":"textbox","id":"sh/032lszqt","slide":1,"name":"subtitle","text":"Start with a guided voice option inside profile settings, then let the assistant keep learning from real shopping conversations.","textPreview":"Start with a guided voice option inside profile settings, then let the assistant keep learning from real shopping conversations.","textChars":128,"textLines":1,"bbox":[72,184,700,58]}
+{"kind":"shape","id":"sh/tovahoza","slide":1,"name":"image-frame","bbox":[72,252,630,412]}
+{"kind":"textbox","id":"sh/bi9s36hc","slide":1,"name":"image-caption-title","text":"Profile settings + voice onboarding","textPreview":"Profile settings + voice onboarding","textChars":35,"textLines":1,"bbox":[96,618,300,26]}
+{"kind":"textbox","id":"sh/0rqd4vmt","slide":1,"name":"image-caption","text":"Focused crop highlights the voice onboarding card so the CTA and helper copy stay readable in a live presentation.","textPreview":"Focused crop highlights the voice onboarding card so the CTA and helper copy stay readable in a live presentation.","textChars":114,"textLines":1,"bbox":[96,642,570,32]}
+{"kind":"textbox","id":"sh/tcj6tova","slide":1,"name":"ideas-title","text":"Future updates to voice chat","textPreview":"Future updates to voice chat","textChars":28,"textLines":1,"bbox":[756,260,380,38]}
+{"kind":"shape","id":"sh/hwfyxobm","slide":1,"name":"idea-card-1","bbox":[756,300,452,116]}
+{"kind":"shape","id":"sh/obm58z25","slide":1,"name":"idea-number-1","bbox":[774,318,48,48]}
+{"kind":"textbox","id":"sh/zqtcj6to","slide":1,"name":"idea-number-text-1","text":"1","textPreview":"1","textChars":1,"textLines":1,"bbox":[774,322,48,34]}
+{"kind":"textbox","id":"sh/65wjudg7","slide":1,"name":"idea-title-1","text":"Keep it in profile settings","textPreview":"Keep it in profile settings","textChars":27,"textLines":1,"bbox":[840,318,340,34]}
+{"kind":"textbox","id":"sh/hk3q5o7q","slide":1,"name":"idea-body-1","text":"Use voice at the start of profile setup while still showing users they can edit everything manually below.","textPreview":"Use voice at the start of profile setup while still showing users they can edit everything manually below.","textChars":106,"textLines":1,"bbox":[840,350,340,48]}
+{"kind":"shape","id":"sh/oza1gvy9","slide":1,"name":"idea-card-2","bbox":[756,432,452,116]}
+{"kind":"shape","id":"sh/zed8v6ps","slide":1,"name":"idea-number-2","bbox":[774,450,48,48]}
+{"kind":"textbox","id":"sh/6xkf6dcb","slide":1,"name":"idea-number-text-2","text":"2","textPreview":"2","textChars":1,"textLines":1,"bbox":[774,454,48,34]}
+{"kind":"textbox","id":"sh/hcrmhk3q","slide":1,"name":"idea-title-2","text":"Learn from live search chat","textPreview":"Learn from live search chat","textChars":27,"textLines":1,"bbox":[840,450,340,34]}
+{"kind":"textbox","id":"sh/orytsvu9","slide":1,"name":"idea-body-2","text":"As users talk to find products, ShopLens can keep refining preferences in the background to personalize future results.","textPreview":"As users talk to find products, ShopLens can keep refining preferences in the background to personalize future results.","textChars":119,"textLines":1,"bbox":[840,482,340,48]}
+{"kind":"shape","id":"sh/ovahoza1","slide":1,"name":"idea-card-3","bbox":[756,564,452,116]}
+{"kind":"shape","id":"sh/dg7adsji","slide":1,"name":"idea-number-3","bbox":[774,582,48,48]}
+{"kind":"textbox","id":"sh/6tovahoz","slide":1,"name":"idea-number-text-3","text":"3","textPreview":"3","textChars":1,"textLines":1,"bbox":[774,586,48,34]}
+{"kind":"textbox","id":"sh/vahoza1g","slide":1,"name":"idea-title-3","text":"Add sizes and measurements","textPreview":"Add sizes and measurements","textChars":26,"textLines":1,"bbox":[840,582,340,34]}
+{"kind":"textbox","id":"sh/onyd0z61","slide":1,"name":"idea-body-3","text":"Store fit and sizing details in the profile so users can go straight from discovery to purchase without re-entering size info.","textPreview":"Store fit and sizing details in the profile so users can go straight from discovery to purchase without re-entering size info.","textChars":126,"textLines":1,"bbox":[840,614,340,48]}
+{"kind":"image","id":"im/rmhk3q5o","slide":1,"name":"","geometry":"roundRect","alt":"ShopLens profile settings wireframe with voice assistant card","bbox":[86,270,602,374]}
+{"kind":"notes","id":"nt/9536yi","slide":1,"text":""}

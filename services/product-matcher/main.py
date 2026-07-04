@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field
 
 import requests as _requests
 from matcher import (
-    clamp_max_searches,
     currency_for_country,
     fetch_thumbnail,
     match_products,
@@ -115,7 +114,7 @@ class MatchRequest(BaseModel):
 
 class SearchRequest(BaseModel):
     query: str = Field(..., description="Freetext product search query")
-    max_results: int = Field(5, ge=1, le=20, description="Maximum number of products to return")
+    max_results: int = Field(15, ge=1, le=20, description="Maximum number of products to return")
     country: str = Field("us", description="Two-letter ISO country code for regional product search. Empty/unset defaults to 'us'.")
 
 
@@ -174,9 +173,14 @@ async def match(request: MatchRequest) -> JSONResponse:
     description="Direct Google Shopping search for a freetext query. Returns up to `max_results` products.",
 )
 async def search(request: SearchRequest) -> JSONResponse:
-    max_results = clamp_max_searches(request.max_results)
+    # Pydantic's Field(ge=1, le=20) on SearchRequest.max_results already fully
+    # validates the range before this handler runs — do NOT reuse
+    # clamp_max_searches here, that constant (MAX_SEARCHES_PER_RUN=5) is
+    # specifically for /match's SerpAPI-call-count cap, not /search's result
+    # count. Reusing it here silently overrode any requested max_results down
+    # to 5 regardless of what the caller asked for.
     country = normalize_country(request.country)
-    products = await asyncio.to_thread(search_products, request.query, max_results, country)
+    products = await asyncio.to_thread(search_products, request.query, request.max_results, country)
     return JSONResponse(content={"products": products, "country": country, "currency": currency_for_country(country)})
 
 
@@ -221,17 +225,19 @@ async def debug(item: str) -> JSONResponse:
     "/debug-raw/{item}",
     tags=["Debug"],
     summary="Debug — raw SerpAPI response",
-    description="Calls SerpAPI directly for the given item and returns the first `shopping_results` entry with all keys. Useful for inspecting what SerpAPI returns before our parsing logic runs.",
+    description="Calls SerpAPI directly for the given item and returns the first result entry with all keys. Pass ?engine=amazon to inspect the Amazon Search API's organic_results shape instead of Google Shopping's shopping_results. Useful for inspecting what SerpAPI returns before our parsing logic runs.",
 )
-async def debug_raw(item: str) -> JSONResponse:
-    resp = _requests.get(
-        "https://serpapi.com/search",
-        params={"engine": "google_shopping", "q": item, "api_key": _SERPAPI_KEY, "num": 1},
-        timeout=10,
-    )
+async def debug_raw(item: str, engine: str = Query("google_shopping", description="google_shopping or amazon")) -> JSONResponse:
+    params: dict = {"engine": engine, "api_key": _SERPAPI_KEY}
+    if engine == "amazon":
+        params.update({"k": item, "amazon_domain": "amazon.com"})
+    else:
+        params.update({"q": item, "num": 1})
+    resp = _requests.get("https://serpapi.com/search", params=params, timeout=10)
     data = resp.json()
-    first = (data.get("shopping_results") or [{}])[0]
-    return JSONResponse(content={"keys": list(first.keys()), "first_result": first})
+    result_key = "organic_results" if engine == "amazon" else "shopping_results"
+    first = (data.get(result_key) or [{}])[0]
+    return JSONResponse(content={"engine": engine, "keys": list(first.keys()), "first_result": first})
 
 
 @app.get(

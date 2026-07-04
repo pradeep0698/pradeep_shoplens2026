@@ -56,22 +56,58 @@ class VoiceAssistantOverlay extends ConsumerStatefulWidget {
   ConsumerState<VoiceAssistantOverlay> createState() => _VoiceAssistantOverlayState();
 }
 
-class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
+class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> with WidgetsBindingObserver {
   final _textController = TextEditingController();
   String _language = 'English';
+  Timer? _pauseDebounce;
+
+  // Long enough to cover a Buy-link external-browser round trip (tap Buy ->
+  // browser opens -> user glances -> taps back, typically 1-3s on a real
+  // device) with margin; short enough that a genuine backgrounding still
+  // pauses the live session promptly.
+  static const _kPauseDebounce = Duration(seconds: 5);
 
   @override
   void initState() {
     super.initState();
-    _language = ref.read(profileProvider).value?.voiceLanguage ?? 'English';
+    WidgetsBinding.instance.addObserver(this);
+    _language = ref.read(profileProvider).valueOrNull?.voiceLanguage ?? 'English';
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(voiceAssistantProvider.notifier).start(isOnboarding: widget.isOnboarding, language: _language);
     });
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
+    // AppLifecycleState.inactive fires the instant the window/tab loses
+    // focus even momentarily (e.g. url_launcher opening a product's Buy
+    // link), and must not be acted on here, or it reintroduces the bug
+    // described in dispose() below.
+    if (lifecycleState == AppLifecycleState.paused) {
+      // Tapping a Buy link (launchUrl with LaunchMode.externalApplication)
+      // triggers a real `paused` transition on real devices, not just
+      // `inactive` — opening an external browser is a genuine app switch.
+      // Debounce so a quick round trip (tap Buy -> glance -> come back)
+      // never tears down the live session; only a backgrounding that
+      // outlasts the debounce actually pauses.
+      _pauseDebounce?.cancel();
+      _pauseDebounce = Timer(_kPauseDebounce, () {
+        _pauseDebounce = null;
+        unawaited(ref.read(voiceAssistantProvider.notifier).pauseForBackground());
+      });
+    } else if (lifecycleState == AppLifecycleState.resumed) {
+      // Came back before the debounce elapsed — the live session was never
+      // touched, so there's nothing to resume, just cancel the pending pause.
+      _pauseDebounce?.cancel();
+      _pauseDebounce = null;
+    }
+  }
+
+  @override
   void dispose() {
-    // The only teardown trigger now — previously a WidgetsBindingObserver
+    _pauseDebounce?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    // The only full-teardown trigger now — previously a WidgetsBindingObserver
     // also cancelled on AppLifecycleState.inactive, which fires the instant
     // the window/tab loses focus (e.g. url_launcher opening a product's Buy
     // link), wiping the whole conversation even though the user never
@@ -103,7 +139,7 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
     if (lang == _language) return;
     setState(() => _language = lang);
     final user = ref.read(authStateProvider).value;
-    final profile = ref.read(profileProvider).value;
+    final profile = ref.read(profileProvider).valueOrNull;
     if (user != null && profile != null) {
       unawaited(ref.read(profileRepositoryProvider).save(user.uid, profile.copyWith(voiceLanguage: lang)));
     }
@@ -182,24 +218,30 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
       }
     });
 
-    return FractionallySizedBox(
-      heightFactor: 0.88,
-      child: Container(
-        decoration: const BoxDecoration(
-          color: _kBg,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-        ),
-        child: SafeArea(
-          top: false,
-          child: Column(
-            children: [
-              _header(state),
-              Expanded(child: _body(state)),
-              if (state.status != VoiceStatus.review &&
-                  state.status != VoiceStatus.saving &&
-                  state.status != VoiceStatus.done)
-                _inputRow(state),
-            ],
+    // isScrollControlled: true (see showVoiceAssistantOverlay) opts this sheet
+    // out of Flutter's automatic keyboard-avoidance padding, so the bottom
+    // inset has to be applied here manually or the keyboard covers _inputRow.
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: FractionallySizedBox(
+        heightFactor: 0.88,
+        child: Container(
+          decoration: const BoxDecoration(
+            color: _kBg,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: SafeArea(
+            top: false,
+            child: Column(
+              children: [
+                _header(state),
+                Expanded(child: _body(state)),
+                if (state.status != VoiceStatus.review &&
+                    state.status != VoiceStatus.saving &&
+                    state.status != VoiceStatus.done)
+                  _inputRow(state),
+              ],
+            ),
           ),
         ),
       ),
@@ -266,7 +308,13 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
           ),
         );
       case VoiceStatus.error:
-        return _errorBody(state);
+        // Keep the transcript/product results on screen instead of swapping
+        // to the generic error screen whenever there's something to show —
+        // covers both a dropped connection and pauseForBackground(), neither
+        // of which should hide a conversation the user already built up.
+        return (state.transcript.isNotEmpty || state.searchResults.isNotEmpty)
+            ? _conversationBody(state)
+            : _errorBody(state);
       case VoiceStatus.listening:
       case VoiceStatus.speaking:
         return _conversationBody(state);
@@ -294,6 +342,22 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
             const SizedBox(height: 24),
             _MicVisualizer(isSpeaking: state.status == VoiceStatus.speaking, isRecording: state.isRecording),
             const SizedBox(height: 24),
+            if (state.status == VoiceStatus.error) ...[
+              _ErrorBanner(
+                message: state.errorMessage ?? 'Connection lost.',
+                // resume: true — this banner only shows when there's already
+                // a transcript/patch worth keeping (see _body()'s error
+                // branch), so reconnect should reattach to the same backend
+                // session (see live_session.py's resume_session_id) instead
+                // of starting a brand-new conversation from scratch.
+                onReconnect: () => ref.read(voiceAssistantProvider.notifier).start(
+                  isOnboarding: widget.isOnboarding,
+                  language: _language,
+                  resume: true,
+                ),
+              ),
+              const SizedBox(height: 16),
+            ],
             if (state.transcript.length <= 1) ...[
               Wrap(
                 alignment: WrapAlignment.center,
@@ -464,7 +528,7 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _holdToTalkButton(state),
+            _handsFreeToggleButton(state),
             const SizedBox(height: 4),
             // No review step exists in search mode — only onboarding's
             // preference flow needs an explicit "done" affordance.
@@ -504,39 +568,47 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
         ),
       );
 
-  /// Hold-to-talk: press down starts streaming mic audio for one turn,
-  /// release ends it — Gemini's own voice-activity detection is disabled
-  /// server-side, so this button is what marks the turn boundaries instead
-  /// of relying on (unreliable, over resampled web mic audio) automatic
-  /// silence detection.
-  Widget _holdToTalkButton(VoiceAssistantState state) {
+  /// Hands-free toggle: one tap starts a session that stays listening for
+  /// the whole conversation, another tap stops it — no per-turn button
+  /// presses. Gemini's own voice-activity detection stays disabled
+  /// server-side; a re-armable local VAD (Pcm16ReArmableSpeechGate, see
+  /// VoiceAssistantNotifier.startHandsFree) automatically detects each
+  /// utterance's start/end for the whole time the toggle is on, including
+  /// while the assistant is talking — so the user can just start talking to
+  /// interrupt it (barge-in), the same way ChatGPT's voice mode works.
+  Widget _handsFreeToggleButton(VoiceAssistantState state) {
     final notifier = ref.read(voiceAssistantProvider.notifier);
     final disabled = state.status == VoiceStatus.review ||
         state.status == VoiceStatus.saving ||
-        state.status == VoiceStatus.done;
-    return Listener(
-      onPointerDown: disabled ? null : (_) => notifier.beginSpeaking(),
-      onPointerUp: disabled ? null : (_) => notifier.endSpeaking(),
-      onPointerCancel: disabled ? null : (_) => notifier.endSpeaking(),
+        state.status == VoiceStatus.done ||
+        state.status == VoiceStatus.error;
+    final active = state.isHandsFreeActive;
+    final label = !active
+        ? 'Tap to talk hands-free'
+        : (state.isRecording ? 'Listening…' : 'Listening — just start talking');
+    return GestureDetector(
+      onTap: disabled
+          ? null
+          : () => active ? notifier.stopHandsFree() : notifier.startHandsFree(),
       child: Container(
         width: double.infinity,
         padding: const EdgeInsets.symmetric(vertical: 14),
         decoration: BoxDecoration(
-          color: state.isRecording ? _kAccent : _kAccent.withValues(alpha: 0.12),
+          color: active ? _kAccent : _kAccent.withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(24),
           border: Border.all(color: _kAccent.withValues(alpha: disabled ? 0.3 : 1)),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.mic, color: state.isRecording ? _kBg : _kAccent.withValues(alpha: disabled ? 0.5 : 1), size: 18),
+            Icon(active ? Icons.mic : Icons.mic_none, color: active ? _kBg : _kAccent.withValues(alpha: disabled ? 0.5 : 1), size: 18),
             const SizedBox(width: 8),
             Flexible(
               child: Text(
-                state.isRecording ? "Listening… release when you're done" : 'Hold to answer',
+                label,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: state.isRecording ? _kBg : _kAccent.withValues(alpha: disabled ? 0.5 : 1),
+                  color: active ? _kBg : _kAccent.withValues(alpha: disabled ? 0.5 : 1),
                   fontSize: 13,
                   fontWeight: FontWeight.w700,
                 ),
@@ -544,6 +616,51 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Inline banner shown above the conversation when the live session has
+/// stopped (dropped connection or backgrounding) but there's already a
+/// transcript/results worth keeping on screen — see _body()'s error branch.
+class _ErrorBanner extends StatelessWidget {
+  const _ErrorBanner({required this.message, required this.onReconnect});
+  final String message;
+  final VoidCallback onReconnect;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: _kError.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _kError.withValues(alpha: 0.4)),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.error_outline, color: _kError, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(message, style: const TextStyle(color: _kMuted, fontSize: 12.5)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          OutlinedButton(
+            onPressed: onReconnect,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: _kAccent,
+              side: const BorderSide(color: _kAccent),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            ),
+            child: const Text('Reconnect', style: TextStyle(fontWeight: FontWeight.w700)),
+          ),
+        ],
       ),
     );
   }

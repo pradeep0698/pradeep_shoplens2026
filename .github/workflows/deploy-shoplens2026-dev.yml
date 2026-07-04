@@ -1,0 +1,288 @@
+# Deploy Cloud Run services to shoplens2026-dev.
+#
+# Trigger: Actions → "Deploy — shoplens2026-dev" → Run workflow
+#
+# ── GitHub Secrets required (4 total — no SA key needed) ─────────────────────
+#   SHOPLENS2026DEV_AI_ANALYZER_ENV     Full contents of services/ai-analyzer/.env.shoplens2026-dev
+#   SHOPLENS2026DEV_PRODUCT_MATCHER_ENV Full contents of services/product-matcher/.env.shoplens2026-dev
+#   SHOPLENS2026DEV_STATE_MANAGER_ENV   Full contents of services/state-manager/.env.shoplens2026-dev
+#   SHOPLENS2026DEV_VOICE_ASSISTANT_ENV Full contents of services/voice-assistant/.env.shoplens2026-dev
+#
+# ── GCP auth — Workload Identity Federation (no long-lived keys) ─────────────
+#   Pool:     github-pool  (projects/115535290381/locations/global/workloadIdentityPools/github-pool)
+#   Provider: github-provider  (locked to repo shoplens2026ai/shoplens2026)
+#   SA:       shoplens-runner@project-b1a5dd5a-69e6-4db3-9d7.iam.gserviceaccount.com
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Deploy — shoplens2026-dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_all:
+        description: 'Force deploy all services (skip change detection)'
+        type: boolean
+        default: false
+      services:
+        description: 'Deploy specific services only (comma-separated: ai-analyzer,product-matcher,state-manager,voice-assistant). Leave empty for auto-detect.'
+        type: string
+        default: ''
+
+env:
+  PROJECT: project-b1a5dd5a-69e6-4db3-9d7
+  REGION: us-central1
+  WIF_PROVIDER: projects/115535290381/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+  GCP_SA: shoplens-runner@project-b1a5dd5a-69e6-4db3-9d7.iam.gserviceaccount.com
+
+jobs:
+  # ── 1. Detect which services changed since last successful deploy ─────────────
+  detect:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      ai-analyzer:     ${{ steps.check.outputs.ai-analyzer }}
+      product-matcher: ${{ steps.check.outputs.product-matcher }}
+      state-manager:   ${{ steps.check.outputs.state-manager }}
+      voice-assistant: ${{ steps.check.outputs.voice-assistant }}
+      any:             ${{ steps.check.outputs.any }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history needed for git diff against cached SHA
+
+      - name: Restore last-deployed SHA
+        uses: actions/cache/restore@v4
+        with:
+          path: .last-deploy-sha
+          # unique key per SHA so each run gets its own slot; restore-keys finds the latest
+          key: shoplens2026-dev-sha-${{ github.sha }}
+          restore-keys: shoplens2026-dev-sha-
+
+      - name: Determine services to deploy
+        id: check
+        run: |
+          FORCE_ALL="${{ inputs.force_all }}"
+          EXPLICIT="${{ inputs.services }}"
+
+          BASE=""
+          if [ -f .last-deploy-sha ]; then
+            BASE=$(cat .last-deploy-sha)
+            echo "Comparing against last deploy SHA: $BASE"
+          else
+            echo "No previous deploy SHA found — treating all services as changed."
+          fi
+
+          # Returns 'true' or 'false' for a given service slug
+          should_deploy() {
+            local svc=$1
+            # --all flag: force everything
+            [ "$FORCE_ALL" = "true" ] && { echo true; return; }
+            # explicit list: only named services
+            if [ -n "$EXPLICIT" ]; then
+              echo "$EXPLICIT" | tr ',' '\n' | grep -qx "$svc" && echo true || echo false
+              return
+            fi
+            # auto-detect: no prior SHA means first run → deploy all
+            if [ -z "$BASE" ]; then
+              echo true
+            else
+              git diff --name-only "$BASE" HEAD -- "services/$svc" | grep -q . && echo true || echo false
+            fi
+          }
+
+          AI=$(should_deploy ai-analyzer)
+          PM=$(should_deploy product-matcher)
+          SM=$(should_deploy state-manager)
+          VA=$(should_deploy voice-assistant)
+
+          echo "ai-analyzer=$AI"     | tee -a "$GITHUB_OUTPUT"
+          echo "product-matcher=$PM" | tee -a "$GITHUB_OUTPUT"
+          echo "state-manager=$SM"   | tee -a "$GITHUB_OUTPUT"
+          echo "voice-assistant=$VA" | tee -a "$GITHUB_OUTPUT"
+
+          ANY=false
+          { [ "$AI" = true ] || [ "$PM" = true ] || [ "$SM" = true ] || [ "$VA" = true ]; } && ANY=true
+          echo "any=$ANY" | tee -a "$GITHUB_OUTPUT"
+
+          # Job summary — visible in Actions UI
+          {
+            echo "### Change detection — $(git log -1 --format='%h %s')"
+            echo "| Service | Deploy? |"
+            echo "|---|:---:|"
+            echo "| ai-analyzer     | $AI |"
+            echo "| product-matcher | $PM |"
+            echo "| state-manager   | $SM |"
+            echo "| voice-assistant | $VA |"
+            [ -n "$BASE" ] && echo "" && echo "Base: \`$BASE\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── 2. Deploy ai-analyzer ─────────────────────────────────────────────────────
+  deploy-ai-analyzer:
+    name: Deploy ai-analyzer
+    needs: detect
+    if: needs.detect.outputs.ai-analyzer == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Write env file from secret
+        env:
+          ENV_CONTENT: ${{ secrets.SHOPLENS2026DEV_AI_ANALYZER_ENV }}
+        run: printf '%s\n' "$ENV_CONTENT" > services/ai-analyzer/.env.shoplens2026-dev
+
+      - name: Deploy to Cloud Run
+        run: |
+          VARS=$(grep -v '^#' services/ai-analyzer/.env.shoplens2026-dev \
+            | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//')
+          gcloud run deploy ai-analyzer \
+            --project "$PROJECT" \
+            --region  "$REGION" \
+            --source  services/ai-analyzer \
+            --set-env-vars "$VARS" \
+            --quiet
+
+  # ── 3. Deploy product-matcher ─────────────────────────────────────────────────
+  deploy-product-matcher:
+    name: Deploy product-matcher
+    needs: detect
+    if: needs.detect.outputs.product-matcher == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Write env file from secret
+        env:
+          ENV_CONTENT: ${{ secrets.SHOPLENS2026DEV_PRODUCT_MATCHER_ENV }}
+        run: printf '%s\n' "$ENV_CONTENT" > services/product-matcher/.env.shoplens2026-dev
+
+      - name: Deploy to Cloud Run
+        run: |
+          VARS=$(grep -v '^#' services/product-matcher/.env.shoplens2026-dev \
+            | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//')
+          gcloud run deploy product-matcher \
+            --project "$PROJECT" \
+            --region  "$REGION" \
+            --source  services/product-matcher \
+            --set-env-vars "$VARS" \
+            --quiet
+
+  # ── 4. Deploy state-manager ───────────────────────────────────────────────────
+  deploy-state-manager:
+    name: Deploy state-manager
+    needs: detect
+    if: needs.detect.outputs.state-manager == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Write env file from secret
+        env:
+          ENV_CONTENT: ${{ secrets.SHOPLENS2026DEV_STATE_MANAGER_ENV }}
+        run: printf '%s\n' "$ENV_CONTENT" > services/state-manager/.env.shoplens2026-dev
+
+      - name: Deploy to Cloud Run
+        run: |
+          VARS=$(grep -v '^#' services/state-manager/.env.shoplens2026-dev \
+            | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//')
+          gcloud run deploy state-manager \
+            --project "$PROJECT" \
+            --region  "$REGION" \
+            --source  services/state-manager \
+            --set-env-vars "$VARS" \
+            --quiet
+
+  # ── 5. Deploy voice-assistant ─────────────────────────────────────────────────
+  deploy-voice-assistant:
+    name: Deploy voice-assistant
+    needs: detect
+    if: needs.detect.outputs.voice-assistant == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Write env file from secret
+        env:
+          ENV_CONTENT: ${{ secrets.SHOPLENS2026DEV_VOICE_ASSISTANT_ENV }}
+        run: printf '%s\n' "$ENV_CONTENT" > services/voice-assistant/.env.shoplens2026-dev
+
+      - name: Deploy to Cloud Run
+        run: |
+          VARS=$(grep -v '^#' services/voice-assistant/.env.shoplens2026-dev \
+            | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//')
+          gcloud run deploy voice-assistant \
+            --project "$PROJECT" \
+            --region  "$REGION" \
+            --source  services/voice-assistant \
+            --set-env-vars "$VARS" \
+            --quiet
+
+  # ── 6. Record deployed SHA (only when at least one service deployed and none failed) ──
+  record-sha:
+    name: Record deployed SHA
+    needs:
+      - detect
+      - deploy-ai-analyzer
+      - deploy-product-matcher
+      - deploy-state-manager
+      - deploy-voice-assistant
+    if: |
+      always() &&
+      needs.detect.outputs.any == 'true' &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write SHA file
+        run: echo "${{ github.sha }}" > .last-deploy-sha
+
+      - name: Save SHA to cache
+        uses: actions/cache/save@v4
+        with:
+          path: .last-deploy-sha
+          key: shoplens2026-dev-sha-${{ github.sha }}
+
+      - name: Summary
+        run: |
+          echo "### Deploy complete :white_check_mark:" >> "$GITHUB_STEP_SUMMARY"
+          echo "SHA \`${{ github.sha }}\` saved as new baseline for next run." >> "$GITHUB_STEP_SUMMARY"

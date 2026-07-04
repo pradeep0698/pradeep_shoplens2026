@@ -1,1 +1,481 @@
-{"openapi":"3.1.0","info":{"title":"AI Stream Analyzer","version":"0.1.0"},"paths":{"/config":{"get":{"summary":"Get Config","operationId":"get_config_config_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}},"post":{"summary":"Update Config","operationId":"update_config_config_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ConfigRequest"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/analyze":{"post":{"summary":"Analyze","operationId":"analyze_analyze_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AnalyzeRequest"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/analyze/stream":{"post":{"summary":"Analyze Stream","description":"Same as /analyze, but streams one NDJSON line per item as its Lens\nsearch completes, instead of waiting for the slowest item before\nreturning anything. The mobile \"live camera dot\" flow uses this so\nmatched products appear as they're found rather than all at once.\n\nEach line is a JSON object with a \"type\" field:\n  {\"type\": \"items\", \"items\": [...]}                              — once, after Gemini detection\n  {\"type\": \"match\", \"name\": ..., \"products\": [...], \"warnings\": [...]} — once per item\n  {\"type\": \"done\", \"warnings\": [...]}                             — once, at the end\n  {\"type\": \"error\", \"detail\": ..., \"error_code\": ...}             — only on failure\n\nDoesn't support gcs_video_uri (the video path has no per-item fan-out\nto stream — use /analyze for that).","operationId":"analyze_stream_analyze_stream_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AnalyzeRequest"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/identify":{"post":{"summary":"Identify","description":"Identify a manually cropped product image. Skips Gemini — sends the\ncrop directly to GCS then Google Lens and returns the matched product.","operationId":"identify_identify_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/AnalyzeRequest"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/health":{"get":{"summary":"Health","operationId":"health_health_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}}},"components":{"schemas":{"AnalyzeRequest":{"properties":{"gcs_uri":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Gcs Uri"},"image_url":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Image Url"},"image_data":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Image Data"},"image_mime_type":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Image Mime Type"},"transcript":{"type":"string","title":"Transcript","default":""},"ignore_terms":{"items":{"type":"string"},"type":"array","title":"Ignore Terms","default":[]},"query":{"type":"string","title":"Query","default":""},"country":{"type":"string","title":"Country","default":"us"},"max_searches":{"type":"integer","title":"Max Searches","default":5},"mlkit_context":{"anyOf":[{"additionalProperties":true,"type":"object"},{"type":"null"}],"title":"Mlkit Context"}},"type":"object","title":"AnalyzeRequest"},"ConfigRequest":{"properties":{"model":{"type":"string","title":"Model"}},"type":"object","required":["model"],"title":"ConfigRequest"},"HTTPValidationError":{"properties":{"detail":{"items":{"$ref":"#/components/schemas/ValidationError"},"type":"array","title":"Detail"}},"type":"object","title":"HTTPValidationError"},"ValidationError":{"properties":{"loc":{"items":{"anyOf":[{"type":"string"},{"type":"integer"}]},"type":"array","title":"Location"},"msg":{"type":"string","title":"Message"},"type":{"type":"string","title":"Error Type"}},"type":"object","required":["loc","msg","type"],"title":"ValidationError"}}}}
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AI Analyzer",
+    "description": "Gemini-powered image and video analysis service. Accepts an image (base64 or URL) or a GCS video segment URI, runs Gemini to detect shoppable items, searches Google Shopping via SerpAPI, and returns structured product results.\n\n**Auth:** none required \u2014 CORS is open (`*`).\n\n**Typical flow:** `POST /analyze` \u2192 items + products in one call. Use `POST /analyze/stream` for progressive results (one NDJSON line per item as it resolves). Use `POST /identify` when the client has already cropped to a single product.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/config": {
+      "get": {
+        "tags": [
+          "Config"
+        ],
+        "summary": "Get active Gemini model",
+        "operationId": "get_config_config_get",
+        "responses": {
+          "200": {
+            "description": "Currently active model ID",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Config"
+        ],
+        "summary": "Set active Gemini model",
+        "operationId": "update_config_config_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Newly active model ID",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/analyze": {
+      "post": {
+        "tags": [
+          "Analysis"
+        ],
+        "summary": "Analyze image or video segment",
+        "description": "Runs Gemini on the provided image or GCS video segment to detect shoppable items, then searches Google Shopping for each detected item via SerpAPI.\n\nProvide exactly one of: `gcs_uri`, `image_url`, or `image_data`.\n\nReturns all results at once. For progressive streaming use `POST /analyze/stream`.",
+        "operationId": "analyze_analyze_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyzeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Detection and matching succeeded",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "No media input provided"
+          },
+          "500": {
+            "description": "Gemini or SerpAPI error"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/analyze/stream": {
+      "post": {
+        "tags": [
+          "Analysis"
+        ],
+        "summary": "Analyze image \u2014 streaming NDJSON",
+        "description": "Same detection + matching pipeline as `POST /analyze`, but streams one NDJSON line per event as it completes rather than waiting for all items.\n\n**Event types** (each line is a JSON object):\n- `{\"type\": \"items\", \"items\": [...]}` \u2014 emitted once after Gemini detection\n- `{\"type\": \"match\", \"name\": \"...\", \"products\": [...], \"warnings\": [...]}` \u2014 once per item\n- `{\"type\": \"done\", \"warnings\": [...]}` \u2014 stream end\n- `{\"type\": \"error\", \"detail\": \"...\", \"error_code\": \"...\"}` \u2014 on failure\n\n**Does not support `gcs_uri`** \u2014 video segments have no per-item fan-out to stream. Provide `image_url` or `image_data`.",
+        "operationId": "analyze_stream_analyze_stream_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyzeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "NDJSON stream",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "application/x-ndjson": {}
+            }
+          },
+          "400": {
+            "description": "No image input provided"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/identify": {
+      "post": {
+        "tags": [
+          "Analysis"
+        ],
+        "summary": "Identify a cropped product image",
+        "description": "Skips Gemini bounding-box detection \u2014 the crop is already selected by ML Kit on-device. Still calls Gemini once to produce a rich text description (color, material, brand, style) that improves Google Lens recall, then uploads to GCS and runs Lens. Faster than /analyze because there is one Gemini call instead of N (one per detected object).\n\nRequires `image_data` (base64). `image_url` is not supported.",
+        "operationId": "identify_identify_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyzeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Product identification succeeded",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "image_data not provided"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Health check",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Service liveness and env var presence",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AnalyzeRequest": {
+        "properties": {
+          "gcs_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gcs Uri",
+            "description": "GCS URI of a video segment to analyze (e.g. gs://bucket/live/seg001.ts). Mutually exclusive with image_url/image_data."
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url",
+            "description": "Publicly accessible image URL. Mutually exclusive with gcs_uri/image_data."
+          },
+          "image_data": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Data",
+            "description": "Base64-encoded image bytes. Required for /identify. Mutually exclusive with gcs_uri/image_url."
+          },
+          "image_mime_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Mime Type",
+            "description": "MIME type for image_data (e.g. image/jpeg, image/webp, image/png)."
+          },
+          "transcript": {
+            "type": "string",
+            "title": "Transcript",
+            "description": "Optional transcript text to supplement Gemini's visual analysis",
+            "default": ""
+          },
+          "ignore_terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Ignore Terms",
+            "description": "Product names to exclude from matching results"
+          },
+          "query": {
+            "type": "string",
+            "title": "Query",
+            "description": "Optional freetext query to bias Google Shopping search",
+            "default": ""
+          },
+          "country": {
+            "type": "string",
+            "title": "Country",
+            "description": "Two-letter ISO country code for regional product search",
+            "default": "us"
+          },
+          "max_searches": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Max Searches",
+            "description": "Maximum number of SerpAPI searches to execute",
+            "default": 5
+          },
+          "mlkit_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MlKitContext"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "On-device ML Kit detection context forwarded from the mobile app. Used for log-based routing analysis only \u2014 does not affect Gemini behaviour."
+          }
+        },
+        "type": "object",
+        "title": "AnalyzeRequest",
+        "examples": [
+          {
+            "country": "us",
+            "ignore_terms": [],
+            "image_url": "https://example.com/product.jpg",
+            "max_searches": 5,
+            "query": "",
+            "transcript": ""
+          }
+        ]
+      },
+      "ConfigRequest": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "Gemini model ID to activate (e.g. gemini-2.5-flash, gemini-2.5-pro)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "model"
+        ],
+        "title": "ConfigRequest"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "MlKitContext": {
+        "properties": {
+          "route": {
+            "type": "string",
+            "title": "Route",
+            "description": "Routing decision: 'on_device_confident' or 'gemini_fallback'"
+          },
+          "trigger": {
+            "type": "string",
+            "title": "Trigger",
+            "description": "What triggered the request: 'tap' or 'auto'"
+          },
+          "on_device_confidence": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Device Confidence",
+            "description": "ML Kit confidence score (0.0\u20131.0)"
+          },
+          "detected_objects_count": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detected Objects Count",
+            "description": "Number of objects detected on-device"
+          },
+          "detected_labels": {
+            "items": {
+              "$ref": "#/components/schemas/MlKitLabel"
+            },
+            "type": "array",
+            "title": "Detected Labels",
+            "description": "Top labels from ML Kit on-device detection"
+          }
+        },
+        "type": "object",
+        "required": [
+          "route",
+          "trigger"
+        ],
+        "title": "MlKitContext"
+      },
+      "MlKitLabel": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "Text",
+            "description": "Label text returned by ML Kit on-device classifier"
+          }
+        },
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "MlKitLabel"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Analysis",
+      "description": "Image and video analysis \u2014 detect items and match products"
+    },
+    {
+      "name": "Config",
+      "description": "Active Gemini model management"
+    },
+    {
+      "name": "System",
+      "description": "Health and diagnostics"
+    }
+  ]
+}

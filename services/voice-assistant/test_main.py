@@ -212,6 +212,67 @@ def test_start_session_resumes_an_owned_disconnected_session(client, monkeypatch
     assert resumed_session.disconnected_at is None
 
 
+def test_start_session_resume_updates_language_when_body_language_differs(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+
+    start_response = client.post("/voice/session/start", headers={"Authorization": "Bearer faketoken"})
+    session_id = start_response.json()["session_id"]
+    session = main.session_registry._sessions[session_id]
+    import time as _time
+    session.disconnected_at = _time.monotonic() - 10
+
+    resume_response = client.post(
+        "/voice/session/start",
+        json={"resume_session_id": session_id, "language": "Spanish"},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resume_response.status_code == 200
+    assert main.session_registry._sessions[session_id].language == "Spanish"
+
+
+def test_start_session_resume_ignores_invalid_language(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+
+    start_response = client.post("/voice/session/start", headers={"Authorization": "Bearer faketoken"})
+    session_id = start_response.json()["session_id"]
+    session = main.session_registry._sessions[session_id]
+    import time as _time
+    session.disconnected_at = _time.monotonic() - 10
+
+    resume_response = client.post(
+        "/voice/session/start",
+        json={"resume_session_id": session_id, "language": "Klingon"},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resume_response.status_code == 200
+    assert main.session_registry._sessions[session_id].language == "English"
+
+
+def test_start_session_resume_keeps_language_when_body_omits_it(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+
+    start_response = client.post("/voice/session/start", headers={"Authorization": "Bearer faketoken"})
+    session_id = start_response.json()["session_id"]
+    session = main.session_registry._sessions[session_id]
+    session.language = "Spanish"
+    import time as _time
+    session.disconnected_at = _time.monotonic() - 10
+
+    resume_response = client.post(
+        "/voice/session/start",
+        json={"resume_session_id": session_id},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resume_response.status_code == 200
+    assert main.session_registry._sessions[session_id].language == "Spanish"
+
+
 def test_start_session_falls_back_to_fresh_session_for_unknown_resume_id(client, monkeypatch):
     monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
     monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})

@@ -193,7 +193,7 @@ def _parse_price(raw: str) -> float:
 def _simplify_query(query: str) -> str | None:
     """Strip price constraints for a fallback search when the original query returns nothing."""
     simplified = re.sub(
-        r'\b(under|below|around|less than|between|up to|over|above)\s*\$?\d+(?:\s*[-–]\s*\$?\d+)?\b',
+        r'\b(under|below|around|less than|between|up to|over|above)\s*\$?\d+(?:\s*(?:-|–|and)\s*\$?\d+)?\b',
         '', query, flags=re.IGNORECASE
     )
     simplified = re.sub(r'\$\d+(?:\.\d+)?', '', simplified)

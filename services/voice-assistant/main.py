@@ -148,9 +148,13 @@ class SessionStartRequest(BaseModel):
             "`'search'` for voice-driven product search within an active shopping session."
         ),
     )
-    language: str = Field(
-        "English",
-        description="Display name from SUPPORTED_LANGUAGES (e.g. 'Spanish'). Unknown values fall back to 'English'.",
+    language: str | None = Field(
+        None,
+        description=(
+            "Display name from SUPPORTED_LANGUAGES (e.g. 'Spanish'). Unknown values fall back to "
+            "'English' for a fresh session. Omitted entirely (as opposed to explicitly 'English') means "
+            "'don't change it' when resuming an existing session."
+        ),
     )
     resume_session_id: str | None = Field(
         None,
@@ -275,6 +279,8 @@ async def start_session(http_request: Request, body: SessionStartRequest = Sessi
         candidate = await session_registry.get(body.resume_session_id)
         if candidate is not None and candidate.uid == uid:
             candidate.disconnected_at = None
+            if body.language in SUPPORTED_LANGUAGES and body.language != candidate.language:
+                candidate.language = body.language
             session = candidate
             logger.info("voice session %s resumed (uid=%s)", session.session_id, uid)
 

@@ -58,6 +58,9 @@ _INACTIVITY_POLL_SECONDS = 1.0
 _PRODUCT_MATCHER_URL = os.environ.get("PRODUCT_MATCHER_URL", "")
 _DEFAULT_MAX_SEARCH_RESULTS = 15
 _MAX_SEARCH_RESULTS_CEILING = 15
+# Minimum completed assistant turns in "search" mode before the very first
+# search_products call is allowed through — see apply_search_products.
+_MIN_ASSISTANT_TURNS_BEFORE_FIRST_SEARCH = 2
 
 # Gemini Developer API (AI Studio) key — used ONLY to mint ephemeral auth
 # tokens for the mobile app's direct client->Gemini Live connection (native
@@ -264,7 +267,11 @@ def _profile_note(existing_profile: dict) -> str:
         parts.append("avoids " + ", ".join(exclusions))
     return (
         "The user's existing saved profile: " + "; ".join(parts) + ". Don't "
-        "re-ask about these unless the user brings them up."
+        "re-ask about these already-known static preferences unless the user "
+        "brings them up — but this does NOT exempt you from the GATHER FIRST "
+        "rule above: you must still ask clarifying questions about THIS "
+        "specific search (the item, the use case, and a preference for it) "
+        "before calling search_products, even for a returning user."
     )
 
 
@@ -473,6 +480,13 @@ class SessionState:
     # an apology rather than looping forever, but the user experience is the
     # same: stuck).
     consecutive_no_results: int = 0
+    # Completed assistant turns since this session entered "search" mode —
+    # incremented in _flush_pending_output. Backstops the prompt's "ask three
+    # clarifying questions before searching" instruction with an actual guard,
+    # since the model doesn't always follow it (particularly for returning
+    # users — see _profile_note). Not reset on resume: a resumed session
+    # already had its clarifying conversation.
+    assistant_turns_in_search_mode: int = 0
 
     def __post_init__(self) -> None:
         normalized = profile_store.normalize_reviewed_patch(self.existing_profile)
@@ -824,7 +838,28 @@ async def apply_search_products(session: SessionState, query: str) -> dict:
     query = query.strip()
     if not query:
         return {"status": "error", "query": "", "products": []}
-    max_results = _clamp_max_results(session.existing_profile.get("max_searches_per_run"))
+    # This is the very first search attempt of the session and the model
+    # hasn't held enough of a clarifying conversation yet — a backstop for
+    # the prompt's "ask three clarifying questions first" rule, which the
+    # model doesn't always follow (see _profile_note). Returned as a tool
+    # result rather than raised, so the model can still push through if the
+    # user is genuinely insistent — it just costs one extra round trip.
+    if (
+        session.mode == "search"
+        and session.assistant_turns_in_search_mode < _MIN_ASSISTANT_TURNS_BEFORE_FIRST_SEARCH
+        and session.consecutive_no_results == 0
+    ):
+        return {
+            "status": "too_early",
+            "query": query,
+            "products": [],
+            "hint": (
+                "Too early to search — ask at least one more clarifying "
+                "question about the item, its use case, or a preference for "
+                "it before calling search_products again."
+            ),
+        }
+    max_results = _clamp_max_results(session.existing_profile.get("voice_max_search_results"))
     # The augmented query goes to the search backend; the client/UI still
     # sees the original `query` below (see the returned dict) so the
     # augmentation text never leaks into "Results for '...'" on screen.
@@ -1032,6 +1067,8 @@ async def _flush_pending_output(websocket: WebSocket, session: SessionState) -> 
     session.pending_output_transcript = ""
     session.last_activity_at = time.monotonic()
     session.transcript.append({"role": "model", "text": text})
+    if session.mode == "search":
+        session.assistant_turns_in_search_mode += 1
     await websocket.send_json({"type": "transcript", "role": "model", "text": text, "final": True})
 
 

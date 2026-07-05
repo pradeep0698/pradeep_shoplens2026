@@ -94,6 +94,17 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   StreamSubscription<Uint8List>? _micSubscription;
   StreamSubscription<VoiceSocketFrame>? _frameSubscription;
   Timer? _speakingDebounce;
+  // Set on the rising edge into VoiceStatus.speaking (see _markSpeaking) —
+  // used to suppress the optimistic local-VAD barge-in flush for a short
+  // grace period after the assistant starts talking. Right as a fast-
+  // trailing phrase ends, imperfect echo cancellation can leak a bit of the
+  // assistant's own audio into the mic, reading as the user starting to
+  // talk — flushing on that reads as truncated/mushed playback. Within the
+  // grace period, only the server's own authoritative 'interrupted' message
+  // (handled elsewhere) clears playback; outside it, the instant local flush
+  // still applies for genuine mid-utterance barge-in.
+  DateTime? _speakingSince;
+  static const _bargeInGraceMs = 400;
   VoiceAudioPlayer? _player;
   Pcm16Resampler? _micResampler;
   Pcm16ReArmableSpeechGate? _speechGate;
@@ -262,8 +273,17 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           // Barge-in: if the assistant is still talking, cut it off right
           // away instead of waiting for the server's own 'interrupted'
           // frame to round-trip back — _flushPlayback() is idempotent with
-          // that frame if/when it arrives afterward.
-          if (state.status == VoiceStatus.speaking) {
+          // that frame if/when it arrives afterward. Suppressed for a short
+          // grace period right after the assistant starts talking (see
+          // _speakingSince) — imperfect echo cancellation can leak the tail
+          // of a fast-trailing phrase back into the mic and read as the user
+          // starting to talk, which would truncate/mush the assistant's own
+          // audio. During that window the server's own authoritative
+          // 'interrupted' message (handled below) still clears playback if
+          // the user is genuinely interrupting.
+          final withinBargeInGrace = _speakingSince != null &&
+              DateTime.now().difference(_speakingSince!) < const Duration(milliseconds: _bargeInGraceMs);
+          if (state.status == VoiceStatus.speaking && !withinBargeInGrace) {
             unawaited(_flushPlayback());
             _speakingDebounce?.cancel();
             state = state.copyWith(status: VoiceStatus.listening);
@@ -523,6 +543,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         state.status == VoiceStatus.done) {
       return;
     }
+    if (state.status != VoiceStatus.speaking) _speakingSince = DateTime.now();
     state = state.copyWith(status: VoiceStatus.speaking);
     _speakingDebounce?.cancel();
     _speakingDebounce = Timer(const Duration(milliseconds: 800), () {

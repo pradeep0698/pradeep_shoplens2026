@@ -5,14 +5,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 
-import '../../core/constants/api_constants.dart';
 import '../../core/utils/pcm16_resampler.dart';
 import '../../core/utils/pcm16_speech_gate.dart';
 import '../../core/utils/voice_audio_player.dart';
 import '../../core/utils/web_audio_sample_rate.dart';
 import '../../data/models/voice_session.dart';
 import '../../data/sources/remote/voice_api.dart';
-import '../../data/sources/remote/voice_socket_client.dart';
+import '../../data/sources/remote/voice_transport.dart';
+import '../../data/sources/remote/voice_transport_selector.dart';
 
 // Gemini Live API expects raw 16-bit PCM input at 16kHz.
 const _kInputSampleRate = 16000;
@@ -40,8 +40,9 @@ class VoiceAssistantState {
   final VoiceProfilePatch? finalizeProposal;
   final VoiceFinalizeResult? result;
   final String? errorMessage;
-  // Search-mode only — one entry per search_products tool call, oldest
-  // first, so a refined search appends rather than replaces.
+  // Search-mode only — one entry per search_products tool call, newest
+  // first (inserted at the front) so the overlay can pin the latest search
+  // prominently and collapse older ones into an accordion.
   final List<VoiceSearchResult> searchResults;
 
   VoiceAssistantState copyWith({
@@ -73,7 +74,11 @@ class VoiceAssistantState {
 class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   String? _sessionId;
   AudioRecorder? _recorder;
-  final VoiceSocketClient _socket = VoiceSocketClient();
+  // Constructed lazily in start() once the session-start response's
+  // directConnectAllowed flag is known — createVoiceTransport() (see
+  // voice_transport_selector.dart) picks the WS proxy or the native-only
+  // direct-connect transport based on that flag plus a compile-time flag.
+  VoiceTransport? _socket;
   StreamSubscription<Uint8List>? _micSubscription;
   StreamSubscription<VoiceSocketFrame>? _frameSubscription;
   Timer? _speakingDebounce;
@@ -87,11 +92,14 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   // behavior in sendText()/finishNow() below, since search-mode sessions
   // never reach a review step.
   bool _isOnboarding = true;
-  // Stamps transcript turns and search results with their arrival order so
-  // the overlay can interleave the two lists into one conversation instead
-  // of rendering them in two separate blocks — see _nextSeq().
+  // Orders transcript turns chronologically within the transcript chat feed.
   int _seq = 0;
   int _nextSeq() => _seq++;
+  // Stable key for VoiceSearchResult entries — a separate counter from _seq
+  // since search results are no longer ordered by arrival relative to the
+  // transcript (they're pinned newest-first in their own section instead).
+  int _searchId = 0;
+  int _nextSearchId() => _searchId++;
   // feedUint8FromStream() must not be called again before the previous call's
   // future completes — this chain serializes frames as they arrive, since the
   // socket can deliver them faster than playback consumes them.
@@ -120,14 +128,20 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         return;
       }
 
-      final startResponse = await ref.read(voiceApiProvider).startSession(isOnboarding: isOnboarding);
+      final voiceApi = ref.read(voiceApiProvider);
+      final startResponse = await voiceApi.startSession(isOnboarding: isOnboarding);
       if (!_isCurrent(generation)) return;
       _sessionId = startResponse.sessionId;
       state = state.copyWith(patch: startResponse.profile);
 
-      await _socket.connect(ApiConstants.voiceAssistantWsUrl(startResponse.wsUrl));
+      final socket = createVoiceTransport(
+        directConnectAllowed: startResponse.directConnectAllowed,
+        voiceApi: voiceApi,
+      );
+      _socket = socket;
+      await socket.connect(sessionId: startResponse.sessionId, wsUrl: startResponse.wsUrl);
       if (!_isCurrent(generation)) return;
-      _frameSubscription = _socket.frames.listen(
+      _frameSubscription = socket.frames.listen(
         (frame) {
           if (_isCurrent(generation)) _handleFrame(frame);
         },
@@ -155,7 +169,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         inputSampleRate: _captureSampleRate,
         outputSampleRate: _kInputSampleRate,
       );
-      _socket.sendAudioFormat(_kInputSampleRate);
+      _socket?.sendAudioFormat(_kInputSampleRate);
       _recorder = AudioRecorder();
 
       // The model speaks its own greeting once the backend's hidden trigger
@@ -197,11 +211,11 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           Pcm16SpeechGateResult(started: false, chunks: [outbound]);
       if (gateResult.started && !_speechStarted) {
         _speechStarted = true;
-        _socket.sendSpeechStart();
+        _socket?.sendSpeechStart();
       }
       if (_speechStarted) {
         for (final gatedChunk in gateResult.chunks) {
-          if (gatedChunk.isNotEmpty) _socket.sendAudio(gatedChunk);
+          if (gatedChunk.isNotEmpty) _socket?.sendAudio(gatedChunk);
         }
       }
     });
@@ -220,7 +234,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       // Best-effort — the activity_end marker below still tells Gemini the
       // turn ended even if the platform stop() call itself failed.
     }
-    if (_speechStarted) _socket.sendSpeechEnd();
+    if (_speechStarted) _socket?.sendSpeechEnd();
     _speechStarted = false;
     _speechGate = null;
   }
@@ -239,7 +253,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       finishNow();
       return;
     }
-    _socket.sendText(trimmed);
+    _socket?.sendText(trimmed);
     state = state.copyWith(
       transcript: [...state.transcript, VoiceTranscriptTurn(role: 'user', text: trimmed, seq: _nextSeq())],
     );
@@ -321,10 +335,31 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         state = state.copyWith(
           patch: VoiceProfilePatch.fromJson(json['patch'] as Map<String, dynamic>? ?? const {}),
         );
-      case 'product_results':
+      case 'search_started':
+        // Deterministic loading-state signal sent the instant the backend
+        // dispatches a search_products tool call — arrives well before the
+        // (now up to ~20-25s combined Google Shopping + Amazon fallback)
+        // product_results frame, so the UI shows a spinner immediately
+        // instead of going quiet. Inserted at the front — newest search
+        // first — same ordering rule as product_results below.
+        final startedQuery = json['query'] as String? ?? '';
         state = state.copyWith(
-          searchResults: [...state.searchResults, VoiceSearchResult.fromJson(json, seq: _nextSeq())],
+          searchResults: [
+            VoiceSearchResult(query: startedQuery, products: const [], id: _nextSearchId(), isPending: true),
+            ...state.searchResults,
+          ],
         );
+      case 'product_results':
+        // Insert at the front (newest first) instead of appending — fixes
+        // the bug where an earlier, empty search stayed pinned above a
+        // later, successful one. Replaces the pending placeholder for the
+        // same query (if any) rather than leaving both in the list.
+        final resultQuery = json['query'] as String? ?? '';
+        final incoming = VoiceSearchResult.fromJson(json, id: _nextSearchId());
+        final withoutPending = state.searchResults
+            .where((r) => !(r.isPending && r.query == resultQuery))
+            .toList();
+        state = state.copyWith(searchResults: [incoming, ...withoutPending]);
       case 'finalize_proposal':
         _speakingDebounce?.cancel();
         unawaited(_stopLiveAudio());
@@ -407,7 +442,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
     } catch (_) {}
     _player = null;
     _feedChain = Future.value();
-    await _socket.close();
+    await _socket?.close();
   }
 
   // _sessionId must survive _stopLiveAudio (confirm() still needs it for the
@@ -420,7 +455,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
 
   void _disposeSession() {
     unawaited(_teardownSession());
-    _socket.dispose();
+    _socket?.dispose();
   }
 }
 

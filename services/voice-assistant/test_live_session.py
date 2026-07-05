@@ -33,6 +33,10 @@ from live_session import (
     _strip_filler,
     _system_prompt,
     _watch_inactivity,
+    apply_ready_to_finalize,
+    apply_record_preference,
+    apply_search_products,
+    mint_ephemeral_token,
 )
 
 
@@ -363,7 +367,8 @@ async def test_dispatch_record_preference_merges_into_latest_patch():
         session,
     )
 
-    assert result == {"status": "recorded"}
+    assert result["status"] == "recorded"
+    assert result["patch"] == session.latest_patch
     assert session.latest_patch["shopping_categories"] == ["Clothing"]
     assert session.latest_patch["preference_terms"] == ["Nike"]
     assert session.latest_patch["ignore_terms"] == ["leather"]
@@ -400,7 +405,7 @@ async def test_dispatch_search_products_calls_search_and_returns_products(monkey
     async def fake_search(query, max_results):
         captured["query"] = query
         captured["max_results"] = max_results
-        return [{"name": "Wireless Headphones", "price": 29.99}]
+        return [{"name": "Wireless Headphones", "price": 29.99}], "google_shopping"
 
     monkeypatch.setattr(live_session, "_search_shopping", fake_search)
     session = SessionState(
@@ -414,6 +419,7 @@ async def test_dispatch_search_products_calls_search_and_returns_products(monkey
         "status": "found",
         "query": "wireless headphones",
         "products": [{"name": "Wireless Headphones", "price": 29.99}],
+        "provider": "google_shopping",
     }
 
 
@@ -423,7 +429,7 @@ async def test_dispatch_search_products_clamps_max_results_to_ceiling(monkeypatc
 
     async def fake_search(query, max_results):
         captured["max_results"] = max_results
-        return []
+        return [], "none"
 
     monkeypatch.setattr(live_session, "_search_shopping", fake_search)
     session = SessionState(
@@ -452,6 +458,102 @@ async def test_dispatch_unknown_tool_returns_unknown_status():
     result = await _dispatch_tool_call("not_a_real_tool", {}, session)
 
     assert result == {"status": "unknown_tool"}
+
+
+# --- apply_* standalone functions (used directly by the /voice/tool/* REST
+# endpoints for the direct-connect transport, and internally by
+# _dispatch_tool_call's WS-proxy router above — same logic, two callers) ----
+
+
+@pytest.mark.asyncio
+async def test_apply_search_products_calls_search_and_returns_products(monkeypatch):
+    async def fake_search(query, max_results):
+        return [{"name": "Wireless Headphones", "price": 29.99}], "google_shopping"
+
+    monkeypatch.setattr(live_session, "_search_shopping", fake_search)
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={}, mode="search")
+
+    result = await apply_search_products(session, "wireless headphones")
+
+    assert result == {
+        "status": "found",
+        "query": "wireless headphones",
+        "products": [{"name": "Wireless Headphones", "price": 29.99}],
+        "provider": "google_shopping",
+    }
+
+
+@pytest.mark.asyncio
+async def test_apply_search_products_rejects_blank_query():
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={}, mode="search")
+
+    result = await apply_search_products(session, "   ")
+
+    assert result == {"status": "error", "query": "", "products": []}
+
+
+def test_apply_record_preference_merges_into_latest_patch():
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+
+    result = apply_record_preference(
+        session, {"shopping_categories": ["Clothing"], "preference_terms": ["Nike"], "ignore_terms": ["leather"]}
+    )
+
+    assert result["status"] == "recorded"
+    assert result["patch"] == session.latest_patch
+    assert session.latest_patch["preference_terms"] == ["Nike"]
+
+
+def test_apply_ready_to_finalize_packages_existing_latest_patch():
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+    session.latest_patch = {"shopping_categories": ["Clothing"], "preference_terms": ["Nike"], "ignore_terms": []}
+
+    result = apply_ready_to_finalize(session, "Saving Clothing.")
+
+    assert result["status"] == "proposal_ready"
+    assert session.finalize_proposal == {
+        "shopping_categories": ["Clothing"],
+        "preference_terms": ["Nike"],
+        "ignore_terms": [],
+        "summary": "Saving Clothing.",
+    }
+    assert result["patch"] == session.finalize_proposal
+
+
+# --- mint_ephemeral_token (Developer API ephemeral token minting for the
+# mobile direct-connect transport) -------------------------------------------
+
+
+def test_mint_ephemeral_token_uses_dev_api_client_and_locks_config(monkeypatch):
+    captured = {}
+
+    class _FakeAuthTokens:
+        def create(self, config):
+            captured["config"] = config
+            return pytypes.SimpleNamespace(name="auth_tokens/fake123")
+
+    class _FakeDevClient:
+        auth_tokens = _FakeAuthTokens()
+
+    monkeypatch.setattr(live_session, "_get_dev_api_client", lambda: _FakeDevClient())
+    monkeypatch.setattr(live_session, "_build_setup_json", lambda model, config, client: {"model": model})
+
+    result = mint_ephemeral_token({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search")
+
+    assert result["token"] == "auth_tokens/fake123"
+    assert result["model"] == live_session._VOICE_MODEL_DEV_API
+    assert result["setup"] == {"model": live_session._VOICE_MODEL_DEV_API}
+    assert captured["config"].uses == 1
+    assert captured["config"].lock_additional_fields == []
+    assert captured["config"].live_connect_constraints.model == live_session._VOICE_MODEL_DEV_API
+
+
+def test_get_dev_api_client_raises_without_api_key(monkeypatch):
+    monkeypatch.setattr(live_session, "_AI_STUDIO_API_KEY", "")
+    monkeypatch.setattr(live_session, "_genai_dev_client", None)
+
+    with pytest.raises(RuntimeError, match="AI_STUDIO_API_KEY"):
+        live_session._get_dev_api_client()
 
 
 @pytest.mark.asyncio
@@ -900,7 +1002,7 @@ async def test_pump_gemini_to_client_record_preference_tool_call_sends_patch():
 @pytest.mark.asyncio
 async def test_pump_gemini_to_client_search_products_tool_call_sends_product_results(monkeypatch):
     async def fake_search(query, max_results):
-        return [{"name": "Wireless Headphones", "price": 29.99}]
+        return [{"name": "Wireless Headphones", "price": 29.99}], "google_shopping"
 
     monkeypatch.setattr(live_session, "_search_shopping", fake_search)
     ws = _FakeWebSocket([])
@@ -910,11 +1012,20 @@ async def test_pump_gemini_to_client_search_products_tool_call_sends_product_res
     with pytest.raises(_FakeSessionClosed):
         await _pump_gemini_to_client(ws, gemini, session)
 
+    started_frames = [m for m in ws.sent_json if m.get("type") == "search_started"]
+    assert len(started_frames) == 1
+    assert started_frames[0]["query"] == "wireless headphones"
+
     result_frames = [m for m in ws.sent_json if m.get("type") == "product_results"]
     assert len(result_frames) == 1
     assert result_frames[0]["query"] == "wireless headphones"
     assert result_frames[0]["products"] == [{"name": "Wireless Headphones", "price": 29.99}]
+    assert result_frames[0]["provider"] == "google_shopping"
     assert len(gemini.tool_responses) == 1
+
+    # search_started must arrive before product_results — it's the
+    # deterministic loading-state signal that must not lag behind the result.
+    assert ws.sent_json.index(started_frames[0]) < ws.sent_json.index(result_frames[0])
 
 
 @pytest.mark.asyncio

@@ -178,6 +178,101 @@ def search_products(query: str, max_results: int = 5) -> list[dict]:
     return products
 
 
+def _parse_amazon_result(r: dict, fallback_name: str) -> dict:
+    name = r.get("title", fallback_name)
+    purchase_url = (
+        r.get("link")
+        or (r.get("asin") and "https://www.amazon.com/dp/" + r["asin"])
+        or "https://www.amazon.com/s?k=" + urllib.parse.quote(name)
+    )
+    return {
+        "name":         name,
+        "price":        r.get("extracted_price") or _parse_price(r.get("price", "0")),
+        "image_url":    r.get("thumbnail", ""),
+        "purchase_url": purchase_url,
+        "seller":       "Amazon",
+        "product_id":   _make_product_id("amazon", name),
+        "category":     _infer_category(name, "amazon"),
+    }
+
+
+def _amazon_search(query: str, num: int) -> list[dict]:
+    """Raw SerpAPI engine=amazon call — fallback path when Google Shopping
+    returns nothing for search_products_combined. Same SERPAPI_KEY as
+    google_shopping, no new credentials. Amazon's engine returns
+    'organic_results' (with 'asin'), a different shape than google_shopping's
+    'shopping_results' — parsed separately via _parse_amazon_result."""
+    try:
+        resp = _session.get(
+            "https://serpapi.com/search",
+            params={
+                "engine":        "amazon",
+                "k":             query,
+                "amazon_domain": "amazon.com",
+                "api_key":       _SERPAPI_KEY,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("SerpAPI amazon request failed for '%s': %s", query, exc)
+        return []
+
+    if "error" in data:
+        logger.warning("SerpAPI amazon error for '%s': %s", query, data["error"])
+        return []
+
+    results = data.get("organic_results", [])
+    if not results:
+        logger.warning("No amazon results for '%s'", query)
+        return []
+
+    return [_parse_amazon_result(r, query) for r in results[:num]]
+
+
+def search_products_combined(query: str, max_results: int = 5) -> tuple[list[dict], str]:
+    """Google Shopping runs first; if it comes back with fewer than
+    max_results products (including the zero case), Amazon (SerpAPI's
+    separate engine=amazon API, same SERPAPI_KEY, no new credentials) is
+    called to top up the remainder — its results are APPENDED to Google's,
+    never used to replace them. Both legs are synchronous requests.get calls
+    each bounded by their own timeout=10, so the worst case is naturally
+    ~20s total — no artificial race/timeout needed on top. Returns
+    (products, provider_used) so callers/logs can tell which source(s)
+    answered. Cached under its own key namespace (distinct from
+    search_products's "q::...") so it doesn't collide with /match's
+    Google-only cache entries."""
+    cache_key = f"combined::{query.lower().strip()}::{max_results}"
+    if cache_key in _cache:
+        logger.info("Cache hit for combined query: %s", query)
+        return _cache[cache_key]
+
+    google_products = _shopping_search(query, max_results)
+    amazon_products: list[dict] = []
+    if len(google_products) < max_results:
+        logger.info(
+            "Google Shopping returned %d/%d for '%s' — topping up with Amazon",
+            len(google_products), max_results, query,
+        )
+        amazon_products = _amazon_search(query, max_results - len(google_products))
+
+    products = google_products + amazon_products
+    if google_products and amazon_products:
+        provider = "google_shopping+amazon"
+    elif google_products:
+        provider = "google_shopping"
+    elif amazon_products:
+        provider = "amazon"
+    else:
+        provider = "none"
+
+    result = (products, provider)
+    _cache[cache_key] = result
+    logger.info("Combined search '%s' -> %d result(s) via %s", query, len(products), provider)
+    return result
+
+
 def _normalize_terms(terms: list[str] | None) -> list[str]:
     if not terms:
         return []

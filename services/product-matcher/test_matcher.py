@@ -150,11 +150,106 @@ def test_thumbnail_endpoint_returns_502_when_fetch_fails(monkeypatch):
 def test_search_endpoint_returns_products_and_clamps_max_results(monkeypatch):
     matcher._cache.clear()
     monkeypatch.setattr(
-        main, "search_products", lambda query, max_results: [{"name": query, "max_results": max_results}]
+        main,
+        "search_products_combined",
+        lambda query, max_results: ([{"name": query, "max_results": max_results}], "google_shopping"),
     )
     client = TestClient(main.app)
 
-    response = client.post("/search", json={"query": "lamp", "max_results": 99})
+    # 10 is valid per SearchRequest's own le=20 constraint, but still exceeds
+    # clamp_max_searches's real ceiling (MAX_SEARCHES_PER_RUN=5), so this
+    # still exercises server-side clamping beyond the request's own value —
+    # 99 would be rejected by pydantic's le=20 with a 422 before ever
+    # reaching the route body.
+    response = client.post("/search", json={"query": "lamp", "max_results": 10})
 
     assert response.status_code == 200
     assert response.json()["products"] == [{"name": "lamp", "max_results": 5}]
+    assert response.json()["provider"] == "google_shopping"
+
+
+def test_search_products_combined_uses_only_amazon_when_google_empty(monkeypatch):
+    matcher._cache.clear()
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(params.get("engine"))
+        if params.get("engine") == "google_shopping":
+            return _FakeResponse({"shopping_results": []})
+        return _FakeResponse({
+            "organic_results": [
+                {"title": "Amazon Item", "asin": "B000000000", "extracted_price": 12.5, "thumbnail": "c.png"},
+            ]
+        })
+
+    monkeypatch.setattr(matcher._session, "get", fake_get)
+
+    products, provider = matcher.search_products_combined("running shoes", max_results=3)
+
+    assert calls == ["google_shopping", "amazon"]
+    assert provider == "amazon"
+    assert products[0]["name"] == "Amazon Item"
+    assert products[0]["seller"] == "Amazon"
+    assert products[0]["purchase_url"] == "https://www.amazon.com/dp/B000000000"
+
+
+def test_search_products_combined_tops_up_with_amazon_when_google_returns_fewer_than_max_results(monkeypatch):
+    """Amazon results are APPENDED to Google's whenever Google returns fewer
+    than max_results — never used to replace Google's results outright."""
+    matcher._cache.clear()
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        engine = params.get("engine")
+        calls.append(engine)
+        if engine == "google_shopping":
+            return _FakeResponse({"shopping_results": [{"title": "Google Item", "source": "Store", "extracted_price": 9.0}]})
+        assert params.get("k") == "running shoes"
+        return _FakeResponse({
+            "organic_results": [
+                {"title": "Amazon Item A", "asin": "B111111111", "extracted_price": 15.0},
+                {"title": "Amazon Item B", "asin": "B222222222", "extracted_price": 18.0},
+            ]
+        })
+
+    monkeypatch.setattr(matcher._session, "get", fake_get)
+
+    products, provider = matcher.search_products_combined("running shoes", max_results=3)
+
+    assert calls == ["google_shopping", "amazon"]
+    assert provider == "google_shopping+amazon"
+    assert [p["name"] for p in products] == ["Google Item", "Amazon Item A", "Amazon Item B"]
+    # Google's single result is kept, not discarded in favor of Amazon-only.
+    assert products[0]["seller"] == "Store"
+
+
+def test_search_products_combined_skips_amazon_when_google_fully_satisfies_max_results(monkeypatch):
+    matcher._cache.clear()
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(params.get("engine"))
+        return _FakeResponse({
+            "shopping_results": [
+                {"title": "Google Item A", "source": "Store", "extracted_price": 9.0},
+                {"title": "Google Item B", "source": "Store", "extracted_price": 11.0},
+            ]
+        })
+
+    monkeypatch.setattr(matcher._session, "get", fake_get)
+
+    products, provider = matcher.search_products_combined("desk lamp", max_results=2)
+
+    assert calls == ["google_shopping"]
+    assert provider == "google_shopping"
+    assert len(products) == 2
+
+
+def test_search_products_combined_returns_none_when_both_empty(monkeypatch):
+    matcher._cache.clear()
+    monkeypatch.setattr(matcher._session, "get", lambda *a, **k: _FakeResponse({"shopping_results": []}))
+
+    products, provider = matcher.search_products_combined("nonexistent item xyz")
+
+    assert products == []
+    assert provider == "none"

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import time
@@ -19,7 +20,16 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import profile_store
-from live_session import _SESSION_MAX_SECONDS, run_voice_session, session_registry
+from live_session import (
+    _SESSION_MAX_SECONDS,
+    SessionState,
+    apply_ready_to_finalize,
+    apply_record_preference,
+    apply_search_products,
+    mint_ephemeral_token,
+    run_voice_session,
+    session_registry,
+)
 
 _request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 
@@ -111,6 +121,18 @@ def _require_uid(request: Request) -> str:
         raise HTTPException(status_code=401, detail=str(exc))
 
 
+async def _get_owned_session(session_id: str, uid: str) -> SessionState:
+    """Shared lookup for the /voice/session/token and /voice/tool/* REST
+    endpoints — unlike the WS stream endpoint (which only trusts the opaque
+    session_id minted by the already-authenticated start call), these REST
+    endpoints are more exposed to casual replay, so ownership is checked
+    explicitly here."""
+    session = await session_registry.get(session_id)
+    if session is None or session.uid != uid:
+        raise HTTPException(status_code=404, detail="session not found")
+    return session
+
+
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
@@ -137,6 +159,13 @@ class SessionStartResponse(BaseModel):
     session_id: str = Field(..., description="Unique session identifier — use for WebSocket URL and finalize call")
     ws_url: str = Field(..., description="Relative WebSocket path: /voice/session/{session_id}/stream")
     profile: dict = Field(..., description="Current user profile from Firestore")
+    direct_connect_allowed: bool = Field(
+        ...,
+        description=(
+            "Server-side kill switch for the native-only direct client->Gemini Live transport. "
+            "When false, clients must use the WS proxy regardless of platform/build flags."
+        ),
+    )
 
 
 class SessionEventRequest(BaseModel):
@@ -174,6 +203,27 @@ class SessionFinalizeRequest(BaseModel):
     }}
 
 
+class SessionTokenRequest(BaseModel):
+    session_id: str = Field(..., description="Session ID from /voice/session/start")
+
+
+class RecordPreferenceRequest(BaseModel):
+    session_id: str = Field(..., description="Session ID from /voice/session/start")
+    shopping_categories: list[str] = Field(default_factory=list)
+    preference_terms: list[str] = Field(default_factory=list)
+    ignore_terms: list[str] = Field(default_factory=list)
+
+
+class SearchProductsRequest(BaseModel):
+    session_id: str = Field(..., description="Session ID from /voice/session/start")
+    query: str = Field(..., description="Freetext shopping search query")
+
+
+class ReadyToFinalizeRequest(BaseModel):
+    session_id: str = Field(..., description="Session ID from /voice/session/start")
+    summary: str = Field("", description="Human-readable confirmation sentence the model already spoke")
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -209,6 +259,7 @@ async def start_session(http_request: Request, body: SessionStartRequest = Sessi
         session_id=session.session_id,
         ws_url=f"/voice/session/{session.session_id}/stream",
         profile=existing_profile,
+        direct_connect_allowed=os.environ.get("VOICE_DIRECT_CONNECT_ENABLED", "false").lower() == "true",
     )
     return JSONResponse(content=response.model_dump(), headers={"X-Request-Id": req_id})
 
@@ -280,6 +331,105 @@ async def finalize_session(request: SessionFinalizeRequest, http_request: Reques
     )
     await session_registry.delete(request.session_id)
     return JSONResponse(content=result, headers={"X-Request-Id": req_id})
+
+
+@app.post(
+    "/voice/session/token",
+    tags=["Voice Session"],
+    summary="Mint an ephemeral Gemini Live token for direct client connection",
+    description=(
+        "Mints a short-lived, model/config-locked auth token for the native mobile app to open "
+        "its own direct WebSocket connection to Gemini Live (Developer API), bypassing this "
+        "backend for audio streaming. Tool-call side effects still route through the "
+        "/voice/tool/* endpoints below.\n\n"
+        "**Requires:** `Authorization: Bearer {firebase_id_token}`"
+    ),
+    responses={
+        200: {"description": "Token minted"},
+        401: {"description": "Missing or invalid Firebase ID token"},
+        404: {"description": "Session not found or not owned by this user"},
+        502: {"description": "Token minting failed"},
+    },
+)
+async def mint_session_token(request: SessionTokenRequest, http_request: Request) -> JSONResponse:
+    req_id = uuid.uuid4().hex[:8]
+    _request_id_ctx.set(req_id)
+    uid = _require_uid(http_request)
+    session = await _get_owned_session(request.session_id, uid)
+    try:
+        token_data = await asyncio.to_thread(mint_ephemeral_token, session.existing_profile, session.mode)
+    except Exception as exc:
+        logger.exception("token mint failed for session %s: %s", request.session_id, exc)
+        raise HTTPException(status_code=502, detail="Failed to mint Gemini Live token")
+    return JSONResponse(content=token_data, headers={"X-Request-Id": req_id})
+
+
+@app.post(
+    "/voice/tool/record_preference",
+    tags=["Voice Tool"],
+    summary="Apply a record_preference tool call (direct-connect transport)",
+    description=(
+        "Executes the same record_preference side effect the WS-proxy path runs internally — "
+        "for the mobile app's direct client->Gemini connection, which routes tool-call side "
+        "effects through REST instead of the WS relay.\n\n"
+        "**Requires:** `Authorization: Bearer {firebase_id_token}`"
+    ),
+    responses={
+        200: {"description": "Preference recorded"},
+        401: {"description": "Missing or invalid Firebase ID token"},
+        404: {"description": "Session not found or not owned by this user"},
+    },
+)
+async def tool_record_preference(request: RecordPreferenceRequest, http_request: Request) -> JSONResponse:
+    uid = _require_uid(http_request)
+    session = await _get_owned_session(request.session_id, uid)
+    result = apply_record_preference(session, request.model_dump(exclude={"session_id"}))
+    return JSONResponse(content=result)
+
+
+@app.post(
+    "/voice/tool/search_products",
+    tags=["Voice Tool"],
+    summary="Apply a search_products tool call (direct-connect transport)",
+    description=(
+        "Executes the same search_products side effect the WS-proxy path runs internally "
+        "(Google Shopping, topped up with Amazon when short) — for the mobile app's direct "
+        "client->Gemini connection.\n\n"
+        "**Requires:** `Authorization: Bearer {firebase_id_token}`"
+    ),
+    responses={
+        200: {"description": "Search complete"},
+        401: {"description": "Missing or invalid Firebase ID token"},
+        404: {"description": "Session not found or not owned by this user"},
+    },
+)
+async def tool_search_products(request: SearchProductsRequest, http_request: Request) -> JSONResponse:
+    uid = _require_uid(http_request)
+    session = await _get_owned_session(request.session_id, uid)
+    result = await apply_search_products(session, request.query)
+    return JSONResponse(content=result)
+
+
+@app.post(
+    "/voice/tool/ready_to_finalize",
+    tags=["Voice Tool"],
+    summary="Apply a ready_to_finalize tool call (direct-connect transport)",
+    description=(
+        "Executes the same ready_to_finalize side effect the WS-proxy path runs internally — "
+        "for the mobile app's direct client->Gemini connection.\n\n"
+        "**Requires:** `Authorization: Bearer {firebase_id_token}`"
+    ),
+    responses={
+        200: {"description": "Proposal packaged"},
+        401: {"description": "Missing or invalid Firebase ID token"},
+        404: {"description": "Session not found or not owned by this user"},
+    },
+)
+async def tool_ready_to_finalize(request: ReadyToFinalizeRequest, http_request: Request) -> JSONResponse:
+    uid = _require_uid(http_request)
+    session = await _get_owned_session(request.session_id, uid)
+    result = apply_ready_to_finalize(session, request.summary.strip())
+    return JSONResponse(content=result)
 
 
 @app.websocket("/voice/session/{session_id}/stream")

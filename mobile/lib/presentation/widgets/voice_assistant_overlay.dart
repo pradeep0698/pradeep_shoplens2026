@@ -249,12 +249,13 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> {
               _PreferencePreview(patch: state.patch),
               const SizedBox(height: 16),
             ],
-            if (state.transcript.isNotEmpty || state.searchResults.isNotEmpty)
-              _ConversationList(
-                transcript: state.transcript,
+            if (state.searchResults.isNotEmpty)
+              _PinnedSearchSection(
                 searchResults: state.searchResults,
                 shoppingCategories: state.patch.shoppingCategories,
               ),
+            if (state.transcript.isNotEmpty)
+              _TranscriptList(transcript: state.transcript),
             const SizedBox(height: 8),
           ],
         ),
@@ -559,30 +560,18 @@ class _PreferencePreview extends StatelessWidget {
       );
 }
 
-/// Interleaves transcript turns and search-result batches into one
-/// chronological conversation (ordered by VoiceAssistantNotifier._nextSeq()),
-/// instead of rendering all transcript first and all results in a separate
-/// block underneath — so a product result shows up right after the search
-/// that produced it, and a later refinement appears after that.
-class _ConversationList extends StatelessWidget {
-  const _ConversationList({
-    required this.transcript,
-    required this.searchResults,
-    required this.shoppingCategories,
-  });
+/// Plain chronological chat feed — transcript turns only. Search results no
+/// longer interleave here (see _PinnedSearchSection below); this list is
+/// ordered purely by VoiceTranscriptTurn.seq.
+class _TranscriptList extends StatelessWidget {
+  const _TranscriptList({required this.transcript});
 
   final List<VoiceTranscriptTurn> transcript;
-  final List<VoiceSearchResult> searchResults;
-  final List<String> shoppingCategories;
 
   @override
   Widget build(BuildContext context) {
-    final items = <MapEntry<int, Widget>>[
-      ...transcript.map((turn) => MapEntry(turn.seq, _transcriptBubble(turn))),
-      ...searchResults.map((result) => MapEntry(result.seq, _searchResultBlock(result, shoppingCategories))),
-    ]..sort((a, b) => a.key.compareTo(b.key));
-
-    return Column(children: items.map((e) => e.value).toList());
+    final turns = [...transcript]..sort((a, b) => a.seq.compareTo(b.seq));
+    return Column(children: turns.map(_transcriptBubble).toList());
   }
 
   Widget _transcriptBubble(VoiceTranscriptTurn turn) => Align(
@@ -598,25 +587,100 @@ class _ConversationList extends StatelessWidget {
           child: Text(turn.text, style: const TextStyle(color: Colors.white, fontSize: 13)),
         ),
       );
+}
 
-  Widget _searchResultBlock(VoiceSearchResult result, List<String> shoppingCategories) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
+/// Pins the newest search prominently at the top, collapsing any earlier
+/// searches (in this session) behind an expandable "N earlier searches"
+/// toggle — fixes the bug where an older, empty search stayed visible above
+/// a later, successful one. [searchResults] must already be newest-first
+/// (see VoiceAssistantNotifier._handleControlFrame's insert-at-front logic).
+class _PinnedSearchSection extends StatefulWidget {
+  const _PinnedSearchSection({required this.searchResults, required this.shoppingCategories});
+
+  final List<VoiceSearchResult> searchResults;
+  final List<String> shoppingCategories;
+
+  @override
+  State<_PinnedSearchSection> createState() => _PinnedSearchSectionState();
+}
+
+class _PinnedSearchSectionState extends State<_PinnedSearchSection> {
+  // Pure ephemeral display state — no bearing on the conversation/session,
+  // so it lives here rather than in the Riverpod-managed VoiceAssistantState.
+  bool _historyExpanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final latest = widget.searchResults.first;
+    final older = widget.searchResults.skip(1).toList();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _searchResultBlock(latest, prominent: true),
+          if (older.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            InkWell(
+              onTap: () => setState(() => _historyExpanded = !_historyExpanded),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(_historyExpanded ? Icons.expand_less : Icons.expand_more, color: _kMuted, size: 18),
+                    const SizedBox(width: 4),
+                    Text(
+                      '${older.length} earlier search${older.length == 1 ? '' : 'es'}',
+                      style: const TextStyle(color: _kMuted, fontSize: 12, fontWeight: FontWeight.w600),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (_historyExpanded)
+              ...older.map(
+                (r) => Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: _searchResultBlock(r, prominent: false),
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _searchResultBlock(VoiceSearchResult result, {required bool prominent}) => Padding(
+        padding: EdgeInsets.symmetric(vertical: prominent ? 8 : 0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               "Results for '${result.query}'",
-              style: const TextStyle(color: _kMuted, fontSize: 12, fontWeight: FontWeight.w600),
+              style: TextStyle(
+                color: _kMuted,
+                fontSize: prominent ? 12 : 11.5,
+                fontWeight: FontWeight.w600,
+              ),
             ),
             const SizedBox(height: 8),
-            if (result.products.isEmpty)
+            if (result.isPending)
+              const Row(
+                children: [
+                  SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: _kAccent)),
+                  SizedBox(width: 8),
+                  Text('Still searching…', style: TextStyle(color: _kFaint, fontSize: 12.5)),
+                ],
+              )
+            else if (result.products.isEmpty)
               const Text(
                 "Didn't find anything for that — try rephrasing.",
                 style: TextStyle(color: _kFaint, fontSize: 12.5),
               )
             else
               ...result.products.map(
-                (p) => ProductCard(product: p, shoppingCategories: shoppingCategories),
+                (p) => ProductCard(product: p, shoppingCategories: widget.shoppingCategories),
               ),
           ],
         ),

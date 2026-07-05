@@ -3,13 +3,20 @@ import logging
 import os
 from typing import List
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import requests as _requests
-from matcher import clamp_max_searches, fetch_thumbnail, match_products, search_products, _search_product, _SERPAPI_KEY
+from matcher import (
+    clamp_max_searches,
+    fetch_thumbnail,
+    match_products,
+    search_products_combined,
+    _search_product,
+    _SERPAPI_KEY,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -118,12 +125,16 @@ async def match(request: MatchRequest) -> JSONResponse:
     "/search",
     tags=["Search"],
     summary="Search for products by query",
-    description="Direct Google Shopping search for a freetext query. Returns up to `max_results` products.",
+    description=(
+        "Freetext product search for a given query. Tries Google Shopping first; if that "
+        "returns nothing, falls back to Amazon (same SERPAPI_KEY, engine=amazon). Returns up "
+        "to `max_results` products plus which provider answered."
+    ),
 )
 async def search(request: SearchRequest) -> JSONResponse:
     max_results = clamp_max_searches(request.max_results)
-    products = await asyncio.to_thread(search_products, request.query, max_results)
-    return JSONResponse(content={"products": products})
+    products, provider = await asyncio.to_thread(search_products_combined, request.query, max_results)
+    return JSONResponse(content={"products": products, "provider": provider})
 
 
 @app.get(
@@ -140,7 +151,7 @@ async def search(request: SearchRequest) -> JSONResponse:
         502: {"description": "Failed to fetch from upstream CDN"},
     },
 )
-async def thumbnail(url: str = Field(..., description="Fully-qualified Google CDN image URL")) -> Response:
+async def thumbnail(url: str = Query(..., description="Fully-qualified Google CDN image URL")) -> Response:
     result = await asyncio.to_thread(fetch_thumbnail, url)
     if result is None:
         return Response(status_code=502)

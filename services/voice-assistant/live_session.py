@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -49,6 +50,29 @@ _INACTIVITY_POLL_SECONDS = 1.0
 _PRODUCT_MATCHER_URL = os.environ.get("PRODUCT_MATCHER_URL", "")
 _DEFAULT_MAX_SEARCH_RESULTS = 2
 _MAX_SEARCH_RESULTS_CEILING = 5
+
+# Gemini Developer API (AI Studio) key — used ONLY to mint ephemeral auth
+# tokens for the mobile app's direct client->Gemini Live connection (native
+# platforms only). Deliberately separate from the Vertex AI client above:
+# Tokens.create()/AsyncTokens.create() unconditionally raise ValueError when
+# called on a vertexai=True client, so this needs its own Client instance.
+_AI_STUDIO_API_KEY = os.environ.get("AI_STUDIO_API_KEY", "")
+# Confirmed via a live spike against the real Developer API (see Phase 0):
+# model naming differs from the Vertex AI id above — "models/" prefix
+# required, and "-latest" rather than a version number.
+_VOICE_MODEL_DEV_API = os.environ.get("VOICE_MODEL_DEV_API", "models/gemini-2.5-flash-native-audio-latest")
+# How long an already-open direct-connect Live session may run before Gemini
+# itself rejects further messages — mirrors _SESSION_MAX_SECONDS's role for
+# the proxy path. Per CreateAuthTokenConfig's field docstring, this is
+# expire_time, NOT new_session_expire_time (that one only bounds how long the
+# client has to open the connection at all, not the resulting session's
+# lifetime) — unverified against a live session by the Phase 0 spike, which
+# was blocked by an AI Studio billing issue before it reached this check.
+_TOKEN_EXPIRE_SECONDS = _SESSION_MAX_SECONDS
+# Deadline for the client to actually open the WS after minting — generous
+# headroom over the SDK's own 60s default for slow networks/permission
+# prompts, not a session-lifetime control.
+_TOKEN_NEW_SESSION_EXPIRE_SECONDS = 120
 
 # TEMPORARY: scripted fake conversation, used while no billed GCP project is
 # reachable for the real Vertex AI Live API call. Exercises the full WS
@@ -120,27 +144,47 @@ SEARCH_SYSTEM_PROMPT_TEMPLATE = (
     "You are ShopLens AI, a friendly shopping assistant having a natural spoken "
     "conversation to help the user find products to buy. Always respond out "
     "loud on every turn, even when you call a tool. Keep replies brief and "
-    "conversational. Before searching, make sure you actually know what to "
-    "look for: if the request is vague — just a bare product category with no "
-    "distinguishing detail, e.g. 'show me some headphones' — ask ONE quick "
-    "follow-up (style, brand, color, material, or budget) instead of "
-    "searching right away; every search costs a real API call, so don't burn "
-    "one on a query too broad to be useful. Once the request already has a "
-    "distinguishing detail, or the user has answered your follow-up, call "
-    "search_products with a concise, well-formed shopping query that captures "
-    "the product type plus whatever detail you have (fold a budget straight "
-    "into the query text, e.g. 'wireless headphones under $50' — there is no "
-    "separate price filter). Don't call search_products more than once per "
-    "turn, and don't search again just because the user rephrased the same "
-    "request — only search again when they've actually refined or changed "
-    "what they want. After results come back, briefly acknowledge what was "
-    "found in a sentence or two without listing every item back to them (they "
-    "can see the results on screen) and ask if they'd like to refine the "
-    "search or look for something else. {profile_note} The very first message "
-    "you receive each session is a hidden cue telling you the user just "
-    "opened the conversation and hasn't said anything yet — when you see it, "
-    "speak first with a short warm greeting and ask what they're shopping "
-    "for; never read that cue back to the user."
+    "conversational.\n\n"
+    "GATHER FIRST: before every search_products call, have at least one real "
+    "back-and-forth about what they want — never fire a search off the very "
+    "first thing they say. If the request is vague — just a bare product "
+    "category with no distinguishing detail, e.g. 'show me some headphones' — "
+    "ask ONE quick follow-up (style, brand, color, material, or budget) "
+    "instead of searching right away; every search costs a real API call, so "
+    "don't burn one on a query too broad to be useful. If they give a detail, "
+    "you may ask if there's anything else they care about, but never ask more "
+    "than two follow-up questions total for one search — and skip straight to "
+    "searching sooner if they signal they're ready ('just show me something', "
+    "'anything is fine', or repeating the same request more insistently) — "
+    "read that as permission to stop asking and search with what you have.\n\n"
+    "SIGNAL BEFORE SEARCHING: once you're about to call search_products, say a "
+    "short spoken bridge first — e.g. 'Got it, let me see what I can find' or "
+    "'Okay, one sec while I look that up' — vary the phrasing, don't reuse the "
+    "same line twice in a row. Say this BEFORE the tool call, not after: "
+    "results can take several seconds to come back, so the user needs to hear "
+    "that you're working on it before you go quiet. Then call search_products "
+    "with a concise, well-formed shopping query that captures the product "
+    "type plus whatever detail you have (fold a budget straight into the "
+    "query text, e.g. 'wireless headphones under $50' — there is no separate "
+    "price filter).\n\n"
+    "ONE CONCLUSION PER SEARCH: call search_products exactly once per distinct "
+    "request. Don't call search_products more than once per turn, and don't "
+    "search again just because the user rephrased the same request — only "
+    "search again when they've actually refined or changed what they want "
+    "(e.g. 'pink running shoes' found nothing, then they say 'try blue "
+    "instead' — that's a refinement: gather-then-bridge-then-search applies "
+    "fresh to it). Wait for the tool result before saying anything about "
+    "whether it found something — never tell the user results are missing "
+    "and then reverse yourself moments later. After results come back, give "
+    "exactly one spoken conclusion: briefly acknowledge what was found (or, "
+    "if truly nothing came back, say so plainly once) in a sentence or two "
+    "without listing every item back to them (they can see the results on "
+    "screen), then ask if they'd like to refine the search or look for "
+    "something else. {profile_note} The very first message you receive each "
+    "session is a hidden cue telling you the user just opened the "
+    "conversation and hasn't said anything yet — when you see it, speak first "
+    "with a short warm greeting and ask what they're shopping for; never read "
+    "that cue back to the user."
 )
 
 
@@ -232,12 +276,17 @@ RECORD_PREFERENCE = types.FunctionDeclaration(
 SEARCH_PRODUCTS = types.FunctionDeclaration(
     name="search_products",
     description=(
-        "Call this once you know enough to run a useful search — the product "
-        "type plus at least one distinguishing detail (brand, color, "
-        "material, style, or price) that the user stated or just confirmed "
-        "after your follow-up. If the request is still just a bare category "
-        "with nothing else, ask a clarifying question instead of calling "
-        "this — every call costs a real API search. Call again whenever the "
+        "Call this ONCE per search, only after you've had at least one real "
+        "back-and-forth about what the user wants — the product type plus at "
+        "least one distinguishing detail (brand, color, material, style, or "
+        "price) that they stated or just confirmed after your follow-up "
+        "(unless they've clearly signaled impatience/readiness to skip "
+        "ahead). If the request is still just a bare category with nothing "
+        "else, ask a clarifying question instead of calling this — every "
+        "call costs a real API search. You must already have spoken a short "
+        "verbal bridge like 'let me look into that' in this same turn before "
+        "calling this — never call it silently as your first response. This "
+        "call can take several seconds to resolve. Call again whenever the "
         "user refines or changes what they're looking for, but not for "
         "trivial rephrasing of the same request. Pass one focused shopping "
         "search query capturing the product type plus any brand/color/"
@@ -407,6 +456,72 @@ def _live_config(existing_profile: dict, mode: str) -> types.LiveConnectConfig:
     )
 
 
+_genai_dev_client: Optional[genai.Client] = None
+
+
+def _get_dev_api_client() -> genai.Client:
+    """Separate Developer-API (AI Studio key) client, used only for minting
+    ephemeral auth tokens for the mobile app's direct-connect transport — see
+    _AI_STUDIO_API_KEY above for why this can't be the same client as
+    _get_client()'s Vertex AI one. v1alpha is required: ephemeral token
+    support is marked experimental/v1alpha-only in the installed SDK."""
+    global _genai_dev_client
+    if _genai_dev_client is None:
+        if not _AI_STUDIO_API_KEY:
+            raise RuntimeError("AI_STUDIO_API_KEY not set — cannot mint ephemeral Gemini Live tokens")
+        _genai_dev_client = genai.Client(
+            api_key=_AI_STUDIO_API_KEY,
+            http_options=types.HttpOptions(api_version="v1alpha"),
+        )
+    return _genai_dev_client
+
+
+def _build_setup_json(model: str, config: types.LiveConnectConfig, client: genai.Client) -> dict:
+    """Builds the exact wire-format `setup` JSON the mobile client must send
+    as its first frame after opening the direct WS — using the SDK's own
+    (private) converter rather than hand-rolling the camelCase field mapping,
+    so the backend stays the single source of truth for prompt/tool content
+    and the wire format can't silently drift from what the real SDK sends.
+    NOTE: _live_converters is a private google-genai module — pin the SDK
+    version (see requirements.txt) since this coupling could break silently
+    on an upgrade."""
+    from google.genai import _live_converters as live_converters
+
+    params = types.LiveConnectParameters(model=model, config=config).model_dump(exclude_none=True)
+    request_dict = live_converters._LiveConnectParameters_to_mldev(
+        api_client=client._api_client, from_object=params,
+    )
+    return request_dict.get("setup", request_dict)
+
+
+def mint_ephemeral_token(existing_profile: dict, mode: str) -> dict:
+    """Mints a v1alpha ephemeral auth token constrained to the exact
+    LiveConnectConfig _live_config() would build for this profile/mode —
+    lock_additional_fields=[] locks every field actually set in `config`, so
+    a client holding the token cannot override system prompt/tools/voice
+    even if it tried. Synchronous (matches the SDK's sync auth_tokens.create)
+    — callers must run this via asyncio.to_thread."""
+    client = _get_dev_api_client()
+    live_config = _live_config(existing_profile, mode)
+    now = datetime.now(timezone.utc)
+    auth_token = client.auth_tokens.create(
+        config=types.CreateAuthTokenConfig(
+            uses=1,
+            expire_time=now + timedelta(seconds=_TOKEN_EXPIRE_SECONDS),
+            new_session_expire_time=now + timedelta(seconds=_TOKEN_NEW_SESSION_EXPIRE_SECONDS),
+            live_connect_constraints=types.LiveConnectConstraints(
+                model=_VOICE_MODEL_DEV_API, config=live_config,
+            ),
+            lock_additional_fields=[],
+        )
+    )
+    return {
+        "token": auth_token.name,
+        "model": _VOICE_MODEL_DEV_API,
+        "setup": _build_setup_json(_VOICE_MODEL_DEV_API, live_config, client),
+    }
+
+
 async def _send_greeting_trigger(gemini_session) -> None:
     """Sends a hidden turn right after connecting so Gemini speaks the opening
     greeting itself — a real, spoken, transcribed turn — instead of the old
@@ -505,65 +620,87 @@ def _clamp_max_results(value) -> int:
         return _DEFAULT_MAX_SEARCH_RESULTS
 
 
-async def _search_shopping(query: str, max_results: int) -> list[dict]:
-    """Calls product-matcher's POST /search (free-text Google Shopping search
-    via SerpAPI) for the search_products tool — see services/product-matcher/
-    main.py. Returns an empty list on any failure so a flaky search never
-    crashes the live session; the model just tells the user nothing was found."""
+async def _search_shopping(query: str, max_results: int) -> tuple[list[dict], str]:
+    """Calls product-matcher's POST /search — tries Google Shopping first,
+    topping up with Amazon whenever Google returns fewer than max_results
+    (see services/product-matcher/matcher.py's search_products_combined) —
+    for the search_products tool. Both legs are bounded by their own
+    timeout=10 on the product-matcher side, so the worst case there is
+    ~20s; 25.0s here gives headroom for connection setup/JSON parsing/
+    scheduling jitter on top of that. Returns an empty list on any failure
+    so a flaky search never crashes the live session; the model just tells
+    the user nothing was found."""
     if not _PRODUCT_MATCHER_URL:
         logger.warning("PRODUCT_MATCHER_URL not set — cannot run product search")
-        return []
+        return [], "none"
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=25.0) as client:
             resp = await client.post(
                 f"{_PRODUCT_MATCHER_URL}/search", json={"query": query, "max_results": max_results}
             )
             resp.raise_for_status()
-            return resp.json().get("products", [])
+            data = resp.json()
+            return data.get("products", []), data.get("provider", "unknown")
     except Exception as exc:
         logger.warning("product-matcher search failed for '%s': %s", query, exc)
-        return []
+        return [], "error"
+
+
+async def apply_search_products(session: SessionState, query: str) -> dict:
+    query = query.strip()
+    if not query:
+        return {"status": "error", "query": "", "products": []}
+    max_results = _clamp_max_results(session.existing_profile.get("max_searches_per_run"))
+    products, provider = await _search_shopping(query, max_results)
+    return {"status": "found" if products else "no_results", "query": query, "products": products, "provider": provider}
+
+
+def apply_ready_to_finalize(session: SessionState, summary: str) -> dict:
+    # Package up whatever record_preference has already accumulated —
+    # deliberately NOT re-running _extract_patch_from_transcript here,
+    # since that reads the (sometimes-wrong) transcribed caption rather
+    # than Gemini's own understanding, and would re-introduce exactly the
+    # kind of caption error record_preference exists to avoid, right at
+    # the last moment before saving.
+    session.finalize_proposal = {**session.latest_patch, "summary": summary or _summary_from_patch(session.latest_patch)}
+    return {"status": "proposal_ready", "patch": session.finalize_proposal}
+
+
+def apply_record_preference(session: SessionState, args: dict) -> dict:
+    # Uses Gemini's own real-time audio understanding, not the separately
+    # transcribed caption — see RECORD_PREFERENCE's description. Same
+    # dedup logic as the final reviewed save.
+    categories = _filter_categories(args.get("shopping_categories"), session.latest_user_text())
+    session.latest_patch["shopping_categories"] = sorted({*session.latest_patch["shopping_categories"], *categories})
+    session.latest_patch["preference_terms"] = profile_store._dedup_case_insensitive(
+        session.latest_patch["preference_terms"], [str(t) for t in (args.get("preference_terms") or [])]
+    )
+    session.latest_patch["ignore_terms"] = profile_store._dedup_case_insensitive(
+        session.latest_patch["ignore_terms"], [str(t) for t in (args.get("ignore_terms") or [])]
+    )
+    normalized = profile_store.normalize_reviewed_patch(session.latest_patch)
+    session.latest_patch = {
+        "shopping_categories": normalized["shopping_categories"],
+        "preference_terms": normalized["preference_terms"],
+        "ignore_terms": normalized["ignore_terms"],
+    }
+    return {"status": "recorded", "patch": session.latest_patch}
 
 
 async def _dispatch_tool_call(name: str, args: dict, session: SessionState) -> dict:
+    """Thin router over the apply_* functions above — used by the WS-proxy
+    path (_pump_gemini_to_client below). The direct-connect mobile transport
+    calls the same apply_* functions via the /voice/tool/* REST endpoints in
+    main.py instead, so there is exactly one implementation of each tool's
+    side effects regardless of transport."""
     if name == "search_products":
-        query = str(args.get("query", "")).strip()
-        if not query:
-            return {"status": "error", "query": "", "products": []}
-        max_results = _clamp_max_results(session.existing_profile.get("max_searches_per_run"))
-        products = await _search_shopping(query, max_results)
-        return {"status": "found" if products else "no_results", "query": query, "products": products}
+        return await apply_search_products(session, str(args.get("query", "")))
 
     if name == "ready_to_finalize":
-        summary = str(args.get("summary", "")).strip()
-        # Package up whatever record_preference has already accumulated —
-        # deliberately NOT re-running _extract_patch_from_transcript here,
-        # since that reads the (sometimes-wrong) transcribed caption rather
-        # than Gemini's own understanding, and would re-introduce exactly the
-        # kind of caption error record_preference exists to avoid, right at
-        # the last moment before saving.
-        session.finalize_proposal = {**session.latest_patch, "summary": summary or _summary_from_patch(session.latest_patch)}
-        return {"status": "proposal_ready"}
+        return apply_ready_to_finalize(session, str(args.get("summary", "")).strip())
 
     if name == "record_preference":
-        # Uses Gemini's own real-time audio understanding, not the separately
-        # transcribed caption — see RECORD_PREFERENCE's description. Same
-        # dedup logic as the final reviewed save.
-        categories = _filter_categories(args.get("shopping_categories"), session.latest_user_text())
-        session.latest_patch["shopping_categories"] = sorted({*session.latest_patch["shopping_categories"], *categories})
-        session.latest_patch["preference_terms"] = profile_store._dedup_case_insensitive(
-            session.latest_patch["preference_terms"], [str(t) for t in (args.get("preference_terms") or [])]
-        )
-        session.latest_patch["ignore_terms"] = profile_store._dedup_case_insensitive(
-            session.latest_patch["ignore_terms"], [str(t) for t in (args.get("ignore_terms") or [])]
-        )
-        normalized = profile_store.normalize_reviewed_patch(session.latest_patch)
-        session.latest_patch = {
-            "shopping_categories": normalized["shopping_categories"],
-            "preference_terms": normalized["preference_terms"],
-            "ignore_terms": normalized["ignore_terms"],
-        }
-        return {"status": "recorded"}
+        return apply_record_preference(session, args)
 
     logger.warning("Unknown tool call from Gemini Live session: %s", name)
     return {"status": "unknown_tool"}
@@ -753,6 +890,16 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
             if tool_call is not None:
                 function_responses = []
                 for call in tool_call.function_calls or []:
+                    if call.name == "search_products":
+                        # Sent the instant the tool call is dispatched, before
+                        # the (now up to ~20-25s combined Google Shopping +
+                        # Amazon fallback) result comes back — a deterministic
+                        # backstop for the client's loading UI, independent of
+                        # whether the model's own spoken bridge line actually
+                        # fires (see SEARCH_SYSTEM_PROMPT_TEMPLATE).
+                        await websocket.send_json(
+                            {"type": "search_started", "query": str(dict(call.args or {}).get("query", "")).strip()}
+                        )
                     result = await _dispatch_tool_call(call.name, dict(call.args or {}), session)
                     function_responses.append(
                         types.FunctionResponse(id=call.id, name=call.name, response=result)
@@ -771,6 +918,7 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
                                 "type": "product_results",
                                 "query": result.get("query", ""),
                                 "products": result.get("products", []),
+                                "provider": result.get("provider", "unknown"),
                             }
                         )
                 await gemini_session.send_tool_response(function_responses=function_responses)

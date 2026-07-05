@@ -12,10 +12,25 @@ class VoiceApi {
   // mode "preferences" is the forced first-run onboarding conversation that
   // learns/saves shopping preferences; "search" (every other session) is a
   // conversational product search instead — see live_session.py's SessionState.mode.
-  Future<VoiceSessionStartResponse> startSession({required bool isOnboarding}) async {
+  // language is a display name from voice_languages.dart's kVoiceLanguages
+  // (e.g. "Spanish") — steers live_session.py's system-instruction directive;
+  // unrecognized values fall back to "English" server-side.
+  // resumeSessionId, if provided, asks the backend to reattach to a
+  // recently-disconnected session (still within its grace period) instead of
+  // starting a brand-new one — see live_session.py's
+  // SessionRegistry/disconnected_at. Best-effort: the backend silently falls
+  // back to a fresh session if the id is unknown/expired/not owned by this
+  // user, so this never surfaces as an error here.
+  Future<VoiceSessionStartResponse> startSession({
+    required bool isOnboarding,
+    required String language,
+    String? resumeSessionId,
+  }) async {
     try {
       final response = await _dio.post('/voice/session/start', data: {
         'mode': isOnboarding ? 'preferences' : 'search',
+        'language': language,
+        if (resumeSessionId != null) 'resume_session_id': resumeSessionId,
       });
       return VoiceSessionStartResponse.fromJson(response.data as Map<String, dynamic>);
     } on DioException catch (e) {
@@ -75,6 +90,20 @@ class VoiceApi {
       return response.data as Map<String, dynamic>;
     } on DioException catch (e) {
       throw AnalyzerException.fromDioException(e);
+    }
+  }
+
+  // Calls POST /voice/session/cancel — explicitly discards the session
+  // server-side (immediate delete, not the resumable disconnect grace
+  // period) since the user is intentionally leaving voice chat, not just
+  // getting momentarily disconnected. Best-effort/fire-and-forget by
+  // callers: if this fails, the backend's grace-period reaper cleans the
+  // session up a couple minutes later regardless.
+  Future<void> cancelSession(String sessionId) async {
+    try {
+      await _dio.post('/voice/session/cancel', data: {'session_id': sessionId});
+    } on DioException catch (_) {
+      // Best-effort — see doc comment above.
     }
   }
 }

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -16,9 +17,12 @@ from analyzer import (
     analyze_media,
     analyze_media_stream,
     classify_exception,
+    currency_for_country,
     identify_crop,
+    normalize_country,
     get_active_model,
     set_active_model,
+    MAX_RESULTS_PER_ITEM,
 )
 
 _request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
@@ -63,17 +67,29 @@ _CORS = {"Access-Control-Allow-Origin": "*"}
 
 @app.on_event("startup")
 async def _log_startup_config() -> None:
+    # Fingerprint, not the key itself — a short SHA-256 prefix is safe to log
+    # (irreversible, useless for auth) but still lets you confirm across
+    # environments/deployments that the SERPAPI_KEY actually loaded is the one
+    # you expect, without ever putting real credential material in Cloud
+    # Logging. Length is logged too since 0 is an unambiguous misconfiguration.
+    _key = os.environ.get("SERPAPI_KEY", "")
+    _key_fp = hashlib.sha256(_key.encode()).hexdigest()[:8] if _key else "(empty)"
     logger.info(
         "ai-analyzer starting | project_id=%s location=%s model=%s "
-        "gcs_lens_bucket=%s serpapi_key=%s lens_timeout=%ss skip_gemini=%s",
+        "gcs_lens_bucket=%s serpapi_key_len=%d serpapi_key_fp=%s lens_timeout=%ss "
+        "lens_hedge_delay=%ss skip_gemini=%s",
         os.environ.get("PROJECT_ID") or "(unset)",
         os.environ.get("LOCATION", "us-central1"),
         get_active_model(),
         os.environ.get("GCS_LENS_BUCKET") or "(unset)",
-        "set" if os.environ.get("SERPAPI_KEY") else "(unset)",
-        os.environ.get("LENS_TIMEOUT_SECONDS", "8"),
-        os.environ.get("IDENTIFY_SKIP_GEMINI", "true"),
+        len(_key),
+        _key_fp,
+        os.environ.get("LENS_TIMEOUT_SECONDS", "60"),
+        os.environ.get("LENS_HEDGE_DELAY_SECONDS", "25"),
+        os.environ.get("IDENTIFY_SKIP_GEMINI", "false"),
     )
+    if not _key:
+        logger.error("SERPAPI_KEY is empty or unset — every SerpAPI call will fail")
 
 
 @app.exception_handler(Exception)
@@ -147,8 +163,22 @@ class AnalyzeRequest(BaseModel):
     transcript: str = Field("", description="Optional transcript text to supplement Gemini's visual analysis")
     ignore_terms: list[str] = Field(default_factory=list, description="Product names to exclude from matching results")
     query: str = Field("", description="Optional freetext query to bias Google Shopping search")
-    country: str = Field("us", description="Two-letter ISO country code for regional product search")
+    country: str = Field(
+        "us",
+        description="Two-letter ISO country code for regional product search. Empty/unset defaults to 'us'. "
+                     "Currency is derived from this (no separate currency field) — see the `currency` field on the response.",
+    )
     max_searches: int = Field(5, ge=1, le=20, description="Maximum number of SerpAPI searches to execute")
+    preference_terms: list[str] = Field(
+        default_factory=list,
+        description="Free-text style/brand/material preferences from the user's profile (e.g. 'minimalist', 'Nike'). "
+                     "Used to prioritize which detected items get a product search when there are more items than max_searches allows.",
+    )
+    shopping_categories: list[str] = Field(
+        default_factory=list,
+        description="Preferred shopping categories from the user's profile (e.g. 'Furniture', 'Electronics'). "
+                     "Same prioritization role as preference_terms.",
+    )
     mlkit_context: MlKitContext | None = Field(
         None,
         description="On-device ML Kit detection context forwarded from the mobile app. Used for log-based routing analysis only — does not affect Gemini behaviour.",
@@ -162,6 +192,8 @@ class AnalyzeRequest(BaseModel):
             "query": "",
             "country": "us",
             "max_searches": 5,
+            "preference_terms": [],
+            "shopping_categories": [],
         }]
     }}
 
@@ -182,6 +214,8 @@ class AnalyzeResponse(BaseModel):
     warnings: list[str] = Field(..., description="Non-fatal warnings (e.g. items with no search results)")
     gcs_uri: str | None
     image_url: str | None
+    country: str = Field(..., description="Normalized country used for this request (defaults to 'us')")
+    currency: str = Field(..., description="Currency derived from `country` (no separate currency field exists — see /analyze docs)")
 
 
 # ---------------------------------------------------------------------------
@@ -250,14 +284,18 @@ async def analyze(request: AnalyzeRequest) -> JSONResponse:
             [l.text for l in ctx.detected_labels],
         )
 
+    country = normalize_country(request.country)
     logger.info(
         "analyze start | gcs_uri=%s image_url=%s image_data_b64_len=%d "
-        "ignore_terms=%d country=%s",
+        "ignore_terms=%d country=%s currency=%s preference_terms=%d shopping_categories=%d",
         request.gcs_uri,
         request.image_url,
         len(request.image_data) if request.image_data else 0,
         len(request.ignore_terms),
-        request.country,
+        country,
+        currency_for_country(country),
+        len(request.preference_terms),
+        len(request.shopping_categories),
     )
     try:
         items, products, warnings = await asyncio.to_thread(
@@ -268,8 +306,10 @@ async def analyze(request: AnalyzeRequest) -> JSONResponse:
             image_mime_type=request.image_mime_type,
             transcript=request.transcript,
             ignore_terms=request.ignore_terms,
-            country=request.country,
+            country=country,
             max_searches=request.max_searches,
+            preference_terms=request.preference_terms,
+            shopping_categories=request.shopping_categories,
         )
     except Exception as exc:
         elapsed = time.monotonic() - start
@@ -295,6 +335,8 @@ async def analyze(request: AnalyzeRequest) -> JSONResponse:
             "warnings": warnings,
             "gcs_uri": request.gcs_uri,
             "image_url": request.image_url,
+            "country": country,
+            "currency": currency_for_country(country),
         },
         headers={"X-Request-Id": req_id},
     )
@@ -339,12 +381,17 @@ async def analyze_stream(request: AnalyzeRequest) -> StreamingResponse:
             [l.text for l in ctx.detected_labels],
         )
 
+    country = normalize_country(request.country)
     logger.info(
-        "analyze/stream start | image_url=%s image_data_b64_len=%d ignore_terms=%d country=%s",
+        "analyze/stream start | image_url=%s image_data_b64_len=%d ignore_terms=%d country=%s currency=%s "
+        "preference_terms=%d shopping_categories=%d",
         request.image_url,
         len(request.image_data) if request.image_data else 0,
         len(request.ignore_terms),
-        request.country,
+        country,
+        currency_for_country(country),
+        len(request.preference_terms),
+        len(request.shopping_categories),
     )
 
     loop = asyncio.get_event_loop()
@@ -359,8 +406,10 @@ async def analyze_stream(request: AnalyzeRequest) -> StreamingResponse:
                 image_data=request.image_data,
                 image_mime_type=request.image_mime_type,
                 ignore_terms=request.ignore_terms,
-                country=request.country,
+                country=country,
                 max_searches=request.max_searches,
+                preference_terms=request.preference_terms,
+                shopping_categories=request.shopping_categories,
             ):
                 asyncio.run_coroutine_threadsafe(queue.put(event), loop)
         except Exception as exc:
@@ -431,9 +480,10 @@ async def identify(request: AnalyzeRequest) -> JSONResponse:
             [l.text for l in ctx.detected_labels],
         )
 
+    country = normalize_country(request.country)
     logger.info(
-        "identify start | image_data_b64_len=%d query=%r country=%s",
-        len(request.image_data), request.query, request.country,
+        "identify start | image_data_b64_len=%d query=%r country=%s currency=%s",
+        len(request.image_data), request.query, country, currency_for_country(country),
     )
     try:
         products, warnings = await asyncio.to_thread(
@@ -441,7 +491,11 @@ async def identify(request: AnalyzeRequest) -> JSONResponse:
             image_data=request.image_data,
             image_mime_type=request.image_mime_type,
             query=request.query,
-            country=request.country,
+            country=country,
+            # /identify is always a single tapped object — ignore the
+            # multi-object dial (max_searches) and use the deployment default,
+            # since only one search runs here regardless of the dial's value.
+            max_results=MAX_RESULTS_PER_ITEM,
         )
     except Exception as exc:
         elapsed = time.monotonic() - start
@@ -457,16 +511,23 @@ async def identify(request: AnalyzeRequest) -> JSONResponse:
         )
 
     elapsed = time.monotonic() - start
+    currency = currency_for_country(country)
     logger.info("identify done in %.2fs | products=%d warnings=%s", elapsed, len(products), warnings)
     try:
-        return JSONResponse(content={"items": [], "products": products, "warnings": warnings}, headers={"X-Request-Id": req_id})
+        return JSONResponse(
+            content={
+                "items": [], "products": products, "warnings": warnings,
+                "country": country, "currency": currency,
+            },
+            headers={"X-Request-Id": req_id},
+        )
     except Exception as enc_err:
         logger.exception(
             "identify response serialization FAILED | %s: %s | products=%s",
             type(enc_err).__name__, enc_err, products,
         )
         return JSONResponse(
-            content={"items": [], "products": [], "warnings": warnings},
+            content={"items": [], "products": [], "warnings": warnings, "country": country, "currency": currency},
             status_code=200,
             headers={"X-Request-Id": req_id},
         )

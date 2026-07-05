@@ -142,7 +142,7 @@ class VideoNotifier extends Notifier<VideoState> {
     if (s is! VideoLoaded) return;
 
     final user    = ref.read(authStateProvider).value;
-    final profile = ref.read(profileProvider).value ?? const UserProfile();
+    final profile = ref.read(profileProvider).valueOrNull ?? const UserProfile();
     if (user == null) return;
 
     final thumbnail = s.thumbnail;

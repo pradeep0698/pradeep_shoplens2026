@@ -11,7 +11,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +19,8 @@ from cachetools import TTLCache
 from google.cloud import storage as gcs
 
 import requests as _req
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from google import genai
 from google.genai import types
 from PIL import Image
@@ -30,15 +32,32 @@ _LOCATION     = os.environ.get("LOCATION", "us-central1")
 _DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro")
 _GCS_LENS_BUCKET        = os.environ.get("GCS_LENS_BUCKET", "")
 _SERPAPI_KEY            = os.environ.get("SERPAPI_KEY", "")
-_LENS_TIMEOUT           = int(os.environ.get("LENS_TIMEOUT_SECONDS", "8"))
-# Skip Gemini description on /identify by default — Lens works fine without it
-# and Gemini adds 3-6s to every tap. Set to "false" to re-enable.
-_IDENTIFY_SKIP_GEMINI   = os.environ.get("IDENTIFY_SKIP_GEMINI", "true").lower() not in ("0", "false", "no")
+_LENS_TIMEOUT           = int(os.environ.get("LENS_TIMEOUT_SECONDS", "60"))
+# If Lens hasn't answered /identify by this mark, start Gemini (for a search
+# query) concurrently with the still-running Lens call rather than waiting
+# out the full LENS_TIMEOUT_SECONDS before ever trying a fallback.
+_LENS_HEDGE_DELAY_SECONDS = float(os.environ.get("LENS_HEDGE_DELAY_SECONDS", "25"))
+# Hard kill-switch for the /identify Gemini+Shopping hedge (outage / cost
+# control) — independent of how well the adaptive hedge itself behaves. Only
+# ever spent once Lens is already past _LENS_HEDGE_DELAY_SECONDS, so leaving
+# it enabled costs nothing on the common fast-Lens path. Set to "true" to
+# force /identify back to Lens-only, no hedge, ever.
+_IDENTIFY_SKIP_GEMINI   = os.environ.get("IDENTIFY_SKIP_GEMINI", "false").lower() not in ("0", "false", "no")
 
 # Hard ceiling on SerpAPI (Lens) calls per analyze_media() run, regardless of
 # what the caller requests — protects the shared SerpAPI quota from a single
 # busy frame. Per-user profile preference (1-5) is clamped against this.
 MAX_SEARCHES_PER_RUN = 5
+
+# Deployment-level cap on how many results come back per item. The user's 1-5
+# "search results per scan" profile dial only limits results-per-item when a
+# run is searching MULTIPLE items (keeps a busy scan from flooding the
+# shopper with cards); a single-item run — including every /identify tap,
+# which is always exactly one object — ignores the dial and uses this
+# instead, since only one search call runs either way. SerpAPI is billed per
+# search, not per result row, so there's no cost reason to cap a lone search
+# down to 1-5 results.
+MAX_RESULTS_PER_ITEM = int(os.environ.get("MAX_RESULTS_PER_ITEM", "15"))
 
 _tls = threading.local()
 
@@ -49,12 +68,156 @@ def clamp_max_searches(requested: int | None) -> int:
     return max(1, min(int(requested), MAX_SEARCHES_PER_RUN))
 
 
+def _results_per_item(item_count: int, max_searches: int | None) -> int:
+    """How many results to fetch for each item being searched this run.
+    Multi-item runs stay dial-limited (clamped to MAX_RESULTS_PER_ITEM as a
+    safety ceiling); a single-item run uses the deployment default directly,
+    ignoring the dial."""
+    if item_count > 1:
+        return min(clamp_max_searches(max_searches), MAX_RESULTS_PER_ITEM)
+    return MAX_RESULTS_PER_ITEM
+
+
+# Currency has no dedicated field anywhere in the system — it's derived from
+# country so a default/consistent value is always available without adding a
+# new profile field. Mirrors the 19-country dropdown in
+# mobile/lib/presentation/widgets/profile_form.dart. SerpAPI's google_shopping
+# and google_lens engines have no currency param of their own — pricing already
+# follows the `gl` (country) param, so this is purely a display/consistency
+# label, not something that changes what SerpAPI returns.
+_COUNTRY_CURRENCY: dict[str, str] = {
+    "us": "USD", "gb": "GBP", "ca": "CAD", "au": "AUD", "de": "EUR",
+    "fr": "EUR", "in": "INR", "jp": "JPY", "br": "BRL", "mx": "MXN",
+    "es": "EUR", "it": "EUR", "nl": "EUR", "se": "SEK", "sg": "SGD",
+    "kr": "KRW", "ae": "AED", "za": "ZAR", "nz": "NZD", "ie": "EUR",
+}
+DEFAULT_COUNTRY = "us"
+DEFAULT_CURRENCY = "USD"
+
+
+def normalize_country(country: str | None) -> str:
+    """Empty/missing country defaults to 'us' — same default as
+    AnalyzeRequest.country's Pydantic default, applied defensively here too
+    since a client can send an empty string rather than omitting the field."""
+    value = (country or "").strip().lower()
+    return value or DEFAULT_COUNTRY
+
+
+def currency_for_country(country: str | None) -> str:
+    return _COUNTRY_CURRENCY.get(normalize_country(country), DEFAULT_CURRENCY)
+
+
 def _is_serp_quota_error(data: dict) -> bool:
     err = data.get("error", "").lower()
     return "run out of searches" in err or "ran out of searches" in err
 
 
-_session = _req.Session()
+# A bare requests.Session retries nothing — one dropped connection or 5xx
+# blip fails the whole call. SerpAPI GETs are idempotent, so retrying is
+# safe. Deliberately NOT retrying on read-timeout: a call that already read
+# for the full timeout with no response is the slow-server case, not a
+# blip — retrying it would double the wait (e.g. 60s -> 120s) for a call
+# that's likely to time out again. Only fast-failing connect errors and
+# 429/5xx responses get retried.
+#
+# `read=False` (the literal bool, NOT `0` or `None`) is required here, not
+# just cosmetic — verified empirically, since this bit urllib3 in production
+# on 2026-07-03. `read=0`/`read=None` still route a read-timeout through
+# urllib3's retry-accounting path, which re-raises it wrapped as
+# `requests.exceptions.ConnectionError` (via urllib3's MaxRetryError) even
+# though zero retries actually happen. That silently breaks any caller
+# catching `requests.exceptions.Timeout` specifically (e.g. _google_lens's
+# `_tls.lens_timed_out` flag, which gates the /identify recovery path) —
+# those calls no longer matched and always fell through to the generic
+# exception branch. Only `read=False` makes urllib3 re-raise the original,
+# unwrapped exception instead of going through the retry/wrap machinery.
+def _build_session() -> _req.Session:
+    retry = Retry(
+        total=2, connect=2, read=False, status=2,
+        backoff_factor=0.3,
+        status_forcelist=frozenset({429, 502, 503, 504}),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    session = _req.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+_session = _build_session()
+
+# A single `timeout=N` in requests applies N to BOTH the connect and read
+# phases independently — so a hung TCP handshake could previously wait the
+# full LENS_TIMEOUT_SECONDS (up to 60s) before even getting to the read
+# phase's own up-to-60s wait. Splitting the two caps connect failures at 5s
+# instead, and (paired with the tracing below) lets us tell a dead-connection
+# failure apart from a server that connected fine but never answered — which
+# is what actually happened in the 2026-07-03 SerpAPI incident this was added
+# for (that one was purely a read-phase hang; connect succeeded immediately).
+_SERP_CONNECT_TIMEOUT = 5
+
+
+def _serp_get(url: str, params: dict, read_timeout: float, label: str) -> dict:
+    """Shared SerpAPI GET: connect/read timeout split, structured before/after
+    tracing (api_key masked), and a readable log line when SerpAPI's response
+    isn't valid JSON instead of an opaque JSONDecodeError downstream."""
+    safe_params = {k: v for k, v in params.items() if k != "api_key"}
+    t0 = time.monotonic()
+    try:
+        resp = _session.get(url, params=params, timeout=(_SERP_CONNECT_TIMEOUT, read_timeout))
+    except Exception as exc:
+        logger.warning(
+            "SerpAPI [%s] request failed: type=%s elapsed=%.2fs params=%s error=%s",
+            label, type(exc).__name__, time.monotonic() - t0, safe_params, exc,
+        )
+        raise
+    elapsed = time.monotonic() - t0
+    try:
+        data = resp.json()
+    except ValueError:
+        logger.warning(
+            "SerpAPI [%s] non-JSON response: status=%s elapsed=%.2fs body=%r",
+            label, resp.status_code, elapsed, resp.text[:300],
+        )
+        raise
+    logger.info(
+        "SerpAPI [%s] status=%s elapsed=%.2fs params=%s",
+        label, resp.status_code, elapsed, safe_params,
+    )
+    return data
+
+
+def _probe_serp_quota() -> bool:
+    """Check SerpAPI quota via the account endpoint (fast, no search cost).
+    Returns True if quota is available, False if exhausted.
+    Called after a Lens timeout to avoid chaining Gemini + Shopping hangs
+    when the real cause is quota exhaustion."""
+    try:
+        data = _serp_get(
+            "https://serpapi.com/account",
+            {"api_key": _SERPAPI_KEY},
+            read_timeout=3,
+            label="account",
+        )
+        if "error" in data:
+            # e.g. an invalid/revoked key — distinct from quota exhaustion.
+            # `total_searches_left` is absent from this response shape, so
+            # falling through to the .get(..., default) below would silently
+            # misreport this as "quota OK — 1 searches left".
+            logger.warning("SerpAPI quota probe returned an error: %s — assuming quota OK", data["error"])
+            return True
+        remaining = data.get("total_searches_left", 1)
+        if remaining == 0:
+            logger.warning("SerpAPI quota exhausted — 0 searches left")
+            _tls.serp_quota_exhausted = True
+            return False
+        logger.info("SerpAPI quota probe OK — %d searches left", remaining)
+        return True
+    except Exception as exc:
+        logger.warning("SerpAPI quota probe failed: %s — assuming quota OK", exc)
+        return True
 
 # Cache for /identify results — keyed on perceptual hash (8x8 avg hash) + country.
 # Perceptual hash is robust to minor crop/scale differences from live scan taps
@@ -106,6 +269,7 @@ _PROMPT = (
     '[{{"name": "Mid-century modern white wooden dining chair", "box": [200, 150, 750, 500]}},\n'
     ' {{"name": "Nike gold finish gooseneck kitchen faucet", "box": [50, 600, 400, 900]}}]\n\n'
     "{ignore_block}"
+    "{preference_block}"
     "ONLY include items from these categories: clothing, footwear, accessories "
     "(bags, watches, jewellery, sunglasses), furniture, home decor, kitchenware, "
     "electronics, sports equipment, books, stationery.\n\n"
@@ -195,6 +359,100 @@ def _build_ignore_block(ignore_terms: list[str] | None) -> str:
         "Do not include any item that matches or clearly refers to these ignored "
         f"terms: {ignored}.\n\n"
     )
+
+
+def _build_preference_block(
+    preference_terms: list[str] | None,
+    shopping_categories: list[str] | None,
+) -> str:
+    """User profile preferences/categories bias what Gemini lists FIRST — this
+    matters because analyze_media() only spends its limited SerpAPI-search
+    budget on the first `max_searches` items, so ordering directly affects
+    which items actually get product matches. Never excludes anything; a
+    non-preferred item is still a valid product, just not prioritized."""
+    prefs = _normalize_terms(preference_terms)
+    cats = _normalize_terms(shopping_categories)
+    if not prefs and not cats:
+        return ""
+    lines = ["This user has stated shopping preferences — use them to ORDER your "
+             "results (preferred items first in the returned array), but still "
+             "include every qualifying item you find, preferred or not:\n"]
+    if cats:
+        lines.append(f"- Preferred categories: {', '.join(cats)}\n")
+    if prefs:
+        lines.append(f"- Preferred styles/brands/materials: {', '.join(prefs)}\n")
+    lines.append("\n")
+    return "".join(lines)
+
+
+def _term_matches(term: str, name: str) -> bool:
+    """Case-insensitive substring match with naive singular/plural tolerance —
+    a preference term typed as "laptops" should match an item name containing
+    "laptop" and vice versa. Handles the common English trailing-s plural
+    without pulling in a stemming library; not exhaustive (won't handle
+    "watches" -> "watch"-style -es plurals), but covers the common case.
+
+    Also tolerant of compound-word spacing: a preference typed as "Smart
+    Watch" must still match an item name containing "smartwatch" (Gemini's
+    one-word phrasing), and vice versa — found via a real preference-ranking
+    miss where "smartwatch" scored 0 against a "Smart Watch" preference and
+    lost out to items matching only a generic category keyword. Comparing
+    with whitespace stripped from both sides catches this without needing a
+    dictionary of known compounds."""
+    term = term.lower()
+    if term in name:
+        return True
+    if term.endswith("s") and term[:-1] in name:
+        return True
+    if not term.endswith("s") and (term + "s") in name:
+        return True
+    term_compact = term.replace(" ", "")
+    if term_compact and term_compact in name.replace(" ", ""):
+        return True
+    return False
+
+
+def _preference_score(item: dict, preference_terms: list[str], shopping_categories: list[str]) -> int:
+    """Higher score sorts first. Used to pick which detected items get a Lens
+    search when there are more items than max_searches allows — without this,
+    truncation is an arbitrary function of Gemini's listing order.
+
+    Additive, not lexicographic: a category hit and each matching preference
+    term each contribute one point. A previous version used a (category_hit,
+    preference_hit) tuple sort key, which meant ANY category match — even with
+    zero preference matches — ranked above EVERY item with a preference match
+    but no category match. That silently made an explicit, specific user
+    preference (e.g. "Smart watch") powerless against a generic category
+    match (e.g. "Electronics" catching a laptop), which is backwards — a
+    direct preference-term hit is at least as strong a signal as a category
+    hit. Summing lets an item that matches on both outrank one that matches
+    on only one, without either dimension being able to unconditionally
+    dominate the other.
+
+    Category matching goes through _CATEGORY_KEYWORDS (same keyword lists
+    _infer_category uses) rather than a literal substring check — a category
+    name like "Furniture" never appears verbatim in an item name like "wooden
+    dining chair", so keyword lookup is required for this to match anything."""
+    name = item["name"].lower()
+    category_hit = any(
+        kw in name for cat in shopping_categories for kw in _CATEGORY_KEYWORDS.get(cat, [])
+    )
+    preference_matches = sum(1 for term in preference_terms if _term_matches(term, name))
+    return (1 if category_hit else 0) + preference_matches
+
+
+def _prioritize_items(
+    items_raw: list[dict],
+    preference_terms: list[str] | None,
+    shopping_categories: list[str] | None,
+) -> list[dict]:
+    prefs = _normalize_terms(preference_terms)
+    cats = _normalize_terms(shopping_categories)
+    if not prefs and not cats:
+        return items_raw
+    # Stable sort — preserves Gemini's relative ordering within each score tier.
+    # Negate the score since sorted() is ascending and we want highest-first.
+    return sorted(items_raw, key=lambda item: -_preference_score(item, prefs, cats))
 
 
 def _parse_items_with_boxes(text: str) -> list[dict]:
@@ -327,9 +585,9 @@ def _delete_gcs(url: str) -> None:
 def _search_shopping(query: str, country: str = "us", max_results: int = 5) -> list[dict]:
     """Text-based Google Shopping search via SerpAPI. Used as Lens fallback."""
     try:
-        resp = _session.get(
+        data = _serp_get(
             "https://serpapi.com/search",
-            params={
+            {
                 "engine":  "google_shopping",
                 "q":       query,
                 "api_key": _SERPAPI_KEY,
@@ -337,29 +595,34 @@ def _search_shopping(query: str, country: str = "us", max_results: int = 5) -> l
                 "hl":      "en",
                 "num":     max_results,
             },
-            timeout=10,
+            read_timeout=10,
+            label="shopping",
         )
-        data = resp.json()
         if "error" in data:
             logger.warning("Shopping error: %s", data["error"])
             if _is_serp_quota_error(data):
                 _tls.serp_quota_exhausted = True
             return []
-        results = data.get("shopping_results", [])
-        products = []
-        for r in results[:max_results]:
+        candidates = []
+        for r in data.get("shopping_results", []):
             name   = r.get("title", "")
             seller = r.get("source", "")
-            price  = _parse_price(str(r.get("extracted_price") or r.get("price", "0")))
-            products.append({
+            link   = r.get("link") or r.get("product_link") or ""
+            if not name or not link:
+                continue
+            if not _is_product_name(name) or not _is_shopping_url(link):
+                continue
+            price = _parse_price(str(r.get("extracted_price") or r.get("price", "0")))
+            candidates.append({
                 "name":         _clean_product_name(name, seller),
                 "price":        price,
                 "image_url":    r.get("thumbnail", ""),
-                "purchase_url": r.get("link") or r.get("product_link") or "",
+                "purchase_url": link,
                 "seller":       seller,
                 "product_id":   _make_product_id(seller, name),
                 "category":     _infer_category(name, seller),
             })
+        products = _rank_by_quality(candidates, max_results)
         if products:
             logger.info("Shopping fallback matched '%s' → %d result(s)", query, len(products))
         else:
@@ -424,36 +687,76 @@ def _parse_price(raw: str) -> float:
         return 0.0
 
 
-_ARTICLE_PATH_RE = re.compile(
+_NON_PRODUCT_PATH_RE = re.compile(
     r"/(article|articles|blog|blogs|news|story|stories|post|posts|"
-    r"editorial|guide|guides|review|reviews|how-to|listicle|magazine)/",
+    r"editorial|guide|guides|review|reviews|how-to|listicle|magazine|"
+    r"questionandanswer|question-and-answer|faq|qa|support|help|"
+    r"shop|sch)/",
     re.IGNORECASE,
+)
+
+# eBay's own search-keyword query param — a /sch/ or bare-query hit with this
+# present is a search-results page, not a single listing, even when the path
+# itself looks plausible.
+_SEARCH_QUERY_PARAM_RE = re.compile(r"(?:^|[?&])(_nkw|q|keywords|search)=", re.IGNORECASE)
+
+# Found 2026-07-04: a real "SORRY, THIS ITEM IS SOLD!" listing passed the
+# existing checks (no "?", under 10 words, under 100 chars) and was returned
+# to a shopper as if it were purchasable.
+_UNAVAILABLE_PHRASES = (
+    "sold out", "item is sold", "no longer available", "out of stock",
+    "currently unavailable", "listing has ended", "item not found",
 )
 
 
 def _is_product_name(name: str) -> bool:
-    """Return False if the name looks like a page title or question rather than a product."""
+    """Return False if the name looks like a page title, question, or a
+    listing that isn't actually purchasable (sold out, no longer available)."""
     if "?" in name:
         return False
     if len(name.split()) > 10:
         return False
     if len(name) > 100:
         return False
+    lowered = name.lower()
+    if any(phrase in lowered for phrase in _UNAVAILABLE_PHRASES):
+        return False
     return True
 
 
 def _is_shopping_url(url: str) -> bool:
-    """Return False if the URL is a social media, content platform, or article link."""
+    """Return False if the URL is a social media, content platform, article,
+    Q&A/support page, or a search/category-listing page rather than a single
+    product. Found 2026-07-04: a Galaxus Q&A page
+    (.../questionandanswer/...) and an eBay seller-storefront search
+    (.../shop/...?_nkw=...) both passed the old, narrower check."""
     try:
         parsed = urllib.parse.urlparse(url)
         host   = parsed.netloc.lower().lstrip("www.")
         if any(host == d or host.endswith("." + d) for d in _BLOCKED_DOMAINS):
             return False
-        if _ARTICLE_PATH_RE.search(parsed.path):
+        if _NON_PRODUCT_PATH_RE.search(parsed.path):
+            return False
+        if _SEARCH_QUERY_PARAM_RE.search(parsed.query):
             return False
         return True
     except Exception:
         return True
+
+
+def _rank_by_quality(candidates: list[dict], max_results: int) -> list[dict]:
+    """Priced results (price > 0) first; unpriced ones (SerpAPI gave us no
+    price data — a real listing, just missing a number) only fill remaining
+    slots. Found 2026-07-04: a request with 15 valid candidates but only 3
+    priced ones still showed all 12 $0.00 results, since the old code just
+    took SerpAPI's own order. Preserves SerpAPI's relative order within each
+    tier — this only re-groups by price, it doesn't re-rank within a tier."""
+    priced   = [c for c in candidates if c["price"] > 0]
+    unpriced = [c for c in candidates if c["price"] <= 0]
+    selected = priced[:max_results]
+    if len(selected) < max_results:
+        selected += unpriced[:max_results - len(selected)]
+    return selected
 
 
 def _clean_product_name(name: str, seller: str) -> str:
@@ -472,6 +775,12 @@ def _clean_product_name(name: str, seller: str) -> str:
     # "Product name by Seller"
     cleaned = re.sub(rf"\s+by\s+{s}\s*$", "", name, flags=re.IGNORECASE).strip()
     return cleaned if cleaned else name
+
+
+# Appended to every Lens visual_matches query to bias results toward
+# purchasable listings (with a price and a link) instead of general visual
+# lookalikes — informational pages, image galleries, etc.
+_LENS_SHOPPING_HINT = "this is for shopping, include price and links"
 
 
 def _google_lens(image_url: str, query: str = "", country: str = "us", max_results: int = 5) -> list[dict]:
@@ -498,22 +807,19 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
         "gl":       country or "us",
         "no_cache": "true",
     }
-    if query:
-        base_params["q"] = query
+    base_params["q"] = f"{query} {_LENS_SHOPPING_HINT}" if query else _LENS_SHOPPING_HINT
 
     def _fetch(type_value: str) -> dict:
-        resp = _session.get(
+        data = _serp_get(
             "https://serpapi.com/search",
-            params={**base_params, "type": type_value},
-            timeout=_LENS_TIMEOUT,
+            {**base_params, "type": type_value},
+            read_timeout=_LENS_TIMEOUT,
+            label=f"lens:{type_value}",
         )
-        data = resp.json()
         if "error" in data:
             logger.warning("Lens [%s] error: %s", type_value, data["error"])
             if _is_serp_quota_error(data):
                 _tls.serp_quota_exhausted = True
-        else:
-            logger.info("Lens [%s] keys: %s", type_value, list(data.keys()))
         return data
 
     def _build_result(r: dict, price: float) -> dict:
@@ -531,15 +837,18 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
 
     try:
         data = _fetch("visual_matches")
+    except _req.exceptions.Timeout as exc:
+        logger.warning("Lens visual_matches fetch failed: %s", exc)
+        _tls.lens_timed_out = True
+        data = {}
     except Exception as exc:
         logger.warning("Lens visual_matches fetch failed: %s", exc)
         data = {}
 
+    candidates: list[dict] = []
     for r in data.get("visual_matches", []):
-        if len(results) >= MAX:
-            break
-        name      = r.get("title", "")
-        link      = r.get("link", "")
+        name = r.get("title", "")
+        link = r.get("link", "")
         if not name or not link:
             continue
         if not _is_product_name(name) or not _is_shopping_url(link):
@@ -548,8 +857,14 @@ def _google_lens(image_url: str, query: str = "", country: str = "us", max_resul
         price_val = price_obj.get("extracted_value", 0) if isinstance(price_obj, dict) else 0
         price     = _parse_price(str(price_val)) if price_val else 0.0
         logger.info("Lens match: '%s' price=%.2f url=%s", name, price, link)
-        results.append(_build_result(r, price))
-    logger.info("Lens (visual_matches): %d result(s)", len(results))
+        candidates.append(_build_result(r, price))
+
+    results  = _rank_by_quality(candidates, MAX)
+    n_priced = sum(1 for c in candidates if c["price"] > 0)
+    logger.info(
+        "Lens (visual_matches): %d candidate(s) (%d priced, %d unpriced) -> %d selected",
+        len(candidates), n_priced, len(candidates) - n_priced, len(results),
+    )
 
     if not results:
         logger.warning("Lens: no usable results for %s", image_url)
@@ -586,12 +901,46 @@ def _perceptual_cache_key(img_bytes: bytes, country: str) -> str:
     return format(int(bits, 2), "016x") + ":" + country
 
 
+# Shared, long-lived pool for identify_crop's Lens/Gemini/Shopping hedge. Not
+# a per-call `with ThreadPoolExecutor()` — exiting that context calls
+# shutdown(wait=True), which would block identify_crop's return on a
+# still-running (up to 60s) Lens future even after a faster result already
+# resolved things. Threads here are reused across requests AND across roles
+# (lens/gemini/shopping), so every callable submitted to this pool must reset
+# its own _tls flags on entry — see _lens_worker/_shopping_worker below.
+_identify_pool = ThreadPoolExecutor(
+    max_workers=int(os.environ.get("IDENTIFY_POOL_WORKERS", "30")),
+    thread_name_prefix="identify-hedge",
+)
+
+
+def _lens_worker(gcs_url: str, query: str, country: str, max_results: int) -> tuple[list[dict], bool, bool]:
+    """Runs _google_lens on a pool thread and captures the _tls flags it sets
+    from inside that same thread before returning them explicitly — _tls is
+    threading.local(), so identify_crop's calling thread cannot see flags a
+    different (pool) thread set. Resets both flags on entry since pool
+    threads are reused across requests and roles."""
+    _tls.lens_timed_out = False
+    _tls.serp_quota_exhausted = False
+    products = _google_lens(gcs_url, query=query, country=country, max_results=max_results)
+    return products, getattr(_tls, "lens_timed_out", False), getattr(_tls, "serp_quota_exhausted", False)
+
+
+def _shopping_worker(query: str, country: str, max_results: int) -> tuple[list[dict], bool]:
+    """Same rationale as _lens_worker — only needed when Shopping runs on a
+    pool thread concurrently with a still-in-flight Lens call."""
+    _tls.serp_quota_exhausted = False
+    products = _search_shopping(query, country=country, max_results=max_results)
+    return products, getattr(_tls, "serp_quota_exhausted", False)
+
+
 def identify_crop(
     *,
     image_data: str,
     image_mime_type: str | None = None,
     query: str = "",
     country: str = "us",
+    max_results: int = MAX_RESULTS_PER_ITEM,
 ) -> tuple[list[dict], list[str]]:
     """Identify a pre-cropped image via Gemini description → GCS → Google Lens.
     Skips Gemini bounding-box detection (region already selected), but uses Gemini
@@ -602,9 +951,11 @@ def identify_crop(
     _t_total_start = time.monotonic()
     _warnings: list[str] = []
     _tls.serp_quota_exhausted = False
+    country = normalize_country(country)
+    logger.info("PROFILE | country=%s currency=%s", country, currency_for_country(country))
     img_bytes = base64.b64decode(image_data)
 
-    cache_key = _perceptual_cache_key(img_bytes, country or "us")
+    cache_key = _perceptual_cache_key(img_bytes, country)
     if cache_key in _identify_cache:
         cached_products, cached_warnings = _identify_cache[cache_key]
         logger.info(
@@ -621,48 +972,137 @@ def identify_crop(
     img.save(buf, format="JPEG", quality=85)
     jpeg_bytes = buf.getvalue()
 
-    _t_describe_upload_start = time.monotonic()
-    if _IDENTIFY_SKIP_GEMINI:
-        # Skip Gemini description — saves 3-6s per tap. Lens still works well
-        # on the image alone; set IDENTIFY_SKIP_GEMINI=false to re-enable.
-        logger.info("identify_crop: Gemini description skipped (IDENTIFY_SKIP_GEMINI=true)")
-        gcs_url = _upload_gcs(jpeg_bytes)
-        gemini_query = ""
-    else:
-        # Gemini description and GCS upload are independent — run concurrently.
-        with ThreadPoolExecutor(max_workers=2) as _pool:
-            _describe_future = _pool.submit(_describe_crop, jpeg_bytes)
-            _upload_future = _pool.submit(_upload_gcs, jpeg_bytes)
-            gemini_query = _describe_future.result()
-            gcs_url = _upload_future.result()
-    _t_describe_upload = time.monotonic() - _t_describe_upload_start
-
-    effective_query = gemini_query or query
+    _t_upload_start = time.monotonic()
+    gcs_url = _upload_gcs(jpeg_bytes)
+    _t_upload = time.monotonic() - _t_upload_start
 
     if not gcs_url:
         msg = "identify_crop: GCS upload failed — visual search skipped"
         logger.warning(msg)
         _warnings.append(msg)
         logger.info(
-            "TIMING | total=%.2fs describe_and_upload=%.2fs lens=0.00s shopping=0.00s",
-            time.monotonic() - _t_total_start, _t_describe_upload,
+            "TIMING | total=%.2fs upload=%.2fs lens=0.00s gemini=0.00s shopping=0.00s "
+            "hedge_triggered=False lens_timed_out=False quota_exhausted=False",
+            time.monotonic() - _t_total_start, _t_upload,
         )
         return [], _warnings
 
     # Cleanup handled by the bucket's 1-day lifecycle rule, not an explicit
     # delete here, so it's off the request's critical path.
-    _t_lens_start = time.monotonic()
-    products = _google_lens(gcs_url, query=effective_query, country=country)
-    _t_lens = time.monotonic() - _t_lens_start
+    #
+    # Adaptive hedge: kick off Lens immediately and don't block on it
+    # unconditionally. If it hasn't answered by _LENS_HEDGE_DELAY_SECONDS,
+    # start Gemini (for a search query) concurrently with the still-running
+    # Lens call instead of waiting out the full LENS_TIMEOUT_SECONDS before
+    # ever trying a fallback. Once Gemini has a query, check Lens again — use
+    # it if it answered, otherwise start Shopping too, concurrently with
+    # Lens. Return as soon as any source has usable products.
+    effective_query        = query
+    hedge_triggered         = False
+    shopping_attempted      = False
+    lens_result:     tuple[list[dict], bool, bool] | None = None  # (products, timed_out, quota)
+    shopping_result: tuple[list[dict], bool] | None        = None  # (products, quota)
+    products: list[dict]    = []
+    _t_gemini               = 0.0
+    _t_shopping             = 0.0
 
-    _t_shopping = 0.0
-    if not products and effective_query and _SERPAPI_KEY:
+    _t_lens_start = time.monotonic()
+    lens_future = _identify_pool.submit(_lens_worker, gcs_url, query, country, max_results)
+    done, _pending = wait({lens_future}, timeout=_LENS_HEDGE_DELAY_SECONDS)
+
+    if lens_future in done:
+        # Fast path (the common case) — Lens answered before the hedge mark,
+        # so Gemini is never touched at all.
+        lens_result = lens_future.result()
+        _t_lens = time.monotonic() - _t_lens_start
+        products = lens_result[0]
+    else:
+        can_hedge = (not _IDENTIFY_SKIP_GEMINI) and bool(_SERPAPI_KEY)
+        if can_hedge and not _probe_serp_quota():
+            can_hedge = False
+            logger.warning("identify_crop: skipping Gemini + Shopping hedge — SerpAPI quota exhausted")
+
+        if not can_hedge:
+            # Nothing to overlap Lens's remaining wait with — ride it out to
+            # its own LENS_TIMEOUT_SECONDS cap, same as today.
+            lens_result = lens_future.result()
+            _t_lens = time.monotonic() - _t_lens_start
+            products = lens_result[0]
+        else:
+            hedge_triggered = True
+            logger.info(
+                "identify_crop: Lens still running after %.0fs — starting Gemini hedge",
+                _LENS_HEDGE_DELAY_SECONDS,
+            )
+            _t_gemini_start = time.monotonic()
+            describe_future = _identify_pool.submit(_describe_crop, jpeg_bytes)
+            shopping_future = None
+            gemini_query: str | None = None
+
+            pending = {lens_future, describe_future}
+            while pending:
+                completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for f in completed:
+                    if f is lens_future:
+                        lens_result = f.result()
+                        _t_lens = time.monotonic() - _t_lens_start
+                    elif f is describe_future:
+                        gemini_query = f.result() or ""
+                        _t_gemini = time.monotonic() - _t_gemini_start
+                    elif f is shopping_future:
+                        shopping_result = f.result()
+
+                if lens_result and lens_result[0]:
+                    logger.info("identify_crop: Lens answered during hedge — using Lens result")
+                    break
+                if shopping_result and shopping_result[0]:
+                    logger.info("identify_crop: Shopping hedge answered first — using Shopping result")
+                    break
+                if lens_result is not None and shopping_result is not None:
+                    break  # both resolved, both empty — nothing left to try
+                if (gemini_query is not None and shopping_future is None
+                        and not (lens_result and lens_result[0])):
+                    effective_query = gemini_query or query
+                    if effective_query and _SERPAPI_KEY:
+                        logger.info(
+                            "identify_crop: Gemini hedge → '%s', starting Shopping alongside Lens",
+                            effective_query,
+                        )
+                        _t_shopping_start = time.monotonic()
+                        shopping_future = _identify_pool.submit(
+                            _shopping_worker, effective_query, country, max_results,
+                        )
+                        pending.add(shopping_future)
+                        shopping_attempted = True
+
+            if lens_result and lens_result[0]:
+                products = lens_result[0]
+            elif shopping_result and shopping_result[0]:
+                products = shopping_result[0]
+                _t_shopping = time.monotonic() - _t_shopping_start
+            elif shopping_attempted:
+                _t_shopping = time.monotonic() - _t_shopping_start
+
+            if lens_result is None:
+                # Still running in the background after we returned via a
+                # faster source — this is elapsed time spent waiting, not a
+                # completion time; Lens's own eventual outcome is logged
+                # independently by _google_lens/_serp_get when it finishes.
+                _t_lens = time.monotonic() - _t_lens_start
+
+    lens_timed_out           = lens_result[1] if lens_result else False
+    lens_quota_exhausted     = lens_result[2] if lens_result else False
+    shopping_quota_exhausted = shopping_result[1] if shopping_result else False
+
+    if not products and effective_query and _SERPAPI_KEY and not shopping_attempted:
         logger.info("Lens found nothing — trying Shopping fallback for '%s'", effective_query)
         _t_shopping_start = time.monotonic()
-        products = _search_shopping(effective_query, country=country)
+        products = _search_shopping(effective_query, country=country, max_results=max_results)
+        shopping_quota_exhausted = shopping_quota_exhausted or getattr(_tls, "serp_quota_exhausted", False)
         _t_shopping = time.monotonic() - _t_shopping_start
 
-    if getattr(_tls, "serp_quota_exhausted", False):
+    quota_exhausted = lens_quota_exhausted or shopping_quota_exhausted
+    if quota_exhausted:
         logger.warning("SERP API quota exhausted — no product matches returned")
         _warnings.append("SERP_QUOTA_EXCEEDED")
 
@@ -671,9 +1111,14 @@ def identify_crop(
         logger.warning(msg)
         _warnings.append(msg)
 
+    # Once hedged, lens/gemini/shopping run concurrently, so their durations
+    # can legitimately sum to more than `total` — total is the only
+    # authoritative wall-clock number below.
     logger.info(
-        "TIMING | total=%.2fs describe_and_upload=%.2fs lens=%.2fs shopping=%.2fs",
-        time.monotonic() - _t_total_start, _t_describe_upload, _t_lens, _t_shopping,
+        "TIMING | total=%.2fs upload=%.2fs lens=%.2fs gemini=%.2fs shopping=%.2fs "
+        "hedge_triggered=%s lens_timed_out=%s quota_exhausted=%s",
+        time.monotonic() - _t_total_start, _t_upload, _t_lens, _t_gemini, _t_shopping,
+        hedge_triggered, lens_timed_out, quota_exhausted,
     )
     _identify_cache[cache_key] = (products, _warnings)
     return products, _warnings
@@ -691,6 +1136,8 @@ def analyze_media(
     ignore_terms: list[str] | None = None,
     country: str = "us",
     max_searches: int | None = None,
+    preference_terms: list[str] | None = None,
+    shopping_categories: list[str] | None = None,
 ) -> tuple[list[str], list[dict], list[str]]:
     """Returns (item_names, products, warnings).
 
@@ -700,9 +1147,15 @@ def analyze_media(
     """
     _t_total_start = time.monotonic()
     _warnings: list[str] = []
+    country = normalize_country(country)
     client = _get_client()
     text_part = _PROMPT.format(
         ignore_block=_build_ignore_block(ignore_terms),
+        preference_block=_build_preference_block(preference_terms, shopping_categories),
+    )
+    logger.info(
+        "PROFILE | country=%s currency=%s preference_terms=%s shopping_categories=%s",
+        country, currency_for_country(country), preference_terms or [], shopping_categories or [],
     )
 
     if gcs_video_uri:
@@ -772,10 +1225,17 @@ def analyze_media(
     items_raw = unique_items
 
     # Cap SerpAPI (Lens) calls per run — user-configurable up to MAX_SEARCHES_PER_RUN.
+    # Prioritize items matching the user's preferences/categories BEFORE
+    # truncating, so a busy frame spends its limited quota on what the user
+    # is likely to want rather than on whatever Gemini happened to list first.
     search_limit = clamp_max_searches(max_searches)
     if len(items_raw) > search_limit:
+        items_raw = _prioritize_items(items_raw, preference_terms, shopping_categories)
         logger.info("Capping Lens searches: %d detected → %d (limit=%d)", len(items_raw), search_limit, search_limit)
         items_raw = items_raw[:search_limit]
+
+    results_per_item = _results_per_item(len(items_raw), max_searches)
+    logger.info("Results per item: %d (items=%d, dial=%s)", results_per_item, len(items_raw), max_searches)
 
     # Decode raw image bytes once for cropping
     products: list[dict] = []
@@ -814,12 +1274,13 @@ def analyze_media(
                           "total": time.monotonic() - _t_item_start}
                 return [], item_warnings, False, timing
 
-            # One listing per detected object — total listings == number of
-            # objects searched, matching the user-configured max_searches.
-            # Cleanup handled by the bucket's 1-day lifecycle rule, not an
-            # explicit delete here, so it's off the request's critical path.
+            # Up to results_per_item listings per detected object — dial-capped
+            # when multiple objects are being searched, deployment-capped when
+            # this is the only one. Cleanup handled by the bucket's 1-day
+            # lifecycle rule, not an explicit delete here, so it's off the
+            # request's critical path.
             _t_lens_start = time.monotonic()
-            matched = _google_lens(gcs_url, query=name, country=country, max_results=1)
+            matched = _google_lens(gcs_url, query=name, country=country, max_results=results_per_item)
             _t_lens = time.monotonic() - _t_lens_start
 
             _t_shopping = 0.0
@@ -829,7 +1290,7 @@ def analyze_media(
                 logger.warning("No Lens results for '%s' — trying Shopping fallback", name)
                 if _SERPAPI_KEY:
                     _t_shopping_start = time.monotonic()
-                    matched = _search_shopping(name, country=country, max_results=1)
+                    matched = _search_shopping(name, country=country, max_results=results_per_item)
                     _t_shopping = time.monotonic() - _t_shopping_start
                 if matched:
                     logger.info("Shopping fallback matched '%s' → %d result(s)", name, len(matched))
@@ -906,6 +1367,8 @@ def analyze_media_stream(
     ignore_terms: list[str] | None = None,
     country: str = "us",
     max_searches: int | None = None,
+    preference_terms: list[str] | None = None,
+    shopping_categories: list[str] | None = None,
 ):
     """Generator version of analyze_media's image path, for streaming partial
     results to the client as each item's Lens search completes instead of
@@ -920,8 +1383,16 @@ def analyze_media_stream(
     per-item Lens fan-out, so there's nothing to stream.
     """
     _t_total_start = time.monotonic()
+    country = normalize_country(country)
     client = _get_client()
-    text_part = _PROMPT.format(ignore_block=_build_ignore_block(ignore_terms))
+    text_part = _PROMPT.format(
+        ignore_block=_build_ignore_block(ignore_terms),
+        preference_block=_build_preference_block(preference_terms, shopping_categories),
+    )
+    logger.info(
+        "PROFILE | country=%s currency=%s preference_terms=%s shopping_categories=%s",
+        country, currency_for_country(country), preference_terms or [], shopping_categories or [],
+    )
 
     media_part = _load_image_part(
         image_url=image_url,
@@ -960,7 +1431,10 @@ def analyze_media_stream(
 
     search_limit = clamp_max_searches(max_searches)
     if len(items_raw) > search_limit:
+        items_raw = _prioritize_items(items_raw, preference_terms, shopping_categories)
         items_raw = items_raw[:search_limit]
+
+    results_per_item = _results_per_item(len(items_raw), max_searches)
 
     final_warnings: list[str] = []
 
@@ -973,7 +1447,7 @@ def analyze_media_stream(
             "TIMING (stream) | total=%.2fs gemini=%.2fs items_phase=0.00s items=0",
             time.monotonic() - _t_total_start, _t_gemini,
         )
-        yield {"type": "done", "warnings": final_warnings}
+        yield {"type": "done", "warnings": final_warnings, "country": country, "currency": currency_for_country(country)}
         return
 
     img_bytes = base64.b64decode(image_data)
@@ -998,13 +1472,13 @@ def analyze_media_stream(
             logger.warning(msg)
             item_warnings.append(msg)
             return [], item_warnings, False
-        matched = _google_lens(gcs_url, query=name, country=country, max_results=1)
+        matched = _google_lens(gcs_url, query=name, country=country, max_results=results_per_item)
         if matched:
             logger.info("Lens matched '%s' -> %d result(s)", name, len(matched))
         else:
             logger.warning("No Lens results for '%s' — trying Shopping fallback", name)
             if _SERPAPI_KEY:
-                matched = _search_shopping(name, country=country, max_results=1)
+                matched = _search_shopping(name, country=country, max_results=results_per_item)
             if matched:
                 logger.info("Shopping fallback matched '%s' → %d result(s)", name, len(matched))
             else:
@@ -1044,7 +1518,7 @@ def analyze_media_stream(
         "TIMING (stream) | total=%.2fs gemini=%.2fs items_phase=%.2fs items=%d",
         time.monotonic() - _t_total_start, _t_gemini, time.monotonic() - _t_items_start, len(items_raw),
     )
-    yield {"type": "done", "warnings": final_warnings}
+    yield {"type": "done", "warnings": final_warnings, "country": country, "currency": currency_for_country(country)}
 
 
 def analyze_segment(gcs_video_uri: str, transcript: str) -> list[str]:

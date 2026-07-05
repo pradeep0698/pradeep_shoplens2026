@@ -28,6 +28,7 @@ class UserProfile with _$UserProfile {
     @Default([]) List<String> ignoreTerms,
     @Default(defaultMaxSearchesPerRun) int maxSearchesPerRun,
     @Default(false) bool voiceOnboardingSeen,
+    @Default('English') String voiceLanguage,
   }) = _UserProfile;
 
   // Field names must match existing Firestore UserProfiles documents exactly
@@ -42,6 +43,7 @@ class UserProfile with _$UserProfile {
         ignoreTerms:         List<String>.from(data['ignore_terms']        ?? []),
         maxSearchesPerRun:   clampMaxSearchesPerRun(data['max_searches_per_run'] as int?),
         voiceOnboardingSeen: data['voice_onboarding_seen'] as bool? ?? false,
+        voiceLanguage:       data['voice_language'] as String? ?? 'English',
       );
 
   static Map<String, dynamic> toFirestore(UserProfile p) => {
@@ -55,5 +57,6 @@ class UserProfile with _$UserProfile {
         'ignore_terms':          p.ignoreTerms,
         'max_searches_per_run':  p.maxSearchesPerRun,
         'voice_onboarding_seen': p.voiceOnboardingSeen,
+        'voice_language':        p.voiceLanguage,
       };
 }

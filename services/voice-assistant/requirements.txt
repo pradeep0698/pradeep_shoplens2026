@@ -1,5 +1,5 @@
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
+fastapi==0.138.1
+uvicorn[standard]==0.49.0
 # Pinned exactly (not >=): _build_setup_json in live_session.py depends on
 # the private google.genai._live_converters module's internal shape, which
 # could change without notice on a version bump.

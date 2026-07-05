@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 import profile_store
 from live_session import (
+    SUPPORTED_LANGUAGES,
     _SESSION_MAX_SECONDS,
     SessionState,
     apply_ready_to_finalize,
@@ -57,9 +58,11 @@ app = FastAPI(
         "`Authorization: Bearer {token}` header. Obtain a token via `user.getIdToken()` in the "
         "Firebase Auth SDK.\n\n"
         "**Session flow:**\n"
-        "1. `POST /voice/session/start` — create session, get `session_id` and WebSocket URL\n"
+        "1. `POST /voice/session/start` — create session, get `session_id` and WebSocket URL "
+        "(pass `resume_session_id` to resume a recently-disconnected session instead of starting fresh)\n"
         "2. Connect to `wss://{host}/voice/session/{session_id}/stream` — real-time voice exchange\n"
-        "3. `POST /voice/session/finalize` — commit confirmed preference changes to Firestore\n\n"
+        "3. `POST /voice/session/finalize` — commit confirmed preference changes to Firestore, or "
+        "`POST /voice/session/cancel` — discard the session without saving\n\n"
         "**WebSocket note:** The `/voice/session/{session_id}/stream` WebSocket endpoint is not "
         "testable via HTTP clients. Use the mobile app or a WebSocket client."
     ),
@@ -145,6 +148,20 @@ class SessionStartRequest(BaseModel):
             "`'search'` for voice-driven product search within an active shopping session."
         ),
     )
+    language: str = Field(
+        "English",
+        description="Display name from SUPPORTED_LANGUAGES (e.g. 'Spanish'). Unknown values fall back to 'English'.",
+    )
+    resume_session_id: str | None = Field(
+        None,
+        description=(
+            "If set and the session is still within its post-disconnect grace "
+            "period and owned by this user, resumes it (reusing its transcript/"
+            "latest_patch) instead of starting a brand-new session. Falls back "
+            "silently to a fresh session if the id is missing/expired/not owned "
+            "by the caller — resume is always best-effort."
+        ),
+    )
 
 
 class UserProfile(BaseModel):
@@ -166,6 +183,10 @@ class SessionStartResponse(BaseModel):
             "When false, clients must use the WS proxy regardless of platform/build flags."
         ),
     )
+
+
+class SessionCancelRequest(BaseModel):
+    session_id: str = Field(..., description="Session ID from /voice/session/start")
 
 
 class SessionEventRequest(BaseModel):
@@ -248,9 +269,20 @@ async def start_session(http_request: Request, body: SessionStartRequest = Sessi
     start = time.monotonic()
 
     uid = _require_uid(http_request)
-    existing_profile = profile_store.get_profile(uid)
-    mode = body.mode if body.mode == "search" else "preferences"
-    session = await session_registry.create(uid=uid, existing_profile=existing_profile, mode=mode)
+
+    session = None
+    if body.resume_session_id:
+        candidate = await session_registry.get(body.resume_session_id)
+        if candidate is not None and candidate.uid == uid:
+            candidate.disconnected_at = None
+            session = candidate
+            logger.info("voice session %s resumed (uid=%s)", session.session_id, uid)
+
+    if session is None:
+        existing_profile = profile_store.get_profile(uid)
+        mode = body.mode if body.mode == "search" else "preferences"
+        language = body.language if body.language in SUPPORTED_LANGUAGES else "English"
+        session = await session_registry.create(uid=uid, existing_profile=existing_profile, mode=mode, language=language)
 
     elapsed = time.monotonic() - start
     logger.info("voice session start uid=%s session_id=%s in %.2fs", uid, session.session_id, elapsed)
@@ -258,7 +290,10 @@ async def start_session(http_request: Request, body: SessionStartRequest = Sessi
     response = SessionStartResponse(
         session_id=session.session_id,
         ws_url=f"/voice/session/{session.session_id}/stream",
-        profile=existing_profile,
+        # session.existing_profile (not the local `existing_profile` var above)
+        # since that local is only assigned on the fresh-session branch — a
+        # resumed session must report its own already-set profile instead.
+        profile=session.existing_profile,
         direct_connect_allowed=os.environ.get("VOICE_DIRECT_CONNECT_ENABLED", "false").lower() == "true",
     )
     return JSONResponse(content=response.model_dump(), headers={"X-Request-Id": req_id})
@@ -286,6 +321,35 @@ async def session_event(request: SessionEventRequest, http_request: Request) -> 
         "voice session event uid=%s session_id=%s event_type=%s", uid, request.session_id, request.event_type,
     )
     return JSONResponse(content={"status": "received"}, headers={"X-Request-Id": req_id})
+
+
+@app.post(
+    "/voice/session/cancel",
+    tags=["Voice Session"],
+    summary="Cancel a voice session",
+    description=(
+        "Explicitly ends a voice session without saving anything — deletes the "
+        "in-memory session immediately rather than leaving it in the resumable "
+        "post-disconnect grace period. Call this when the user taps Cancel/"
+        "closes the assistant sheet without confirming, as distinct from a "
+        "dropped connection (which stays resumable — see resume_session_id on "
+        "/voice/session/start).\n\n"
+        "**Requires:** `Authorization: Bearer {firebase_id_token}`"
+    ),
+    responses={
+        200: {"description": "Session cancelled (or already gone — idempotent)"},
+        401: {"description": "Missing or invalid Firebase ID token"},
+    },
+)
+async def cancel_session(request: SessionCancelRequest, http_request: Request) -> JSONResponse:
+    req_id = uuid.uuid4().hex[:8]
+    _request_id_ctx.set(req_id)
+    uid = _require_uid(http_request)
+    session = await session_registry.get(request.session_id)
+    if session is not None and session.uid == uid:
+        await session_registry.delete(request.session_id)
+        logger.info("voice session %s cancelled uid=%s", request.session_id, uid)
+    return JSONResponse(content={"status": "cancelled"}, headers={"X-Request-Id": req_id})
 
 
 @app.post(
@@ -357,7 +421,9 @@ async def mint_session_token(request: SessionTokenRequest, http_request: Request
     uid = _require_uid(http_request)
     session = await _get_owned_session(request.session_id, uid)
     try:
-        token_data = await asyncio.to_thread(mint_ephemeral_token, session.existing_profile, session.mode)
+        token_data = await asyncio.to_thread(
+            mint_ephemeral_token, session.existing_profile, session.mode, session.language
+        )
     except Exception as exc:
         logger.exception("token mint failed for session %s: %s", request.session_id, exc)
         raise HTTPException(status_code=502, detail="Failed to mint Gemini Live token")
@@ -444,6 +510,10 @@ async def voice_stream(websocket: WebSocket, session_id: str) -> None:
     if session is None:
         await websocket.close(code=4004)
         return
+
+    # Clear any pending disconnect grace timer now that a WS has actually
+    # (re)attached to this session — see SessionState.disconnected_at.
+    session.disconnected_at = None
 
     await websocket.accept()
     logger.info("voice session %s stream connected (uid=%s)", session_id, session.uid)

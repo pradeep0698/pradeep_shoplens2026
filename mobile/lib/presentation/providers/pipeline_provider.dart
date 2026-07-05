@@ -61,7 +61,7 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
 
   Future<void> analyzeImage(Uint8List bytes, String mimeType, {Map<String, dynamic>? mlkitContext}) async {
     final user    = ref.read(authStateProvider).value;
-    final profile = ref.read(profileProvider).value ?? const UserProfile();
+    final profile = ref.read(profileProvider).valueOrNull ?? const UserProfile();
     if (user == null) return;
 
     final sessionId = getSessionId(user.uid);
@@ -111,7 +111,7 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
   /// entirely since ML Kit already localized and classified the object.
   Future<void> identifyTappedObject(Uint8List bytes, {Map<String, dynamic>? mlkitContext}) async {
     final user    = ref.read(authStateProvider).value;
-    final profile = ref.read(profileProvider).value ?? const UserProfile();
+    final profile = ref.read(profileProvider).valueOrNull ?? const UserProfile();
     if (user == null) return;
 
     final sessionId = getSessionId(user.uid);
@@ -126,9 +126,18 @@ class PipelineNotifier extends AutoDisposeNotifier<PipelineState> {
         preferenceTerms:    profile.preferenceTerms,
         shoppingCategories: profile.shoppingCategories,
         country:            profile.country.isEmpty ? null : profile.country,
+        maxSearches:        profile.maxSearchesPerRun,
         mlkitContext:       mlkitContext,
       );
       state = PipelineState(status: PipelineStatus.success, imageBytes: bytes, fromLiveScan: _fromLiveScan);
+    } on AnalyzerException catch (e) {
+      state = PipelineState(
+        status: e.code == AnalyzerErrorCode.networkTimeout ? PipelineStatus.timeout : PipelineStatus.error,
+        errorMessage: e.displayMessage,
+        errorCode: e.code,
+        isRetryable: e.isRetryable,
+        fromLiveScan: _fromLiveScan,
+      );
     } catch (e) {
       state = PipelineState(status: PipelineStatus.error, errorMessage: e.toString(), fromLiveScan: _fromLiveScan);
     }

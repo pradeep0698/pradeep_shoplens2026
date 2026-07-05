@@ -1,6 +1,6 @@
 # Sunday Prod Release — Step by Step
 
-Every Sunday, code on `main` (shoplens-dev) is released to `release/prod` (cookshop-dev / Rajan prod).
+Deploy directly from `main` to cookshop-dev (Rajan prod). No separate release branch needed.
 
 ---
 
@@ -8,7 +8,7 @@ Every Sunday, code on `main` (shoplens-dev) is released to `release/prod` (cooks
 
 | | Dev | Prod (Rajan) |
 |---|---|---|
-| Branch | `main` | `release/prod` |
+| Branch | `main` | `main` (deploy directly) |
 | GCP Project | `shoplens-dev-499700` | `cookshop-dev-prj` |
 | Firebase Project | `shoplens-dev-499700` | `cookshop-dev-prj-bd7e2` |
 | Android App ID | `com.shoplens.app` | `com.cookshop.mvp` |
@@ -21,30 +21,18 @@ Every Sunday, code on `main` (shoplens-dev) is released to `release/prod` (cooks
 Before starting, confirm these files are on your machine (all are gitignored):
 
 - `mobile/android/app/google-services.cookshop-dev.json` — Android Firebase config for cookshop-dev
-- `mobile/ios/Runner/GoogleService-Info.plist` — iOS Firebase config (cookshop-dev version, injected by Codemagic)
 - `mobile/.dart_define/cookshop-dev.json` — Flutter compile-time overrides (Firebase keys + service URLs)
 - `frontend/.env.cookshop-dev` — Frontend env for cookshop-dev (copy to `.env.local` before deploying)
 - `services/*/.env.cookshop-dev` — Per-service env files for cookshop-dev Cloud Run
 
 ---
 
-## Step 1 — Merge and push code
+## Step 1 — Mobile (Android APK)
+
+Make sure you are on `main` and it is up to date, then run:
 
 ```bash
-git checkout release/prod
-git merge main
-git push origin release/prod
-```
-
-This push automatically triggers the **Codemagic iOS build** (ios-unsigned workflow, firebase-cookshop var group).
-
----
-
-## Step 2 — Mobile (Android APK)
-
-Build the Android APK for cookshop-dev:
-
-```bash
+git checkout main && git pull origin main
 cd mobile
 bash scripts/build-cookshop-dev-apk.sh
 ```
@@ -58,9 +46,57 @@ Output APK: `mobile/build/app/outputs/flutter-apk/app-release.apk`
 
 Distribute the APK to Rajan manually.
 
+**iOS:** Trigger the Codemagic build manually from the Codemagic UI (firebase-cookshop var group) — no branch push needed.
+
 ---
 
-## Step 3 — Frontend deploy
+## Step 2 — Services deploy (only if changed)
+
+Deploy only the services whose code changed since the last prod release. Check with:
+
+```bash
+git log --oneline <last-prod-sha>..main -- services/
+```
+
+The `.env.cookshop-dev` files are `KEY=VALUE` format — convert them inline when deploying.
+`PORT` is reserved by Cloud Run and must be excluded. Use this pattern for each service:
+
+```bash
+VARS=$(grep -v '^#' services/<svc>/.env.cookshop-dev | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//') && \
+gcloud run deploy <svc> \
+  --project cookshop-dev-prj \
+  --region us-central1 \
+  --source services/<svc> \
+  --set-env-vars "$VARS" \
+  --quiet
+```
+
+Active services for cookshop-dev (deploy when their code changes):
+
+```bash
+# ai-analyzer
+VARS=$(grep -v '^#' services/ai-analyzer/.env.cookshop-dev | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//') && \
+gcloud run deploy ai-analyzer --project cookshop-dev-prj --region us-central1 --source services/ai-analyzer --set-env-vars "$VARS" --quiet
+
+# product-matcher
+VARS=$(grep -v '^#' services/product-matcher/.env.cookshop-dev | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//') && \
+gcloud run deploy product-matcher --project cookshop-dev-prj --region us-central1 --source services/product-matcher --set-env-vars "$VARS" --quiet
+
+# state-manager
+VARS=$(grep -v '^#' services/state-manager/.env.cookshop-dev | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//') && \
+gcloud run deploy state-manager --project cookshop-dev-prj --region us-central1 --source services/state-manager --set-env-vars "$VARS" --quiet
+
+# voice-assistant
+VARS=$(grep -v '^#' services/voice-assistant/.env.cookshop-dev | grep '=' | grep -v '^PORT=' | tr '\n' ',' | sed 's/,$//') && \
+gcloud run deploy voice-assistant --project cookshop-dev-prj --region us-central1 --source services/voice-assistant --set-env-vars "$VARS" --quiet
+
+```
+
+> **live-ingest and pubsub-worker are NOT deployed to cookshop-dev** — the live video pipeline is not used in the Rajan prod environment. Skip both.
+
+---
+
+## Step 3 — Frontend deploy (only if changed)
 
 ```bash
 cp frontend/.env.cookshop-dev frontend/.env.local
@@ -73,61 +109,16 @@ firebase deploy --project prod
 
 ---
 
-## Step 4 — Services deploy (only if changed)
-
-Most Sundays you can skip this if no service code changed. Deploy only what changed.
-
-```bash
-# ai-analyzer
-gcloud run deploy ai-analyzer \
-  --project cookshop-dev-prj \
-  --region us-central1 \
-  --set-env-vars-file services/ai-analyzer/.env.cookshop-dev
-
-# product-matcher
-gcloud run deploy product-matcher \
-  --project cookshop-dev-prj \
-  --region us-central1 \
-  --set-env-vars-file services/product-matcher/.env.cookshop-dev
-
-# state-manager
-gcloud run deploy state-manager \
-  --project cookshop-dev-prj \
-  --region us-central1 \
-  --set-env-vars-file services/state-manager/.env.cookshop-dev
-
-# voice-assistant
-gcloud run deploy voice-assistant \
-  --project cookshop-dev-prj \
-  --region us-central1 \
-  --set-env-vars-file services/voice-assistant/.env.cookshop-dev
-
-# pubsub-worker
-gcloud run deploy pubsub-worker \
-  --project cookshop-dev-prj \
-  --region us-central1 \
-  --set-env-vars-file services/pubsub-worker/.env.cookshop-dev
-
-# live-ingest (rarely changes)
-gcloud run deploy live-ingest \
-  --project cookshop-dev-prj \
-  --region us-central1 \
-  --set-env-vars-file services/live-ingest/.env.cookshop-dev
-```
-
----
-
 ## Config files at a glance
 
 | File | Tracked in git | Where stored |
 |---|---|---|
-| `mobile/.dart_define/cookshop-dev.json` | No (gitignored) | Vault |
+| `mobile/.dart_define/cookshop-dev.json` | No (gitignored) | Vault / Codemagic `firebase-cookshop` var group |
 | `mobile/android/app/google-services.cookshop-dev.json` | No (gitignored) | Vault |
 | `frontend/.env.cookshop-dev` | No (gitignored) | Vault |
 | `services/*/.env.cookshop-dev` | No (gitignored) | Vault |
-| `mobile/.dart_define/cookshop-dev.json` | No | Codemagic `firebase-cookshop` var group |
-| `mobile/.firebaserc` | No (gitignored) | In repo — `prod` alias = `cookshop-dev-prj-bd7e2` |
-| `frontend/.firebaserc` | No (gitignored) | In repo — `prod` alias = `cookshop-dev-prj-bd7e2` |
+| `mobile/.firebaserc` | Yes | In repo — `prod` alias = `cookshop-dev-prj-bd7e2` |
+| `frontend/.firebaserc` | Yes | In repo — `prod` alias = `cookshop-dev-prj-bd7e2` |
 
 ---
 
@@ -137,7 +128,6 @@ gcloud run deploy live-ingest \
 - Service URLs and Firebase config come from `--dart-define-from-file=.dart_define/cookshop-dev.json` at compile time
 - `google-services.json` (consumed by Gradle) is swapped by the build script
 - `firebase_options.dart` reads `String.fromEnvironment` with shoplens-dev as defaults; cookshop-dev JSON supplies all overrides
-- Codemagic injects `GOOGLE_SERVICE_INFO_PLIST` (base64) and service URL env vars for the iOS build via the `firebase-cookshop` var group
 
 ### Frontend
 - All config is in `.env.local` (Next.js reads this at build time)
@@ -152,15 +142,11 @@ gcloud run deploy live-ingest \
 
 ## Rollback
 
-If something is wrong after a Sunday release:
+If something breaks after a release, redeploy from the last known-good commit:
 
 ```bash
-# Find the last known-good commit on release/prod
-git log release/prod --oneline
-
-# Roll back to that commit
-git checkout release/prod
-git revert HEAD   # or revert to specific commit
-git push origin release/prod
-# Then re-run Step 3 and Step 4 for the affected layers
+git checkout <last-good-sha>
+cd mobile && bash scripts/build-cookshop-dev-apk.sh
+# Re-run gcloud run deploy for affected services from this checkout
+git checkout main   # return to main when done
 ```

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import os
 from typing import List
@@ -10,10 +11,11 @@ from pydantic import BaseModel, Field
 
 import requests as _requests
 from matcher import (
-    clamp_max_searches,
+    currency_for_country,
     fetch_thumbnail,
     match_products,
-    search_products_combined,
+    normalize_country,
+    search_products,
     _search_product,
     _SERPAPI_KEY,
 )
@@ -40,6 +42,23 @@ app = FastAPI(
 )
 
 _CORS = {"Access-Control-Allow-Origin": "*"}
+
+
+@app.on_event("startup")
+async def _log_startup_config() -> None:
+    # Fingerprint, not the key itself — a short SHA-256 prefix is safe to log
+    # (irreversible, useless for auth) but still lets you confirm across
+    # environments/deployments that the SERPAPI_KEY actually loaded is the one
+    # you expect, without ever putting real credential material in Cloud
+    # Logging. Length is logged too since 0 is an unambiguous misconfiguration.
+    _key = os.environ.get("SERPAPI_KEY", "")
+    _key_fp = hashlib.sha256(_key.encode()).hexdigest()[:8] if _key else "(empty)"
+    logger.info(
+        "product-matcher starting | serpapi_key_len=%d serpapi_key_fp=%s",
+        len(_key), _key_fp,
+    )
+    if not _key:
+        logger.error("SERPAPI_KEY is empty or unset — every SerpAPI call will fail")
 
 
 @app.exception_handler(Exception)
@@ -70,21 +89,39 @@ class MatchRequest(BaseModel):
     items: List[str] = Field(..., description="List of detected item/product names to search for")
     ignore_terms: List[str] = Field(default_factory=list, description="Terms to exclude from search results")
     max_searches: int = Field(5, ge=1, le=20, description="Maximum SerpAPI calls to make")
+    country: str = Field(
+        "us",
+        description="Two-letter ISO country code for regional product search. Empty/unset defaults to 'us'. "
+                     "Currency is derived from this — see the `currency` field on the response.",
+    )
+    preference_terms: List[str] = Field(
+        default_factory=list,
+        description="Free-text style/brand/material preferences from the user's profile. Used to prioritize "
+                     "which items get a SerpAPI search when there are more items than max_searches allows.",
+    )
+    shopping_categories: List[str] = Field(
+        default_factory=list,
+        description="Preferred shopping categories from the user's profile. Same prioritization role as preference_terms.",
+    )
 
     model_config = {"json_schema_extra": {
-        "examples": [{"items": ["stand mixer", "silicone spatula"], "ignore_terms": [], "max_searches": 5}]
+        "examples": [{
+            "items": ["stand mixer", "silicone spatula"], "ignore_terms": [], "max_searches": 5,
+            "country": "us", "preference_terms": [], "shopping_categories": [],
+        }]
     }}
 
 
 class SearchRequest(BaseModel):
     query: str = Field(..., description="Freetext product search query")
-    max_results: int = Field(5, ge=1, le=20, description="Maximum number of products to return")
+    max_results: int = Field(15, ge=1, le=20, description="Maximum number of products to return")
+    country: str = Field("us", description="Two-letter ISO country code for regional product search. Empty/unset defaults to 'us'.")
 
 
 class ProductItem(BaseModel):
     product_id: str
     name: str
-    price: float | None = Field(None, description="Price in USD")
+    price: float | None = Field(None, description="Price in the currency returned alongside this response (USD unless `country` implies otherwise)")
     image_url: str | None
     purchase_url: str | None
     seller: str | None
@@ -94,6 +131,8 @@ class ProductItem(BaseModel):
 class MatchResponse(BaseModel):
     matched_products: List[ProductItem]
     unmatched: List[str] = Field(..., description="Item names for which no product was found")
+    country: str = Field(..., description="Normalized country used for this request (defaults to 'us')")
+    currency: str = Field(..., description="Currency derived from `country`")
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +155,13 @@ class MatchResponse(BaseModel):
 )
 async def match(request: MatchRequest) -> JSONResponse:
     result = await asyncio.to_thread(
-        match_products, request.items, request.ignore_terms, request.max_searches
+        match_products,
+        request.items,
+        request.ignore_terms,
+        request.max_searches,
+        request.country,
+        request.preference_terms,
+        request.shopping_categories,
     )
     return JSONResponse(content=result)
 
@@ -132,9 +177,19 @@ async def match(request: MatchRequest) -> JSONResponse:
     ),
 )
 async def search(request: SearchRequest) -> JSONResponse:
-    max_results = clamp_max_searches(request.max_results)
-    products, provider = await asyncio.to_thread(search_products_combined, request.query, max_results)
-    return JSONResponse(content={"products": products, "provider": provider})
+    # Pydantic's Field(ge=1, le=20) on SearchRequest.max_results already fully
+    # validates the range before this handler runs — do NOT reuse
+    # clamp_max_searches here, that constant (MAX_SEARCHES_PER_RUN=5) is
+    # specifically for /match's SerpAPI-call-count cap, not /search's result
+    # count. Reusing it here silently overrode any requested max_results down
+    # to 5 regardless of what the caller asked for.
+    #
+    # search_products() already tries Google Shopping, a price-stripped
+    # simplified retry, then tops up with Amazon if still short — see its
+    # docstring in matcher.py.
+    country = normalize_country(request.country)
+    products = await asyncio.to_thread(search_products, request.query, request.max_results, country)
+    return JSONResponse(content={"products": products, "country": country, "currency": currency_for_country(country)})
 
 
 @app.get(
@@ -178,17 +233,19 @@ async def debug(item: str) -> JSONResponse:
     "/debug-raw/{item}",
     tags=["Debug"],
     summary="Debug — raw SerpAPI response",
-    description="Calls SerpAPI directly for the given item and returns the first `shopping_results` entry with all keys. Useful for inspecting what SerpAPI returns before our parsing logic runs.",
+    description="Calls SerpAPI directly for the given item and returns the first result entry with all keys. Pass ?engine=amazon to inspect the Amazon Search API's organic_results shape instead of Google Shopping's shopping_results. Useful for inspecting what SerpAPI returns before our parsing logic runs.",
 )
-async def debug_raw(item: str) -> JSONResponse:
-    resp = _requests.get(
-        "https://serpapi.com/search",
-        params={"engine": "google_shopping", "q": item, "api_key": _SERPAPI_KEY, "num": 1},
-        timeout=10,
-    )
+async def debug_raw(item: str, engine: str = Query("google_shopping", description="google_shopping or amazon")) -> JSONResponse:
+    params: dict = {"engine": engine, "api_key": _SERPAPI_KEY}
+    if engine == "amazon":
+        params.update({"k": item, "amazon_domain": "amazon.com"})
+    else:
+        params.update({"q": item, "num": 1})
+    resp = _requests.get("https://serpapi.com/search", params=params, timeout=10)
     data = resp.json()
-    first = (data.get("shopping_results") or [{}])[0]
-    return JSONResponse(content={"keys": list(first.keys()), "first_result": first})
+    result_key = "organic_results" if engine == "amazon" else "shopping_results"
+    first = (data.get(result_key) or [{}])[0]
+    return JSONResponse(content={"engine": engine, "keys": list(first.keys()), "first_result": first})
 
 
 @app.get(

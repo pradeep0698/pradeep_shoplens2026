@@ -5,26 +5,27 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:permission_handler/permission_handler.dart';
 import '../../core/services/vision_service.dart';
+import '../../core/utils/mic_permission.dart';
 import '../../core/utils/image_utils.dart';
 import '../../core/utils/product_ranker.dart';
-import '../../core/utils/session_id.dart';
 import '../../data/models/user_profile.dart';
 import '../../data/repositories/profile_repository.dart';
-import '../../domain/usecases/tap_identify_usecase.dart';
+import '../../data/repositories/recent_searches_repository.dart';
 import '../../domain/usecases/video_analyze_usecase.dart';
 import 'video_player_screen.dart';
 import '../providers/admin_provider.dart';
 import '../providers/auth_provider.dart';
 import '../providers/pipeline_provider.dart';
 import '../providers/profile_provider.dart';
+import '../providers/recent_searches_provider.dart';
 import '../providers/shopping_list_provider.dart';
 import '../providers/video_provider.dart';
 import '../widgets/chatbot_fab.dart';
 import '../widgets/info_tooltip_icon.dart';
 import '../widgets/pipeline_status_bar.dart';
 import '../widgets/product_card.dart';
+import '../widgets/recent_searches_list.dart';
 import '../widgets/sync_indicator.dart';
 import '../widgets/tap_target_detector.dart';
 import '../widgets/voice_assistant_overlay.dart';
@@ -37,12 +38,18 @@ class MainScreen extends ConsumerStatefulWidget {
 }
 
 class _MainScreenState extends ConsumerState<MainScreen> {
-  TapIdentifyState _tapState = const TapIdentifyIdle();
   final _tapKey = GlobalKey<TapTargetDetectorState>();
   bool  _productCheckSettled = false;
   Timer? _productCheckTimer;
   bool  _onboardingTriggered = false;
-  bool  _micPrewarmed = false;
+  bool  _savedToRecent = false;
+  bool  _imageCollapsed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(requestMicrophonePermission());
+  }
 
   @override
   void dispose() {
@@ -50,9 +57,6 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     super.dispose();
   }
 
-  // Shows the voice assistant once, the first time the resolved profile comes
-  // back with voiceOnboardingSeen == false — fires off the loading frame, not
-  // on a default-constructed UserProfile (see plan risk #7).
   Future<void> _maybeShowOnboarding(UserProfile resolvedProfile) async {
     if (_onboardingTriggered || resolvedProfile.voiceOnboardingSeen) return;
     _onboardingTriggered = true;
@@ -65,7 +69,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     // Re-read the freshest profile rather than reusing the stale snapshot —
     // a finalized voice session may have already merged new preferences into
     // Firestore server-side while the overlay was open.
-    final latest = ref.read(profileProvider).value ?? resolvedProfile;
+    final latest = ref.read(profileProvider).valueOrNull ?? resolvedProfile;
     if (latest.voiceOnboardingSeen) return;
     await ref.read(profileRepositoryProvider).save(
           user.uid,
@@ -73,14 +77,28 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         );
   }
 
+  Future<void> _reScan(RecentSearchEntry entry) async {
+    ref.read(videoProvider.notifier).reset();
+    await ref.read(pipelineProvider.notifier).setImage(entry.imageBytes, entry.mimeType);
+    setState(() => _savedToRecent = true);
+    ref.read(pipelineProvider.notifier).analyzeLoaded();
+  }
+
   @override
   Widget build(BuildContext context) {
     ref.listen(pipelineProvider, (prev, next) {
+      // Collapsing the photo only makes sense once results are actually
+      // showing — force it back open for a fresh pick, a new analysis run,
+      // or an error, so the user always sees the image before/while it's
+      // being worked on.
+      if (next.status != PipelineStatus.success) {
+        _imageCollapsed = false;
+      }
       if (next.status == PipelineStatus.analyzing) {
         _productCheckTimer?.cancel();
         setState(() {
-          _tapState = const TapIdentifyIdle();
           _productCheckSettled = false;
+          _savedToRecent = false;
         });
       }
       if (next.status == PipelineStatus.success &&
@@ -89,29 +107,31 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         _productCheckTimer = Timer(const Duration(seconds: 5), () {
           if (mounted) setState(() => _productCheckSettled = true);
         });
+        // Auto-collapse the photo so the product list gets the full screen —
+        // still one tap away via the collapsed strip below.
+        _imageCollapsed = true;
+        // Save image to recent searches once per scan
+        if (!_savedToRecent) {
+          final bytes    = next.imageBytes;
+          final mimeType = _mimeType;
+          if (bytes != null && mimeType != null) {
+            _savedToRecent = true;
+            ref.read(recentSearchesProvider.notifier).add(bytes, mimeType);
+          }
+        }
       }
     });
 
     final pipeline           = ref.watch(pipelineProvider);
     final video              = ref.watch(videoProvider);
     final shoppingList       = ref.watch(shoppingListProvider);
-    final profile            = ref.watch(profileProvider).value;
+    final profile            = ref.watch(profileProvider).valueOrNull;
     final shoppingCategories = profile?.shoppingCategories ?? const [];
-    final isAdmin            = ref.watch(isAdminProvider).value ?? false;
+    final isAdmin            = ref.watch(isAdminProvider).valueOrNull ?? false;
     final hasSelection       = _tapKey.currentState?.hasSelection ?? false;
 
     if (profile != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowOnboarding(profile));
-    }
-
-    // Acquiring the mic for the first time in a browser tab is slow (OS/
-    // browser audio-hardware cold start) even when permission was already
-    // granted in a prior session — paying that cost here, as soon as the
-    // main screen loads, means the user doesn't eat it the moment they tap
-    // the voice chat FAB. Guarded to run once per screen lifetime.
-    if (!_micPrewarmed) {
-      _micPrewarmed = true;
-      unawaited(Permission.microphone.request());
     }
 
     final isBusy = pipeline.status == PipelineStatus.analyzing ||
@@ -180,6 +200,8 @@ class _MainScreenState extends ConsumerState<MainScreen> {
           PipelineStatusBar(
             status:        pipeline.status,
             errorMessage:  pipeline.errorMessage,
+            errorCode:     pipeline.errorCode,
+            isRetryable:   pipeline.isRetryable,
             foundProducts: pipeline.status == PipelineStatus.success
                 ? (shoppingList.value?.isNotEmpty == true
                     ? true
@@ -190,82 +212,93 @@ class _MainScreenState extends ConsumerState<MainScreen> {
 
           // Image section
           if (pipeline.imageBytes != null) ...[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 320),
-                  child: Stack(
-                    children: [
-                      TapTargetDetector(
-                        key:            _tapKey,
-                        imageBytes:     pipeline.imageBytes!,
-                        boxFit:         BoxFit.contain,
-                        onIdentify:     _onTapIdentify,
-                        onStateChanged: (state) => setState(() => _tapState = state),
-                        child: Image.memory(
-                          pipeline.imageBytes!,
-                          width: double.infinity,
-                          fit: BoxFit.contain,
-                        ),
-                      ),
-                      if (isBusy)
-                        Positioned.fill(
-                          child: Container(
-                            color: Colors.black.withValues(alpha: 0.5),
-                            child: const Center(
-                              child: CircularProgressIndicator(color: Color(0xFF34D399)),
-                            ),
+            if (_imageCollapsed)
+              _buildCollapsedImageStrip(pipeline.imageBytes!)
+            else ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 320),
+                    child: Stack(
+                      children: [
+                        TapTargetDetector(
+                          key:               _tapKey,
+                          imageBytes:        pipeline.imageBytes!,
+                          boxFit:            BoxFit.contain,
+                          onIdentify:        _onTapIdentify,
+                          onSelectionChanged: () => setState(() {}),
+                          child: Image.memory(
+                            pipeline.imageBytes!,
+                            width: double.infinity,
+                            fit: BoxFit.contain,
                           ),
                         ),
-                    ],
+                        if (isBusy)
+                          Positioned.fill(
+                            child: Container(
+                              color: Colors.black.withValues(alpha: 0.5),
+                              child: const Center(
+                                child: CircularProgressIndicator(color: Color(0xFF34D399)),
+                              ),
+                            ),
+                          ),
+                        if (pipeline.status == PipelineStatus.success)
+                          Positioned(
+                            top: 8,
+                            right: 8,
+                            child: _CollapseButton(
+                              icon: Icons.expand_less,
+                              onTap: () => setState(() => _imageCollapsed = true),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-            _TapResultBar(state: _tapState),
-
-            if (!isBusy && _tapState is! TapIdentifyLoading)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                child: Center(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      ElevatedButton.icon(
-                        onPressed: (pipeline.fromLiveScan && !hasSelection)
-                            ? null
-                            : () async {
-                                final tap = _tapKey.currentState;
-                                if (tap != null && tap.hasSelection) {
-                                  await tap.analyzeSelection();
-                                } else if (!pipeline.fromLiveScan) {
-                                  ref.read(pipelineProvider.notifier).analyzeLoaded();
-                                }
-                              },
-                        icon: const Icon(Icons.auto_awesome, size: 18),
-                        label: Text(
-                          pipeline.fromLiveScan ? 'Crop Image' : 'Scan Image',
-                          style: const TextStyle(fontWeight: FontWeight.w700),
+              if (!isBusy)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Center(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: (pipeline.fromLiveScan && !hasSelection)
+                              ? null
+                              : () async {
+                                  final tap = _tapKey.currentState;
+                                  if (tap != null && tap.hasSelection) {
+                                    await tap.analyzeSelection();
+                                  } else if (!pipeline.fromLiveScan) {
+                                    ref.read(pipelineProvider.notifier).analyzeLoaded();
+                                  }
+                                },
+                          icon: const Icon(Icons.auto_awesome, size: 18),
+                          label: Text(
+                            pipeline.fromLiveScan ? 'Crop Image' : 'Scan Image',
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF34D399),
+                            foregroundColor: const Color(0xFF0F172A),
+                            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                          ),
                         ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF34D399),
-                          foregroundColor: const Color(0xFF0F172A),
-                          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                        const SizedBox(width: 8),
+                        InfoTooltipIcon(
+                          message: pipeline.fromLiveScan
+                              ? 'Tap an object first. Crop Image identifies only the selected object.'
+                              : 'Scan Image identifies everything in the image. To identify a specific item, tap it first.',
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      InfoTooltipIcon(
-                        message: pipeline.fromLiveScan
-                            ? 'Tap an object first. Crop Image identifies only the selected object.'
-                            : 'Scan Image identifies everything in the image. To identify a specific item, tap it first.',
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
-              ),
+            ],
           ],
 
           // Video section
@@ -278,21 +311,38 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                 child: Text('Connection error: $e', style: const TextStyle(color: Color(0xFFF87171), fontSize: 13)),
               ),
               data: (products) {
-                // Re-sorts an already-finalized saved list by current category
-                // preferences only — the $0/exact-match ordering was already
-                // decided once, at save time, when the source was known.
                 final ranked = rankProducts(products, shoppingCategories,
                     isExactMatchSource: true);
-                return ranked.isEmpty
-                    ? _emptyState()
-                    : ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
+
+                if (ranked.isEmpty) {
+                  return SingleChildScrollView(
+                    child: Column(
+                      children: [
+                        _emptyState(),
+                        RecentSearchesList(onTap: _reScan),
+                      ],
+                    ),
+                  );
+                }
+
+                return SingleChildScrollView(
+                  child: Column(
+                    children: [
+                      ListView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
                         itemCount: ranked.length,
                         itemBuilder: (_, i) => ProductCard(
                           product:            ranked[i],
                           shoppingCategories: shoppingCategories,
                         ),
-                      );
+                      ),
+                      RecentSearchesList(onTap: _reScan),
+                      const SizedBox(height: 100),
+                    ],
+                  ),
+                );
               },
             ),
           ),
@@ -387,13 +437,15 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     );
   }
 
+  String? _mimeType;
+
   Widget _buildVideoSection(VideoState video) {
     final thumbnail = switch (video) {
-      VideoLoaded(:final thumbnail)   => thumbnail,
-      VideoCacheHit(:final thumbnail) => thumbnail,
+      VideoLoaded(:final thumbnail)    => thumbnail,
+      VideoCacheHit(:final thumbnail)  => thumbnail,
       VideoAnalyzing(:final thumbnail) => thumbnail,
-      VideoError(:final thumbnail)    => thumbnail,
-      _                               => null,
+      VideoError(:final thumbnail)     => thumbnail,
+      _                                => null,
     };
 
     final fileName = switch (video) {
@@ -549,9 +601,9 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     if (file == null) return;
 
     ref.read(videoProvider.notifier).reset();
-    final bytes    = await file.readAsBytes();
-    final mimeType = getMimeType(file.path);
-    await ref.read(pipelineProvider.notifier).setImage(bytes, mimeType);
+    final bytes = await file.readAsBytes();
+    _mimeType   = getMimeType(file.path);
+    await ref.read(pipelineProvider.notifier).setImage(bytes, _mimeType!);
   }
 
   Future<void> _pickVideo() async {
@@ -567,88 +619,79 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            const SizedBox(height: 24),
             Icon(Icons.shopping_cart_outlined, size: 52, color: Colors.white.withValues(alpha: 0.15)),
             const SizedBox(height: 14),
             const Text(
               'Matched products will appear here',
               style: TextStyle(color: Color(0xFF475569), fontSize: 12),
             ),
+            const SizedBox(height: 8),
           ],
         ),
       );
 
-  Future<String?> _onTapIdentify(Uint8List croppedBytes) async {
-    final user    = ref.read(authStateProvider).value;
-    final profile = ref.read(profileProvider).value ?? const UserProfile();
-    if (user == null) return null;
+  Future<void> _onTapIdentify(Uint8List croppedBytes) =>
+      ref.read(pipelineProvider.notifier).identifyTappedObject(croppedBytes);
 
-    return ref.read(tapIdentifyUseCaseProvider).identify(
-      croppedBytes:       croppedBytes,
-      sessionId:          getSessionId(user.uid),
-      ignoreTerms:        profile.ignoreTerms,
-      preferenceTerms:    profile.preferenceTerms,
-      shoppingCategories: profile.shoppingCategories,
-      country:            profile.country.isEmpty ? null : profile.country,
-    );
-  }
-
+  Widget _buildCollapsedImageStrip(Uint8List imageBytes) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+        child: Material(
+          color: const Color(0xFF1E293B),
+          borderRadius: BorderRadius.circular(12),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () => setState(() => _imageCollapsed = false),
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+              ),
+              child: Row(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.memory(imageBytes, width: 40, height: 40, fit: BoxFit.cover),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text(
+                      'View photo',
+                      style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500),
+                    ),
+                  ),
+                  const Icon(Icons.expand_more, color: Color(0xFF94A3B8)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
 }
 
-// ── Tap-identify result strip ─────────────────────────────────────────────────
+class _CollapseButton extends StatelessWidget {
+  const _CollapseButton({required this.icon, required this.onTap});
 
-class _TapResultBar extends StatelessWidget {
-  const _TapResultBar({required this.state});
-  final TapIdentifyState state;
+  final IconData icon;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return switch (state) {
-      TapIdentifyIdle()    => const SizedBox(height: 8),
-      TapIdentifyLoading() => const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          child: Row(
-            children: [
-              SizedBox(
-                width: 12,
-                height: 12,
-                child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF34D399)),
-              ),
-              SizedBox(width: 8),
-              Text('Identifying…', style: TextStyle(color: Color(0xFF64748B), fontSize: 12)),
-            ],
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(6),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.5),
+            shape: BoxShape.circle,
           ),
+          child: Icon(icon, color: Colors.white, size: 20),
         ),
-      TapIdentifySuccess(productName: final name) => Padding(
-          padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
-          child: name != null
-              ? Row(
-                  children: [
-                    const Icon(Icons.check_circle_outline, size: 14, color: Color(0xFF34D399)),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        'Added: $name',
-                        style: const TextStyle(color: Color(0xFF6EE7B7), fontSize: 12),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                )
-              : const Text(
-                  'No matching product found',
-                  style: TextStyle(color: Color(0xFF94A3B8), fontSize: 12),
-                ),
-        ),
-      TapIdentifyError(message: final msg) => Padding(
-          padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
-          child: Text(
-            'Identify failed: $msg',
-            style: const TextStyle(color: Color(0xFFF87171), fontSize: 11),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-    };
+      ),
+    );
   }
 }

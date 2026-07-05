@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 
+import '../../core/utils/mic_permission.dart';
 import '../../core/utils/pcm16_resampler.dart';
 import '../../core/utils/pcm16_speech_gate.dart';
 import '../../core/utils/voice_audio_player.dart';
@@ -22,6 +23,7 @@ enum VoiceStatus { idle, connecting, listening, speaking, review, saving, done, 
 class VoiceAssistantState {
   const VoiceAssistantState({
     this.status = VoiceStatus.idle,
+    this.isHandsFreeActive = false,
     this.isRecording = false,
     this.transcript = const [],
     this.patch = const VoiceProfilePatch(),
@@ -32,8 +34,16 @@ class VoiceAssistantState {
   });
 
   final VoiceStatus status;
-  // True only while the hold-to-talk button is pressed and mic audio is
-  // actively streaming — see VoiceAssistantNotifier.beginSpeaking/endSpeaking.
+  // True from the moment the hands-free toggle is tapped on until it's
+  // tapped off again (or the session otherwise ends) — spans the whole
+  // conversation, not just one utterance. See
+  // VoiceAssistantNotifier.startHandsFree/stopHandsFree.
+  final bool isHandsFreeActive;
+  // True only while an utterance is actively being captured right now (the
+  // re-armable speech gate is open) — NOT paused while the assistant is
+  // talking, since hands-free mode supports barge-in: the gate can reopen
+  // (and this flips back to true) the instant the user starts talking over
+  // the assistant, whatever `status` currently is.
   final bool isRecording;
   final List<VoiceTranscriptTurn> transcript;
   final VoiceProfilePatch patch;
@@ -47,6 +57,7 @@ class VoiceAssistantState {
 
   VoiceAssistantState copyWith({
     VoiceStatus? status,
+    bool? isHandsFreeActive,
     bool? isRecording,
     List<VoiceTranscriptTurn>? transcript,
     VoiceProfilePatch? patch,
@@ -57,6 +68,7 @@ class VoiceAssistantState {
   }) =>
       VoiceAssistantState(
         status: status ?? this.status,
+        isHandsFreeActive: isHandsFreeActive ?? this.isHandsFreeActive,
         isRecording: isRecording ?? this.isRecording,
         transcript: transcript ?? this.transcript,
         patch: patch ?? this.patch,
@@ -84,7 +96,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   Timer? _speakingDebounce;
   VoiceAudioPlayer? _player;
   Pcm16Resampler? _micResampler;
-  Pcm16SpeechGate? _speechGate;
+  Pcm16ReArmableSpeechGate? _speechGate;
   int _captureSampleRate = _kInputSampleRate;
   bool _speechStarted = false;
   int _generation = 0;
@@ -111,14 +123,26 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
     return const VoiceAssistantState();
   }
 
-  Future<void> start({required bool isOnboarding}) async {
-    await _teardownSession();
+  Future<void> start({required bool isOnboarding, required String language, bool resume = false}) async {
+    // On resume, don't tear down the session (that would null _sessionId,
+    // the very thing needed to resume) and don't reset to a blank state
+    // (state.transcript/patch/searchResults already hold everything captured
+    // before the disconnect — they're the source of truth, not the fresh
+    // profile snapshot the REST call below would otherwise overwrite them
+    // with). Still clean up the dangling transport instance from the drop.
+    final resumeSessionId = resume ? _sessionId : null;
+    if (!resume) {
+      await _teardownSession();
+      _seq = 0;
+      _searchId = 0;
+    } else {
+      await _socket?.close();
+    }
     _isOnboarding = isOnboarding;
-    _seq = 0;
     final generation = ++_generation;
-    state = const VoiceAssistantState(status: VoiceStatus.connecting);
+    state = (resume ? state : const VoiceAssistantState()).copyWith(status: VoiceStatus.connecting);
     try {
-      final micStatus = await Permission.microphone.request();
+      final micStatus = await requestMicrophonePermission();
       if (!_isCurrent(generation)) return;
       if (!micStatus.isGranted) {
         state = state.copyWith(
@@ -129,10 +153,28 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       }
 
       final voiceApi = ref.read(voiceApiProvider);
-      final startResponse = await voiceApi.startSession(isOnboarding: isOnboarding);
+      final startResponse = await voiceApi.startSession(
+        isOnboarding: isOnboarding,
+        language: language,
+        resumeSessionId: resumeSessionId,
+      );
       if (!_isCurrent(generation)) return;
       _sessionId = startResponse.sessionId;
-      state = state.copyWith(patch: startResponse.profile);
+      if (!resume) {
+        state = state.copyWith(patch: startResponse.profile);
+      }
+
+      // Player must be fully open (and _player assigned) before the socket is
+      // connected/subscribed below — otherwise the backend's near-immediate
+      // greeting audio can arrive while _handleFrame's `_player?.isReady`
+      // check is still false, silently dropping the leading audio bytes.
+      final player = VoiceAudioPlayer();
+      await player.open();
+      if (!_isCurrent(generation)) {
+        await player.close();
+        return;
+      }
+      _player = player;
 
       final socket = createVoiceTransport(
         directConnectAllowed: startResponse.directConnectAllowed,
@@ -150,14 +192,6 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         },
       );
 
-      final player = VoiceAudioPlayer();
-      await player.open();
-      if (!_isCurrent(generation)) {
-        await player.close();
-        return;
-      }
-      _player = player;
-
       // On web, record_web ignores RecordConfig.sampleRate and silently
       // captures at whatever rate the browser's AudioContext settles on
       // instead — probing it ourselves and telling the backend the truth is
@@ -169,7 +203,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         inputSampleRate: _captureSampleRate,
         outputSampleRate: _kInputSampleRate,
       );
-      _socket?.sendAudioFormat(_kInputSampleRate);
+      socket.sendAudioFormat(_kInputSampleRate);
       _recorder = AudioRecorder();
 
       // The model speaks its own greeting once the backend's hidden trigger
@@ -185,58 +219,97 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
     }
   }
 
-  /// Starts streaming mic audio for one turn — call when the hold-to-talk
-  /// button is pressed. Gemini's own voice-activity detection is disabled
-  /// server-side (see live_session.py's realtime_input_config), so the
-  /// speech_start/speech_end markers sent here are what tell it the turn's
-  /// boundaries instead.
-  Future<void> beginSpeaking() async {
-    if (state.isRecording || _recorder == null) return;
-    state = state.copyWith(isRecording: true);
+  /// Starts a hands-free session — call once when the toggle button is
+  /// tapped on. Opens the mic stream once and leaves it open for the whole
+  /// conversation; a re-armable local VAD (Pcm16ReArmableSpeechGate) detects
+  /// each utterance's start/end automatically and emits its own
+  /// speech_start/speech_end pair per utterance (Gemini's own voice-activity
+  /// detection stays disabled server-side — see live_session.py's
+  /// realtime_input_config — so these client-driven markers are still what
+  /// tell it every turn's boundaries).
+  ///
+  /// Unlike the old push-to-talk beginSpeaking(), this does NOT pause/mute
+  /// while the assistant is talking (status == speaking) — the gate keeps
+  /// running continuously so the user can barge in just by talking, same as
+  /// ChatGPT's voice mode. That only works because echoCancel/noiseSuppress/
+  /// autoGain are turned on below (plus AndroidAudioSource.voiceCommunication
+  /// on Android) so the mic doesn't simply pick the assistant's own voice
+  /// back up — see the listener's `started` handling for how a detected
+  /// barge-in flushes playback immediately.
+  Future<void> startHandsFree() async {
+    if (state.isHandsFreeActive || _recorder == null) return;
+    state = state.copyWith(isHandsFreeActive: true);
     final generation = _generation;
-    await _flushPlayback();
-    if (!_isCurrent(generation) || _recorder == null) return;
-    _speechGate = Pcm16SpeechGate(sampleRate: _kInputSampleRate);
+    _speechGate = Pcm16ReArmableSpeechGate(sampleRate: _kInputSampleRate);
     _speechStarted = false;
     final stream = await _recorder!.startStream(RecordConfig(
       encoder: AudioEncoder.pcm16bits,
       sampleRate: _captureSampleRate,
       numChannels: 1,
+      echoCancel: true,
+      noiseSuppress: true,
+      autoGain: true,
+      androidConfig: const AndroidRecordConfig(audioSource: AndroidAudioSource.voiceCommunication),
     ));
     _micSubscription = stream.listen((chunk) {
-      if (!_isCurrent(generation) || !state.isRecording) return;
+      if (!_isCurrent(generation) || !state.isHandsFreeActive) return;
       final outbound = _micResampler?.convert(chunk) ?? chunk;
       if (outbound.isEmpty) return;
-      final gateResult = _speechGate?.add(outbound) ??
-          Pcm16SpeechGateResult(started: false, chunks: [outbound]);
-      if (gateResult.started && !_speechStarted) {
-        _speechStarted = true;
-        _socket?.sendSpeechStart();
-      }
-      if (_speechStarted) {
-        for (final gatedChunk in gateResult.chunks) {
-          if (gatedChunk.isNotEmpty) _socket?.sendAudio(gatedChunk);
-        }
+      final result = _speechGate?.add(outbound) ??
+          const Pcm16SpeechGateCycleResult(event: Pcm16SpeechGateEvent.none, chunks: []);
+      switch (result.event) {
+        case Pcm16SpeechGateEvent.started:
+          // Barge-in: if the assistant is still talking, cut it off right
+          // away instead of waiting for the server's own 'interrupted'
+          // frame to round-trip back — _flushPlayback() is idempotent with
+          // that frame if/when it arrives afterward.
+          if (state.status == VoiceStatus.speaking) {
+            unawaited(_flushPlayback());
+            _speakingDebounce?.cancel();
+            state = state.copyWith(status: VoiceStatus.listening);
+          }
+          _speechStarted = true;
+          state = state.copyWith(isRecording: true);
+          _socket?.sendSpeechStart();
+          for (final c in result.chunks) {
+            if (c.isNotEmpty) _socket?.sendAudio(c);
+          }
+        case Pcm16SpeechGateEvent.ended:
+          for (final c in result.chunks) {
+            if (c.isNotEmpty) _socket?.sendAudio(c);
+          }
+          _socket?.sendSpeechEnd();
+          _speechStarted = false;
+          state = state.copyWith(isRecording: false);
+        case Pcm16SpeechGateEvent.none:
+          if (_speechStarted) {
+            for (final c in result.chunks) {
+              if (c.isNotEmpty) _socket?.sendAudio(c);
+            }
+          }
       }
     });
   }
 
-  /// Stops streaming and signals the turn is complete — call when the
-  /// hold-to-talk button is released.
-  Future<void> endSpeaking() async {
-    if (!state.isRecording) return;
-    state = state.copyWith(isRecording: false);
+  /// Ends the hands-free session — call when the toggle button is tapped
+  /// off. Only stops listening; it does not itself jump to the review/finish
+  /// flow (the "I'm done" button or a typed closing phrase still does that,
+  /// same as before) — so the user can tap this to go quiet for a moment and
+  /// tap startHandsFree() again later in the same conversation if they want.
+  Future<void> stopHandsFree() async {
+    if (!state.isHandsFreeActive) return;
+    if (_speechStarted) _socket?.sendSpeechEnd();
     await _micSubscription?.cancel();
     _micSubscription = null;
     try {
       await _recorder?.stop();
     } catch (_) {
-      // Best-effort — the activity_end marker below still tells Gemini the
+      // Best-effort — the activity_end marker above already told Gemini the
       // turn ended even if the platform stop() call itself failed.
     }
-    if (_speechStarted) _socket?.sendSpeechEnd();
     _speechStarted = false;
     _speechGate = null;
+    state = state.copyWith(isHandsFreeActive: false, isRecording: false);
   }
 
   /// Used by both the text input field and tapping a suggestion chip —
@@ -271,7 +344,12 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
     if (state.status != VoiceStatus.listening && state.status != VoiceStatus.speaking) return;
     _speakingDebounce?.cancel();
     unawaited(_stopLiveAudio());
-    state = state.copyWith(status: VoiceStatus.review, finalizeProposal: state.patch);
+    state = state.copyWith(
+      status: VoiceStatus.review,
+      finalizeProposal: state.patch,
+      isHandsFreeActive: false,
+      isRecording: false,
+    );
   }
 
   void updateReviewProposal(VoiceProfilePatch updated) {
@@ -294,8 +372,35 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   }
 
   Future<void> cancel() async {
+    // Tells the backend this is an explicit exit — deletes the session
+    // immediately instead of leaving it in the resumable post-disconnect
+    // grace period (see live_session.py's SessionState.disconnected_at).
+    // Fire-and-forget: cancelSession() is itself best-effort (swallows its
+    // own errors), and the UI shouldn't wait on it to close.
+    final sessionId = _sessionId;
+    if (sessionId != null) {
+      unawaited(ref.read(voiceApiProvider).cancelSession(sessionId));
+    }
     await _teardownSession();
     state = const VoiceAssistantState();
+  }
+
+  /// Called when the app is truly backgrounded (AppLifecycleState.paused)
+  /// while a live turn is in progress — stops mic/audio/socket like cancel(),
+  /// but uses copyWith (not a fresh VoiceAssistantState) so transcript and
+  /// searchResults survive and are still visible if the user returns to the
+  /// overlay. No-op outside listening/speaking (e.g. mid-save, in review, or
+  /// already torn down) so those flows aren't disturbed by backgrounding.
+  Future<void> pauseForBackground() async {
+    if (state.status != VoiceStatus.listening && state.status != VoiceStatus.speaking) return;
+    _speakingDebounce?.cancel();
+    await _stopLiveAudio();
+    state = state.copyWith(
+      status: VoiceStatus.error,
+      errorMessage: 'Paused — the assistant stopped listening while the app was in the background.',
+      isHandsFreeActive: false,
+      isRecording: false,
+    );
   }
 
   void _handleFrame(VoiceSocketFrame frame) {
@@ -312,7 +417,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       case VoiceSocketClosed():
         state = state.copyWith(
           status: VoiceStatus.error,
-          errorMessage: 'Connection lost — please start again.',
+          errorMessage: 'Connection lost — tap Reconnect to keep talking.',
+          isHandsFreeActive: false,
+          isRecording: false,
         );
     }
   }
@@ -366,6 +473,8 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         state = state.copyWith(
           status: VoiceStatus.review,
           finalizeProposal: VoiceProfilePatch.fromJson(json['patch'] as Map<String, dynamic>? ?? const {}),
+          isHandsFreeActive: false,
+          isRecording: false,
         );
       case 'interrupted':
         // Barge-in: the user started talking while the model was still
@@ -380,11 +489,18 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         // saved whatever was captured (see live_session.py's
         // _auto_save_and_close) rather than erroring out, so just show the
         // same success screen a normal Confirm tap would.
-        state = state.copyWith(status: VoiceStatus.done, result: VoiceFinalizeResult.fromJson(json));
+        state = state.copyWith(
+          status: VoiceStatus.done,
+          result: VoiceFinalizeResult.fromJson(json),
+          isHandsFreeActive: false,
+          isRecording: false,
+        );
       case 'session_timeout':
         state = state.copyWith(
           status: VoiceStatus.error,
           errorMessage: 'The conversation timed out — please start again.',
+          isHandsFreeActive: false,
+          isRecording: false,
         );
     }
   }
@@ -415,7 +531,12 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   }
 
   void _handleSocketError(Object error) {
-    state = state.copyWith(status: VoiceStatus.error, errorMessage: error.toString());
+    state = state.copyWith(
+      status: VoiceStatus.error,
+      errorMessage: error.toString(),
+      isHandsFreeActive: false,
+      isRecording: false,
+    );
   }
 
   // Cancels the frame subscription before closing the socket, so our own
@@ -462,6 +583,14 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
 final voiceAssistantProvider =
     AutoDisposeNotifierProvider<VoiceAssistantNotifier, VoiceAssistantState>(VoiceAssistantNotifier.new);
 
+// Deliberately excludes ambiguous bare conversational answers like "no",
+// "yes", "done", "save", "go ahead" — those are extremely likely to occur as
+// an ordinary answer to a mid-interview yes/no follow-up (e.g. "Do you have
+// a favorite brand?" -> "No"), and matching on them here ended the interview
+// after just a few turns instead of letting the model keep going. Only
+// unambiguous multi-word closing phrases are matched now. Must be kept in
+// sync with the duplicate list in services/voice-assistant/live_session.py's
+// _CLOSING_PHRASES — no shared source of truth between the two today.
 bool _isClosingPhrase(String text) {
   final normalized = text
       .trim()
@@ -469,9 +598,6 @@ bool _isClosingPhrase(String text) {
       .replaceAll('’', "'")
       .replaceAll(RegExp(r'[.!?]+$'), '');
   return {
-    'no',
-    'nope',
-    'no thanks',
     'nothing else',
     'nothing more',
     "that's all",
@@ -480,14 +606,9 @@ bool _isClosingPhrase(String text) {
     'thats it',
     "i'm done",
     'im done',
-    'done',
     'save it',
-    'go ahead',
     'looks good',
-    'save',
     "that's everything",
     'thats everything',
-    'yes save it',
-    'yes',
   }.contains(normalized);
 }

@@ -1,7 +1,6 @@
 {
   "projects": {
-    "default": "shoplens-dev-499700",
-    "dev": "shoplens-dev-499700",
-    "prod": "cookshop-dev-prj-bd7e2"
+    "default": "project-b1a5dd5a-69e6-4db3-9d7",
+    "dev": "project-b1a5dd5a-69e6-4db3-9d7"
   }
 }

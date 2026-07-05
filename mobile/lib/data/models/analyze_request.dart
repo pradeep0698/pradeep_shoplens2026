@@ -11,6 +11,8 @@ class AnalyzeRequest {
   @JsonKey(name: 'gcs_uri')         final String?              gcsUri;
   @JsonKey(name: 'image_url')       final String?              imageUrl;
   @JsonKey(name: 'max_searches')    final int?                 maxSearches;
+  @JsonKey(name: 'preference_terms')    final List<String>     preferenceTerms;
+  @JsonKey(name: 'shopping_categories') final List<String>     shoppingCategories;
   @JsonKey(name: 'mlkit_context')   final Map<String, dynamic>? mlkitContext;
   final String transcript;
   final String? query;
@@ -23,6 +25,8 @@ class AnalyzeRequest {
     this.gcsUri,
     this.imageUrl,
     this.maxSearches,
+    this.preferenceTerms = const [],
+    this.shoppingCategories = const [],
     this.mlkitContext,
     this.transcript = '',
     this.query,

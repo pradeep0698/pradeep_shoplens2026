@@ -54,13 +54,15 @@ class AnalyzeImageUseCase {
     var anyMatched = false;
 
     await for (final event in _analyzer.analyzeStream(AnalyzeRequest(
-      imageData:     encodeImageToBase64(imageBytes),
-      imageMimeType: mimeType,
-      ignoreTerms:   ignoreTerms,
-      transcript:    '',
-      country:       country,
-      maxSearches:   maxSearches,
-      mlkitContext:  mlkitContext,
+      imageData:          encodeImageToBase64(imageBytes),
+      imageMimeType:      mimeType,
+      ignoreTerms:        ignoreTerms,
+      transcript:         '',
+      country:            country,
+      maxSearches:        maxSearches,
+      preferenceTerms:    preferenceTerms,
+      shoppingCategories: shoppingCategories,
+      mlkitContext:       mlkitContext,
     ))) {
       switch (event['type']) {
         case 'items':
@@ -104,6 +106,7 @@ class AnalyzeImageUseCase {
         ignoreTerms:        ignoreTerms,
         preferenceTerms:    preferenceTerms,
         shoppingCategories: shoppingCategories,
+        country:            country,
         maxSearches:        maxSearches,
       ));
     }
@@ -117,13 +120,17 @@ class AnalyzeImageUseCase {
     required List<String> ignoreTerms,
     required List<String> preferenceTerms,
     List<String>          shoppingCategories = const [],
+    String?                country,
     int?                  maxSearches,
   }) async {
     try {
       final matchResponse = await _matcher.match(MatchRequest(
-        items:       items,
-        ignoreTerms: ignoreTerms,
-        maxSearches: maxSearches,
+        items:              items,
+        ignoreTerms:        ignoreTerms,
+        maxSearches:        maxSearches,
+        country:            country,
+        preferenceTerms:    preferenceTerms,
+        shoppingCategories: shoppingCategories,
       ));
       if (matchResponse.matchedProducts.isNotEmpty) {
         final ranked = rankProducts(matchResponse.matchedProducts, shoppingCategories,

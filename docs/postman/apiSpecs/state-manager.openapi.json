@@ -1,0 +1,492 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "State Manager",
+    "description": "Firestore-backed session state service. Stores the matched products for an active shopping session so the frontend and mobile clients can poll for live results.\n\n**Auth:** none required \u2014 CORS is open (`*`).\n\n**Session lifecycle:** The Pub/Sub Worker calls `POST /session/{id}/products` as each HLS segment is processed. The frontend polls `GET /session/{id}` to display results in real-time.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/session/{session_id}/products": {
+      "post": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Save products to session",
+        "description": "Merges the provided products into the Firestore document for `session_id`. Called by the Pub/Sub Worker after each HLS segment is processed.",
+        "operationId": "update_session__session_id__products_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateResponse"
+                },
+                "example": {
+                  "status": "updated",
+                  "session_id": "live-session-001"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request body failed Pydantic validation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session/{session_id}": {
+      "get": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Get session products",
+        "description": "Returns the current product list for `session_id` from Firestore. Polled by the frontend to display live shopping results.",
+        "operationId": "get_session__session_id__get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionData"
+                },
+                "example": {
+                  "products": [
+                    {
+                      "product_id": "abc123",
+                      "name": "KitchenAid Stand Mixer",
+                      "price": 449.99,
+                      "image_url": "https://example.com/mixer.jpg",
+                      "purchase_url": "https://example.com/buy/mixer",
+                      "seller": "Best Buy",
+                      "category": "Kitchen Appliances"
+                    }
+                  ],
+                  "last_updated": {
+                    "seconds": 1751500000,
+                    "nanoseconds": 123000000
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorDetail"
+                },
+                "example": {
+                  "detail": "Session 'live-session-999' not found"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Clear session",
+        "description": "Deletes all products from the Firestore session document. Does not fail if the session doesn't exist.",
+        "operationId": "clear_session__session_id__delete",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClearResponse"
+                },
+                "example": {
+                  "status": "cleared",
+                  "session_id": "live-session-001"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Health check",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                },
+                "example": {
+                  "status": "ok"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ProductItem": {
+        "properties": {
+          "product_id": {
+            "type": "string",
+            "title": "Product Id",
+            "description": "Unique product identifier from SerpAPI"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Human-readable product name"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price",
+            "description": "Price in USD"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url",
+            "description": "Product image URL (Google CDN)"
+          },
+          "purchase_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Purchase Url",
+            "description": "Link to purchase this product"
+          },
+          "seller": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seller",
+            "description": "Retailer name"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category",
+            "description": "Product category"
+          }
+        },
+        "type": "object",
+        "required": [
+          "product_id",
+          "name"
+        ],
+        "title": "ProductItem"
+      },
+      "UpdateRequest": {
+        "properties": {
+          "products": {
+            "items": {
+              "$ref": "#/components/schemas/ProductItem"
+            },
+            "type": "array",
+            "title": "Products",
+            "description": "Products to merge into the session"
+          }
+        },
+        "type": "object",
+        "required": [
+          "products"
+        ],
+        "title": "UpdateRequest",
+        "examples": [
+          {
+            "products": [
+              {
+                "category": "Kitchen Appliances",
+                "image_url": "https://example.com/mixer.jpg",
+                "name": "KitchenAid Stand Mixer",
+                "price": 449.99,
+                "product_id": "abc123",
+                "purchase_url": "https://example.com/buy/mixer",
+                "seller": "Best Buy"
+              }
+            ]
+          }
+        ]
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "SessionData": {
+        "type": "object",
+        "description": "Raw Firestore document body for LiveShoppingSessions/{session_id}",
+        "properties": {
+          "products": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProductItem"
+            }
+          },
+          "last_updated": {
+            "type": "object",
+            "nullable": true,
+            "description": "Firestore server timestamp, converted to epoch seconds/nanoseconds",
+            "properties": {
+              "seconds": {
+                "type": "integer"
+              },
+              "nanoseconds": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "required": [
+          "products"
+        ]
+      },
+      "UpdateResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "updated"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "session_id"
+        ]
+      },
+      "ClearResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "cleared"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "session_id"
+        ]
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "Human-readable error message"
+          }
+        },
+        "required": [
+          "detail"
+        ]
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Session",
+      "description": "Session product state \u2014 read, write, delete"
+    },
+    {
+      "name": "System",
+      "description": "Health and diagnostics"
+    }
+  ],
+  "servers": [
+    {
+      "url": "https://state-manager-82592393149.us-central1.run.app",
+      "description": "cookshop-dev-rajan-prod (live, public)"
+    },
+    {
+      "url": "https://state-manager-115535290381.us-central1.run.app",
+      "description": "shoplens-dev"
+    },
+    {
+      "url": "http://localhost:8082",
+      "description": "local (uvicorn main:app)"
+    }
+  ]
+}

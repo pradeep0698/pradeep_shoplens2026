@@ -183,15 +183,20 @@ void main() {
       );
     });
 
-    test('disables automatic activity detection (snake_case wire key)', () {
+    test('uses the supported Gemini native-audio model', () {
       final setup = setupFor(mode: 'preferences');
-      expect(setup['realtimeInputConfig']['automatic_activity_detection']['disabled'], isTrue);
+      expect(setup['model'], 'models/gemini-2.5-flash-native-audio-preview-12-2025');
     });
 
-    test('context window compression uses snake_case wire keys', () {
+    test('disables automatic activity detection', () {
       final setup = setupFor(mode: 'preferences');
-      expect(setup['contextWindowCompression']['trigger_tokens'], kContextWindowTriggerTokens);
-      expect(setup['contextWindowCompression']['sliding_window'], <String, dynamic>{});
+      expect(setup['realtimeInputConfig']['automaticActivityDetection']['disabled'], isTrue);
+    });
+
+    test('context window compression uses raw WebSocket wire keys', () {
+      final setup = setupFor(mode: 'preferences');
+      expect(setup['contextWindowCompression']['triggerTokens'], kContextWindowTriggerTokens);
+      expect(setup['contextWindowCompression']['slidingWindow'], <String, dynamic>{});
     });
 
     test('preferences mode uses preference tools', () {

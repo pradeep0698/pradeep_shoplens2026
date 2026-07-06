@@ -17,7 +17,7 @@ import '../../models/voice_session.dart';
 // of the assistant itself, not per-deployment config, so there's no need for
 // build-time tunability here. If the backend's defaults are ever bumped,
 // update these to match.
-const kVoiceModel = 'models/gemini-2.5-flash-native-audio-latest';
+const kVoiceModel = 'models/gemini-2.5-flash-native-audio-preview-12-2025';
 const kVoiceName = 'Puck';
 const kContextWindowTriggerTokens = 32000;
 
@@ -198,14 +198,9 @@ List<Map<String, dynamic>> toolsForMode(String mode) => mode == 'search'
         },
       ];
 
-/// Ports live_session.py's _live_config + _build_setup_json exactly — the
-/// exact wire shape (including which nested keys stay snake_case despite
-/// everything else being camelCase) was verified by running the backend's
-/// own _build_setup_json directly against a real LiveConnectConfig, not
-/// assumed. Do not "fix" automatic_activity_detection/trigger_tokens/
-/// sliding_window to camelCase — that's a real, confirmed SDK/converter
-/// quirk (the same one that makes tool_response's top-level key snake_case
-/// too), not an inconsistency to normalize away.
+/// Ports live_session.py's _live_config to the lowerCamelCase JSON shape used
+/// by the raw Gemini Live WebSocket protocol. The Python SDK accepts
+/// snake_case model fields, but those SDK input names are not wire keys.
 Map<String, dynamic> buildSetupJson({
   required VoiceProfilePatch existingProfile,
   required String mode,
@@ -238,11 +233,11 @@ Map<String, dynamic> buildSetupJson({
     'inputAudioTranscription': {},
     'outputAudioTranscription': {},
     'realtimeInputConfig': {
-      'automatic_activity_detection': {'disabled': true},
+      'automaticActivityDetection': {'disabled': true},
     },
     'contextWindowCompression': {
-      'trigger_tokens': kContextWindowTriggerTokens,
-      'sliding_window': {},
+      'triggerTokens': kContextWindowTriggerTokens,
+      'slidingWindow': {},
     },
   };
 }

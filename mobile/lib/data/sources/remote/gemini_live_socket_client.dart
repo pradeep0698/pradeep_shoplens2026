@@ -40,20 +40,12 @@ const _kNudgeText =
 ///
 /// Wire protocol notes (confirmed against the installed google-genai SDK's
 /// source, and partially against a live spike — see Phase 0 of the plan):
-/// - Client->server envelope keys are snake_case: `setup`, `realtime_input`,
-///   `tool_response`. Server->client envelope keys are camelCase:
-///   `setupComplete`, `serverContent`, `toolCall`, `goAway`. All NESTED
-///   fields in both directions are camelCase.
+/// - Raw WebSocket JSON uses lowerCamelCase envelope keys: `setup`,
+///   `realtimeInput`, and `toolResponse` client-side; `setupComplete`,
+///   `serverContent`, `toolCall`, and `goAway` server-side.
 /// - There are no binary WS frames in this protocol — audio travels
 ///   base64-encoded inside JSON text frames both directions.
-/// - Base64 flavor (urlsafe vs standard) was NOT confirmed against a real
-///   session by the Phase 0 spike (blocked by an AI Studio billing issue
-///   before reaching that check) — this defaults to urlsafe base64
-///   (base64Url), matching the installed google-genai SDK's own internal
-///   choice (base64.urlsafe_b64encode in _common.py's encode_unserializable_
-///   types), the best available signal absent a live confirmation. Flag
-///   this as something to verify once billing is resolved, and switch to
-///   standard base64Encode/base64Decode if audio doesn't round-trip correctly.
+/// - Audio uses standard Base64, matching the raw-WebSocket API examples.
 ///
 /// Note: services/voice-assistant's VOICE_ASSISTANT_MOCK_GEMINI dev/test
 /// mode has no equivalent here — it only exists in the WS-proxy path
@@ -76,6 +68,7 @@ class GeminiLiveSocketClient implements VoiceTransport {
   WebSocket? _socket;
   StreamSubscription? _subscription;
   final _frames = StreamController<VoiceSocketFrame>.broadcast();
+  Completer<void>? _setupCompleter;
 
   String? _sessionId;
   int _sampleRate = 16000;
@@ -126,8 +119,18 @@ class GeminiLiveSocketClient implements VoiceTransport {
       resumeTranscript: resumeTranscript,
     );
 
-    final socket = await WebSocket.connect(_wsUri, headers: {'x-goog-api-key': _apiKey});
+    final uri = Uri.parse(_wsUri).replace(queryParameters: {'key': _apiKey});
+    late final WebSocket socket;
+    try {
+      socket = await WebSocket.connect(uri.toString());
+    } on Object {
+      // WebSocket exceptions can include the full URL. Do not surface the
+      // query-string API key through the provider's user-visible error text.
+      throw StateError('Could not connect to Gemini Live.');
+    }
     _socket = socket;
+    final setupCompleter = Completer<void>();
+    _setupCompleter = setupCompleter;
     _subscription = socket.listen(
       (event) {
         if (event is! String) return; // no binary frames in this protocol
@@ -139,11 +142,25 @@ class GeminiLiveSocketClient implements VoiceTransport {
         }
         _handleMessage(message);
       },
-      onDone: () => _frames.add(VoiceSocketClosed(code: socket.closeCode, reason: socket.closeReason)),
-      onError: (Object error, StackTrace _) => _frames.addError(error),
+      onDone: () {
+        if (!setupCompleter.isCompleted) {
+          setupCompleter.completeError(StateError(
+            'Gemini closed before setup completed (${socket.closeCode}: ${socket.closeReason ?? 'no reason'}).',
+          ));
+        }
+        _frames.add(VoiceSocketClosed(code: socket.closeCode, reason: socket.closeReason));
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        if (!setupCompleter.isCompleted) setupCompleter.completeError(error, stackTrace);
+        _frames.addError(error, stackTrace);
+      },
     );
 
     socket.add(jsonEncode({'setup': setup}));
+    await setupCompleter.future.timeout(
+      const Duration(seconds: 15),
+      onTimeout: () => throw TimeoutException('Gemini Live setup did not complete.'),
+    );
     _sendGreetingTrigger(resumed: resumeTranscript.isNotEmpty);
     _resetIdleTimer();
   }
@@ -155,12 +172,16 @@ class GeminiLiveSocketClient implements VoiceTransport {
   /// Reuses the exact activityStart/text/activityEnd shape already proven
   /// by _onIdleNudge below.
   void _sendGreetingTrigger({required bool resumed}) {
-    _socket?.add(jsonEncode({'realtime_input': {'activityStart': {}}}));
-    _socket?.add(jsonEncode({'realtime_input': {'text': greetingCue(resumed)}}));
-    _socket?.add(jsonEncode({'realtime_input': {'activityEnd': {}}}));
+    _socket?.add(jsonEncode({'realtimeInput': {'activityStart': {}}}));
+    _socket?.add(jsonEncode({'realtimeInput': {'text': greetingCue(resumed)}}));
+    _socket?.add(jsonEncode({'realtimeInput': {'activityEnd': {}}}));
   }
 
   void _handleMessage(Map<String, dynamic> message) {
+    if (message.containsKey('setupComplete')) {
+      final completer = _setupCompleter;
+      if (completer != null && !completer.isCompleted) completer.complete();
+    }
     if (message.containsKey('serverContent')) {
       _handleServerContent(message['serverContent'] as Map<String, dynamic>);
     }
@@ -175,7 +196,6 @@ class GeminiLiveSocketClient implements VoiceTransport {
       // it saves whatever's captured and reports success).
       unawaited(_autoSaveAndClose());
     }
-    // setupComplete: no-op, connection is simply ready for realtime_input.
   }
 
   /// Restarts the nudge/close-grace watchdog — called on every genuine
@@ -192,9 +212,9 @@ class GeminiLiveSocketClient implements VoiceTransport {
   void _onIdleNudge() {
     if (_nudged) return;
     _nudged = true;
-    _socket?.add(jsonEncode({'realtime_input': {'activityStart': {}}}));
-    _socket?.add(jsonEncode({'realtime_input': {'text': _kNudgeText}}));
-    _socket?.add(jsonEncode({'realtime_input': {'activityEnd': {}}}));
+    _socket?.add(jsonEncode({'realtimeInput': {'activityStart': {}}}));
+    _socket?.add(jsonEncode({'realtimeInput': {'text': _kNudgeText}}));
+    _socket?.add(jsonEncode({'realtimeInput': {'activityEnd': {}}}));
     _idleTimer = Timer(const Duration(seconds: _kInactivityCloseGraceSeconds), () {
       unawaited(_autoSaveAndClose());
     });
@@ -241,7 +261,7 @@ class GeminiLiveSocketClient implements VoiceTransport {
         final inlineData = (part as Map<String, dynamic>)['inlineData'] as Map<String, dynamic>?;
         final data = inlineData?['data'] as String?;
         if (data != null) {
-          _frames.add(VoiceAudioFrame(base64Url.decode(data)));
+          _frames.add(VoiceAudioFrame(base64Decode(data)));
         }
       }
     }
@@ -321,24 +341,22 @@ class GeminiLiveSocketClient implements VoiceTransport {
       functionResponses.add({'id': id, 'name': name, 'response': result});
     }
 
-    // Sent back over Gemini's own WS (not the backend) — note the
-    // snake_case top-level key despite every other server-bound field being
-    // camelCase (confirmed from the SDK's literal json.dumps call site).
-    _socket?.add(jsonEncode({'tool_response': {'functionResponses': functionResponses}}));
+    // Sent back over Gemini's own WebSocket after local tool execution.
+    _socket?.add(jsonEncode({'toolResponse': {'functionResponses': functionResponses}}));
   }
 
   @override
   void sendAudio(Uint8List chunk) => _socket?.add(jsonEncode({
-        'realtime_input': {
-          'audio': {'data': base64Url.encode(chunk), 'mimeType': 'audio/pcm;rate=$_sampleRate'}
+        'realtimeInput': {
+          'audio': {'data': base64Encode(chunk), 'mimeType': 'audio/pcm;rate=$_sampleRate'}
         }
       }));
 
   @override
   void sendText(String text) {
-    _socket?.add(jsonEncode({'realtime_input': {'activityStart': {}}}));
-    _socket?.add(jsonEncode({'realtime_input': {'text': text}}));
-    _socket?.add(jsonEncode({'realtime_input': {'activityEnd': {}}}));
+    _socket?.add(jsonEncode({'realtimeInput': {'activityStart': {}}}));
+    _socket?.add(jsonEncode({'realtimeInput': {'text': text}}));
+    _socket?.add(jsonEncode({'realtimeInput': {'activityEnd': {}}}));
     _resetIdleTimer();
   }
 
@@ -351,12 +369,12 @@ class GeminiLiveSocketClient implements VoiceTransport {
 
   @override
   void sendSpeechStart() {
-    _socket?.add(jsonEncode({'realtime_input': {'activityStart': {}}}));
+    _socket?.add(jsonEncode({'realtimeInput': {'activityStart': {}}}));
     _resetIdleTimer();
   }
 
   @override
-  void sendSpeechEnd() => _socket?.add(jsonEncode({'realtime_input': {'activityEnd': {}}}));
+  void sendSpeechEnd() => _socket?.add(jsonEncode({'realtimeInput': {'activityEnd': {}}}));
 
   @override
   Future<void> close() async {
@@ -365,6 +383,7 @@ class GeminiLiveSocketClient implements VoiceTransport {
     await _subscription?.cancel();
     await _socket?.close();
     _socket = null;
+    _setupCompleter = null;
   }
 
   @override

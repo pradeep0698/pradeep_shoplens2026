@@ -211,6 +211,16 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         voiceApi: voiceApi,
       );
       _socket = socket;
+      // Subscribe before connect so setup failures and a fast opening response
+      // cannot be lost by the transport's broadcast stream.
+      _frameSubscription = socket.frames.listen(
+        (frame) {
+          if (_isCurrent(generation)) _handleFrame(frame);
+        },
+        onError: (Object error) {
+          if (_isCurrent(generation)) _handleSocketError(error);
+        },
+      );
       await socket.connect(
         sessionId: startResponse.sessionId,
         wsUrl: startResponse.wsUrl,
@@ -220,14 +230,6 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         resumeTranscript: state.transcript,
       );
       if (!_isCurrent(generation)) return;
-      _frameSubscription = socket.frames.listen(
-        (frame) {
-          if (_isCurrent(generation)) _handleFrame(frame);
-        },
-        onError: (Object error) {
-          if (_isCurrent(generation)) _handleSocketError(error);
-        },
-      );
 
       // On web, record_web ignores RecordConfig.sampleRate and silently
       // captures at whatever rate the browser's AudioContext settles on
@@ -248,6 +250,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       // arrives as a normal transcript/audio frame, same as any other turn.
       state = state.copyWith(status: VoiceStatus.listening);
     } catch (e, st) {
+      await _stopLiveAudio(invalidate: false);
       // Stack trace is included here (not just e.toString()) purely as a
       // temporary diagnostic aid since this path is hard to attach a
       // debugger to on a real device — remove once the cause is found.

@@ -19,6 +19,12 @@ import '../../data/sources/remote/voice_transport_selector.dart';
 // Gemini Live API expects raw 16-bit PCM input at 16kHz.
 const _kInputSampleRate = 16000;
 
+String _displayVoiceError(Object error) {
+  return error
+      .toString()
+      .replaceFirst(RegExp(r'^(Bad state|Exception):\s*'), '');
+}
+
 enum VoiceStatus { idle, connecting, listening, speaking, review, saving, done, error }
 
 class VoiceAssistantState {
@@ -249,13 +255,12 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       // turn lands (see live_session.py's _send_greeting_trigger) — it
       // arrives as a normal transcript/audio frame, same as any other turn.
       state = state.copyWith(status: VoiceStatus.listening);
-    } catch (e, st) {
+    } catch (e) {
       await _stopLiveAudio(invalidate: false);
-      // Stack trace is included here (not just e.toString()) purely as a
-      // temporary diagnostic aid since this path is hard to attach a
-      // debugger to on a real device — remove once the cause is found.
-      final frames = st.toString().split('\n').take(8).join('\n');
-      state = state.copyWith(status: VoiceStatus.error, errorMessage: '$e\n\n$frames');
+      state = state.copyWith(
+        status: VoiceStatus.error,
+        errorMessage: _displayVoiceError(e),
+      );
     }
   }
 
@@ -598,7 +603,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   void _handleSocketError(Object error) {
     state = state.copyWith(
       status: VoiceStatus.error,
-      errorMessage: error.toString(),
+      errorMessage: _displayVoiceError(error),
       isHandsFreeActive: false,
       isRecording: false,
     );

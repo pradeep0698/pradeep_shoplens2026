@@ -43,8 +43,8 @@ const _kNudgeText =
 /// - Raw WebSocket JSON uses lowerCamelCase envelope keys: `setup`,
 ///   `realtimeInput`, and `toolResponse` client-side; `setupComplete`,
 ///   `serverContent`, `toolCall`, and `goAway` server-side.
-/// - There are no binary WS frames in this protocol — audio travels
-///   base64-encoded inside JSON text frames both directions.
+/// - Audio travels base64-encoded inside JSON frames. Incoming JSON may be
+///   exposed as either text or bytes depending on the WebSocket client.
 /// - Audio uses standard Base64, matching the raw-WebSocket API examples.
 ///
 /// Note: services/voice-assistant's VOICE_ASSISTANT_MOCK_GEMINI dev/test
@@ -119,13 +119,14 @@ class GeminiLiveSocketClient implements VoiceTransport {
       resumeTranscript: resumeTranscript,
     );
 
-    final uri = Uri.parse(_wsUri).replace(queryParameters: {'key': _apiKey});
     late final WebSocket socket;
     try {
-      socket = await WebSocket.connect(uri.toString());
+      socket = await WebSocket.connect(
+        _wsUri,
+        headers: {'x-goog-api-key': _apiKey},
+      );
     } on Object {
-      // WebSocket exceptions can include the full URL. Do not surface the
-      // query-string API key through the provider's user-visible error text.
+      // Keep low-level handshake details out of the user-visible error text.
       throw StateError('Could not connect to Gemini Live.');
     }
     _socket = socket;
@@ -133,34 +134,61 @@ class GeminiLiveSocketClient implements VoiceTransport {
     _setupCompleter = setupCompleter;
     _subscription = socket.listen(
       (event) {
-        if (event is! String) return; // no binary frames in this protocol
         Map<String, dynamic> message;
         try {
-          message = jsonDecode(event) as Map<String, dynamic>;
-        } catch (_) {
-          return; // malformed frame — ignore rather than crash the session
+          final payload = switch (event) {
+            String value => value,
+            List<int> value => utf8.decode(value),
+            _ => throw const FormatException(
+                'Unsupported WebSocket frame type.',
+              ),
+          };
+          message = jsonDecode(payload) as Map<String, dynamic>;
+        } on Object catch (_, stackTrace) {
+          if (!setupCompleter.isCompleted) {
+            setupCompleter.completeError(
+              StateError('Gemini Live returned an unreadable setup response.'),
+              stackTrace,
+            );
+          }
+          return;
         }
         _handleMessage(message);
       },
       onDone: () {
         if (!setupCompleter.isCompleted) {
-          setupCompleter.completeError(StateError(
-            'Gemini closed before setup completed (${socket.closeCode}: ${socket.closeReason ?? 'no reason'}).',
-          ));
+          setupCompleter.completeError(
+            StateError(
+              'Gemini closed before setup completed '
+              '(${socket.closeCode}: ${socket.closeReason ?? 'no reason'}).',
+            ),
+          );
         }
-        _frames.add(VoiceSocketClosed(code: socket.closeCode, reason: socket.closeReason));
+        _frames.add(
+          VoiceSocketClosed(
+            code: socket.closeCode,
+            reason: socket.closeReason,
+          ),
+        );
       },
       onError: (Object error, StackTrace stackTrace) {
-        if (!setupCompleter.isCompleted) setupCompleter.completeError(error, stackTrace);
+        if (!setupCompleter.isCompleted) {
+          setupCompleter.completeError(error, stackTrace);
+        }
         _frames.addError(error, stackTrace);
       },
     );
 
     socket.add(jsonEncode({'setup': setup}));
-    await setupCompleter.future.timeout(
-      const Duration(seconds: 15),
-      onTimeout: () => throw TimeoutException('Gemini Live setup did not complete.'),
-    );
+    try {
+      await setupCompleter.future.timeout(const Duration(seconds: 15));
+    } on TimeoutException {
+      await close();
+      throw StateError('Gemini Live did not acknowledge the session setup.');
+    } on Object {
+      await close();
+      rethrow;
+    }
     _sendGreetingTrigger(resumed: resumeTranscript.isNotEmpty);
     _resetIdleTimer();
   }
@@ -178,9 +206,27 @@ class GeminiLiveSocketClient implements VoiceTransport {
   }
 
   void _handleMessage(Map<String, dynamic> message) {
+    final setupCompleter = _setupCompleter;
+    final error =
+        message['error'] ?? (message.containsKey('code') ? message : null);
+    if (error != null) {
+      final detail = error is Map ? error['message'] : error;
+      final exception = StateError(
+        detail is String && detail.isNotEmpty
+            ? 'Gemini Live rejected the session: $detail'
+            : 'Gemini Live rejected the session.',
+      );
+      if (setupCompleter != null && !setupCompleter.isCompleted) {
+        setupCompleter.completeError(exception);
+      } else {
+        _frames.addError(exception);
+      }
+      return;
+    }
     if (message.containsKey('setupComplete')) {
-      final completer = _setupCompleter;
-      if (completer != null && !completer.isCompleted) completer.complete();
+      if (setupCompleter != null && !setupCompleter.isCompleted) {
+        setupCompleter.complete();
+      }
     }
     if (message.containsKey('serverContent')) {
       _handleServerContent(message['serverContent'] as Map<String, dynamic>);

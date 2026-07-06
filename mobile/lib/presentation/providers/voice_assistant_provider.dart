@@ -464,10 +464,18 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         }
       case VoiceControlFrame(json: final json):
         _handleControlFrame(json);
-      case VoiceSocketClosed():
+      case VoiceSocketClosed(:final code, :final reason):
+        // Surface the underlying close code/reason when the transport has
+        // one (dart:io's WebSocket exposes these once closed) — the
+        // direct-connect transport in particular bypasses the backend
+        // entirely, so this in-app message is often the only diagnostic
+        // signal available at all, without a device console attached.
+        final detail = reason != null && reason.isNotEmpty
+            ? ' (${code != null ? '$code: ' : ''}$reason)'
+            : '';
         state = state.copyWith(
           status: VoiceStatus.error,
-          errorMessage: 'Connection lost — tap Reconnect to keep talking.',
+          errorMessage: 'Connection lost — tap Reconnect to keep talking.$detail',
           isHandsFreeActive: false,
           isRecording: false,
         );

@@ -1,4 +1,7 @@
-# Issues From Logs — ai-analyzer
+# Issues From Logs — ai-analyzer (shoplens2026-dev)
+
+Platform: **shoplens2026-dev** (active dev — see the `cookshop-dev` counterpart at
+`docs/issues/issues-from-logs.cookshop-dev.md` for Rajan's weekly-release prod).
 
 Auto-maintained by the `check-ai-analyzer-logs` skill (`.claude/commands/check-ai-analyzer-logs.md`)
 from Cloud Run logs for the `ai-analyzer` service:
@@ -7,14 +10,14 @@ https://console.cloud.google.com/run/detail/us-central1/ai-analyzer/observabilit
 Each entry's **First seen / Last seen / Occurrences** fields are maintained by the skill —
 don't hand-edit those. Free-form notes you add under an entry are preserved across runs.
 
-Last checked: 2026-07-04T03:35:25Z — no new log entries
+Last checked: 2026-07-06T15:44:37Z — no new log entries
 
 ## Open
 
 ### Live-video `/analyze` always fails Gemini with 400 INVALID_ARGUMENT — ERROR
 - First seen: 2026-07-03T14:52:34Z
-- Last seen: 2026-07-03T23:25:48Z
-- Occurrences: 7 (every live-video `/analyze` call seen in the last 12h failed this way)
+- Last seen: 2026-07-06T01:24:55Z
+- Occurrences: 12 (every live-video `/analyze` call seen since first detected has failed this way)
 - Endpoint/source: `POST /analyze` (live-video path) → `analyzer.py:analyze_media` → `client.models.generate_content` at `analyzer.py:984`
 - Sample: `req=17d763ef | gcs_uri=gs://shoplens-dev-hls-segments/live/segment001.ts` →
   `google.genai.errors.ClientError: 400 INVALID_ARGUMENT. {'message': 'Request contains an invalid argument.'}`

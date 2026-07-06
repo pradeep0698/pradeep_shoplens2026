@@ -92,6 +92,7 @@ frontend_old/
 
 # Deploy tracking
 .cookshop-dev-last-deploy
+.shoplens2026-dev-last-deploy
 
 # Skill-local run state (checkpoints etc., not meant to be shared/committed)
 .claude/state/

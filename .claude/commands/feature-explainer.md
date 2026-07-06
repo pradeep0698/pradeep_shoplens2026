@@ -68,6 +68,8 @@ older memory note. If you're not sure something is still true, say so rather tha
 
 - Reply in chat with the full explainer — this is usually wanted immediately (demo prep, stakeholder
   question, onboarding).
-- Also save a copy to `docs/concepts/<kebab-case-feature-name>.md` (create the `docs/concepts/`
-  directory if it doesn't exist yet) so it persists as reusable documentation, and mention the path
-  in your reply. Skip the save only if the user says this is a one-off/throwaway question.
+- Always also save a copy to `docs/explainer/<kebab-case-feature-name>.md` (create the
+  `docs/explainer/` directory if it doesn't exist yet) so it persists as reusable documentation, and
+  mention the path in your reply. This is a fixed location — every explainer this skill produces
+  lives under `docs/explainer/`, not `docs/concepts/` or anywhere else, even for a question that
+  feels like a one-off.

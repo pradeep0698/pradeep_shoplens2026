@@ -84,6 +84,15 @@ deploy_service() {
     --source  "services/$svc" \
     --set-env-vars "$vars" \
     --quiet
+  # Belt-and-suspenders: if traffic was ever pinned to a fixed revision
+  # (e.g. by a manual `update-traffic`), new deploys silently get 0%
+  # traffic and the service keeps serving stale code. Force it back onto
+  # LATEST every deploy so this can't recur unnoticed.
+  gcloud run services update-traffic "$svc" \
+    --project "$PROJECT" \
+    --region  "$REGION" \
+    --to-latest \
+    --quiet
   ok "$svc deployed"
 }
 

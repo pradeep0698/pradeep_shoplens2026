@@ -151,6 +151,11 @@ jobs:
             --source  services/ai-analyzer \
             --set-env-vars "$VARS" \
             --quiet
+          gcloud run services update-traffic ai-analyzer \
+            --project "$PROJECT" \
+            --region  "$REGION" \
+            --to-latest \
+            --quiet
 
   # ── 3. Deploy product-matcher ─────────────────────────────────────────────────
   deploy-product-matcher:
@@ -185,6 +190,11 @@ jobs:
             --region  "$REGION" \
             --source  services/product-matcher \
             --set-env-vars "$VARS" \
+            --quiet
+          gcloud run services update-traffic product-matcher \
+            --project "$PROJECT" \
+            --region  "$REGION" \
+            --to-latest \
             --quiet
 
   # ── 4. Deploy state-manager ───────────────────────────────────────────────────
@@ -221,6 +231,11 @@ jobs:
             --source  services/state-manager \
             --set-env-vars "$VARS" \
             --quiet
+          gcloud run services update-traffic state-manager \
+            --project "$PROJECT" \
+            --region  "$REGION" \
+            --to-latest \
+            --quiet
 
   # ── 5. Deploy voice-assistant ─────────────────────────────────────────────────
   deploy-voice-assistant:
@@ -255,6 +270,11 @@ jobs:
             --region  "$REGION" \
             --source  services/voice-assistant \
             --set-env-vars "$VARS" \
+            --quiet
+          gcloud run services update-traffic voice-assistant \
+            --project "$PROJECT" \
+            --region  "$REGION" \
+            --to-latest \
             --quiet
 
   # ── 6. Record deployed SHA (only when at least one service deployed and none failed) ──

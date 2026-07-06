@@ -57,7 +57,8 @@ For every `SerpAPI [<label>] status=...` / `SerpAPI [<label>] request failed: ty
   2026-07-04 hedge change it no longer gates *whether* the Gemini+Shopping hedge fires — that's now
   a plain wall-clock check (`Lens hasn't answered within LENS_HEDGE_DELAY_SECONDS`), independent of
   which exception type Lens eventually raises or whether it raises one at all.
-- If `docs/issues/issues-from-logs.md` or the `serpapi_call_duration_seconds` log-based metric
+- If `docs/issues/issues-from-logs.<platform>.md` (`shoplens2026-dev` or `cookshop-dev`, matching
+  whichever platform this request hit) or the `serpapi_call_duration_seconds` log-based metric
   (Cloud Monitoring, created 2026-07-04) already covers a pattern you're seeing, reference it
   instead of re-deriving it from scratch.
 

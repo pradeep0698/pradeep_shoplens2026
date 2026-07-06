@@ -1,5 +1,7 @@
 Deploy cloud services and frontend to cookshop-dev (Rajan prod).
 
+**cookshop-dev is the stable platform** — released once per week, not on every change. Active development happens against `shoplens2026-dev` (see `deploy-dev.md`); only deploy here when it's actually time for the weekly release, not for routine iteration.
+
 Run `bash scripts/deploy-cookshop-dev.sh` from the repo root to deploy.
 
 ## What this does

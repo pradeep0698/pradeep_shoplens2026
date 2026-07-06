@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import '../../models/voice_session.dart';
+
 sealed class VoiceSocketFrame {
   const VoiceSocketFrame();
 }
@@ -24,8 +26,16 @@ class VoiceControlFrame extends VoiceSocketFrame {
   final Map<String, dynamic> json;
 }
 
+/// [code]/[reason] are the underlying WebSocket close code/reason when the
+/// transport has them (both dart:io's WebSocket and web_socket_channel
+/// expose these once the socket closes) — surfaced so a dropped connection
+/// can be diagnosed from the in-app error message alone, without a device
+/// console attached (the direct-connect transport in particular bypasses
+/// the backend entirely, so server logs show nothing about why it closed).
 class VoiceSocketClosed extends VoiceSocketFrame {
-  const VoiceSocketClosed();
+  const VoiceSocketClosed({this.code, this.reason});
+  final int? code;
+  final String? reason;
 }
 
 /// Common surface both the WS-proxy transport (VoiceSocketClient) and the
@@ -39,9 +49,21 @@ abstract class VoiceTransport {
   /// [wsUrl] is the backend-supplied relative proxy path
   /// (VoiceSessionStartResponse.wsUrl) — only the proxy transport uses it.
   /// [sessionId] is always passed too since the direct-connect transport
-  /// needs it to mint its own ephemeral token and call the tool REST
-  /// endpoints; the proxy transport ignores it.
-  Future<void> connect({required String sessionId, required String wsUrl});
+  /// needs it to call the tool REST endpoints; the proxy transport ignores it.
+  ///
+  /// [existingProfile]/[mode]/[language]/[resumeTranscript] are only consumed
+  /// by the direct-connect transport, which builds its own `setup` JSON
+  /// client-side (see gemini_live_setup_builder.dart) instead of fetching one
+  /// from the backend — the proxy transport ignores them, mirroring the
+  /// existing precedent where the direct client already ignores [wsUrl].
+  Future<void> connect({
+    required String sessionId,
+    required String wsUrl,
+    required VoiceProfilePatch existingProfile,
+    required String mode,
+    required String language,
+    required List<VoiceTranscriptTurn> resumeTranscript,
+  });
 
   void sendAudio(Uint8List chunk);
 

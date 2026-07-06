@@ -611,6 +611,25 @@ def _get_dev_api_client() -> genai.Client:
     return _genai_dev_client
 
 
+def _json_safe(value):
+    """Recursively converts any leftover google-genai SDK model objects
+    (e.g. a nested SpeechConfig) into plain dicts/lists/primitives — see
+    _build_setup_json's docstring for why the SDK's own converter can leave
+    one of these behind unconverted. by_alias=True matters here: the rest of
+    the setup dict is already in the wire's camelCase (produced by the SDK's
+    own converter), so a leftover model must be dumped the same way — plain
+    model_dump() defaults to the model's snake_case Python field names
+    (voice_config, voice_name, ...), which Gemini's server doesn't recognize
+    and silently drops, closing the connection shortly after it's accepted."""
+    if hasattr(value, "model_dump"):
+        return _json_safe(value.model_dump(exclude_none=True, by_alias=True))
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 def _build_setup_json(model: str, config: types.LiveConnectConfig, client: genai.Client) -> dict:
     """Builds the exact wire-format `setup` JSON the mobile client must send
     as its first frame after opening the direct WS — using the SDK's own
@@ -619,14 +638,17 @@ def _build_setup_json(model: str, config: types.LiveConnectConfig, client: genai
     and the wire format can't silently drift from what the real SDK sends.
     NOTE: _live_converters is a private google-genai module — pin the SDK
     version (see requirements.txt) since this coupling could break silently
-    on an upgrade."""
+    on an upgrade. Confirmed by a live 502: the converter can leave a nested
+    SDK model object (e.g. SpeechConfig) unconverted rather than a plain
+    dict, so the result is run through _json_safe before returning rather
+    than trusted as already-plain data."""
     from google.genai import _live_converters as live_converters
 
     params = types.LiveConnectParameters(model=model, config=config).model_dump(exclude_none=True)
     request_dict = live_converters._LiveConnectParameters_to_mldev(
         api_client=client._api_client, from_object=params,
     )
-    return request_dict.get("setup", request_dict)
+    return _json_safe(request_dict.get("setup", request_dict))
 
 
 def mint_ephemeral_token(existing_profile: dict, mode: str, language: str = "English") -> dict:

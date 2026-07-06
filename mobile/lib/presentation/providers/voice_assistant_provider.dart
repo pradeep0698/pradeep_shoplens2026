@@ -211,7 +211,14 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         voiceApi: voiceApi,
       );
       _socket = socket;
-      await socket.connect(sessionId: startResponse.sessionId, wsUrl: startResponse.wsUrl);
+      await socket.connect(
+        sessionId: startResponse.sessionId,
+        wsUrl: startResponse.wsUrl,
+        existingProfile: startResponse.profile,
+        mode: isOnboarding ? 'preferences' : 'search',
+        language: language,
+        resumeTranscript: state.transcript,
+      );
       if (!_isCurrent(generation)) return;
       _frameSubscription = socket.frames.listen(
         (frame) {

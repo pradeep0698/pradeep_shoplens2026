@@ -43,4 +43,11 @@ class ApiConstants {
   // backend's own direct_connect_allowed kill switch at runtime.
   static bool get voiceDirectConnectFlagEnabled =>
       const bool.fromEnvironment('VOICE_DIRECT_CONNECT_ENABLED', defaultValue: false);
+
+  // Static AI Studio (Gemini Developer API) key for the native-only
+  // direct-connect transport (see gemini_live_socket_client.dart) — a
+  // secret, so this is dart-define-only (no dotenv fallback like the URL
+  // getters above): it should never risk being committed via a checked-in
+  // .env file.
+  static String get aiStudioApiKey => const String.fromEnvironment('AI_STUDIO_API_KEY', defaultValue: '');
 }

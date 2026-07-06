@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../../core/constants/api_constants.dart';
+import '../../models/voice_session.dart';
 import 'voice_transport.dart';
 
 /// Thin wrapper around [WebSocketChannel] for the voice-assistant relay —
@@ -24,8 +25,19 @@ class VoiceSocketClient implements VoiceTransport {
   @override
   Stream<VoiceSocketFrame> get frames => _frames.stream;
 
+  // existingProfile/mode/language/resumeTranscript are only meaningful to
+  // the direct-connect transport (see voice_transport.dart's doc comment) —
+  // the backend already builds this session's setup, so the proxy path
+  // ignores them.
   @override
-  Future<void> connect({required String sessionId, required String wsUrl}) async {
+  Future<void> connect({
+    required String sessionId,
+    required String wsUrl,
+    required VoiceProfilePatch existingProfile,
+    required String mode,
+    required String language,
+    required List<VoiceTranscriptTurn> resumeTranscript,
+  }) async {
     final channel = WebSocketChannel.connect(Uri.parse(ApiConstants.voiceAssistantWsUrl(wsUrl)));
     await channel.ready;
     _channel = channel;

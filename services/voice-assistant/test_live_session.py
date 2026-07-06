@@ -844,6 +844,33 @@ def test_mint_ephemeral_token_uses_dev_api_client_and_locks_config(monkeypatch):
     assert captured["config"].live_connect_constraints.model == live_session._VOICE_MODEL_DEV_API
 
 
+def test_build_setup_json_output_is_json_serializable():
+    """Regression test for a live 502 on every direct-connect token mint:
+    the SDK's private _LiveConnectParameters_to_mldev converter left a raw
+    SpeechConfig object nested in the returned dict instead of a plain dict,
+    so json.dumps (in the /voice/session/token response) blew up with
+    "Object of type SpeechConfig is not JSON serializable". No client/server
+    mocking here — this exercises the real (pinned) google-genai converter
+    the production bug came from, with a client built from a fake API key
+    (client construction doesn't touch the network)."""
+    client = live_session.genai.Client(
+        api_key="test-key", http_options=live_session.types.HttpOptions(api_version="v1alpha"),
+    )
+    config = _live_config({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search", "English")
+
+    setup = live_session._build_setup_json(live_session._VOICE_MODEL_DEV_API, config, client)
+
+    json.dumps(setup)  # must not raise TypeError
+    # The fix for the above (_json_safe) must dump the leftover SpeechConfig
+    # with by_alias=True — plain model_dump() defaults to the model's
+    # snake_case Python field names (voice_config, voice_name, ...), which
+    # Gemini's server silently doesn't recognize, so the mobile client's
+    # setup frame would be accepted but its voice config ignored/rejected —
+    # manifesting as the connection closing shortly after it opens.
+    speech_config = setup["generationConfig"]["speechConfig"]
+    assert speech_config["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] == live_session._VOICE_NAME
+
+
 def test_get_dev_api_client_raises_without_api_key(monkeypatch):
     monkeypatch.setattr(live_session, "_AI_STUDIO_API_KEY", "")
     monkeypatch.setattr(live_session, "_genai_dev_client", None)

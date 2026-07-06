@@ -6,6 +6,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 
 import '../../core/utils/mic_permission.dart';
+import '../../core/utils/pcm16_agc.dart';
 import '../../core/utils/pcm16_resampler.dart';
 import '../../core/utils/pcm16_speech_gate.dart';
 import '../../core/utils/voice_audio_player.dart';
@@ -105,7 +106,22 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   // still applies for genuine mid-utterance barge-in.
   DateTime? _speakingSince;
   static const _bargeInGraceMs = 400;
+  // False until the assistant's first utterance on the current player
+  // instance (almost always the opening greeting) has finished — the local
+  // VAD flush is skipped entirely for that one turn (see the
+  // Pcm16SpeechGateEvent.started handler), relying solely on the server's
+  // authoritative 'interrupted' message instead. A fresh FlutterSoundPlayer
+  // is more prone to first-burst timing hiccups (see VoiceAudioPlayer's own
+  // iOS warmup workaround) and the greeting is the one utterance every
+  // session guarantees, so it's worth eating the round-trip latency here to
+  // never truncate it, rather than tuning _bargeInGraceMs against a cold
+  // player's less predictable timing.
+  bool _hadFirstSpeakingTurn = false;
   VoiceAudioPlayer? _player;
+  // Smooths out Gemini's turn-to-turn TTS loudness variance before playback
+  // — see Pcm16Agc. One instance per player/session so its gain state
+  // doesn't carry an odd starting point over from a previous conversation.
+  Pcm16Agc? _agc;
   Pcm16Resampler? _micResampler;
   Pcm16ReArmableSpeechGate? _speechGate;
   int _captureSampleRate = _kInputSampleRate;
@@ -186,6 +202,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         return;
       }
       _player = player;
+      _agc = Pcm16Agc();
+      _speakingSince = null;
+      _hadFirstSpeakingTurn = false;
 
       final socket = createVoiceTransport(
         directConnectAllowed: startResponse.directConnectAllowed,
@@ -280,10 +299,13 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           // starting to talk, which would truncate/mush the assistant's own
           // audio. During that window the server's own authoritative
           // 'interrupted' message (handled below) still clears playback if
-          // the user is genuinely interrupting.
+          // the user is genuinely interrupting. The very first assistant
+          // turn on this player (the greeting) never gets the optimistic
+          // local flush at all, regardless of grace period — see
+          // _hadFirstSpeakingTurn.
           final withinBargeInGrace = _speakingSince != null &&
               DateTime.now().difference(_speakingSince!) < const Duration(milliseconds: _bargeInGraceMs);
-          if (state.status == VoiceStatus.speaking && !withinBargeInGrace) {
+          if (state.status == VoiceStatus.speaking && _hadFirstSpeakingTurn && !withinBargeInGrace) {
             unawaited(_flushPlayback());
             _speakingDebounce?.cancel();
             state = state.copyWith(status: VoiceStatus.listening);
@@ -428,8 +450,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       case VoiceAudioFrame(data: final data):
         _markSpeaking();
         if (_player?.isReady ?? false) {
+          final leveled = _agc?.process(data) ?? data;
           _feedChain = _feedChain
-              .then((_) => _player!.playPcm16(data))
+              .then((_) => _player!.playPcm16(leveled))
               .catchError((_) => 0);
         }
       case VoiceControlFrame(json: final json):
@@ -543,7 +566,10 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         state.status == VoiceStatus.done) {
       return;
     }
-    if (state.status != VoiceStatus.speaking) _speakingSince = DateTime.now();
+    if (state.status != VoiceStatus.speaking) {
+      if (_speakingSince != null) _hadFirstSpeakingTurn = true;
+      _speakingSince = DateTime.now();
+    }
     state = state.copyWith(status: VoiceStatus.speaking);
     _speakingDebounce?.cancel();
     _speakingDebounce = Timer(const Duration(milliseconds: 800), () {
@@ -583,6 +609,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       await _player?.close();
     } catch (_) {}
     _player = null;
+    _agc = null;
     _feedChain = Future.value();
     await _socket?.close();
   }

@@ -27,7 +27,7 @@ workflows:
       - name: Flutter pub get
         script: flutter pub get
       - name: Build Android APK
-        script: flutter build apk --release
+        script: flutter build apk --release --dart-define=VOICE_DIRECT_CONNECT_ENABLED=true
       - name: Install CocoaPods
         script: cd ios && pod install
       - name: Patch Xcode signing
@@ -35,7 +35,7 @@ workflows:
           sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' \
             ios/Runner.xcodeproj/project.pbxproj
       - name: Build iOS app (no codesign)
-        script: flutter build ios --release --no-codesign
+        script: flutter build ios --release --no-codesign --dart-define=VOICE_DIRECT_CONNECT_ENABLED=true
       - name: Package IPA
         script: |
           mkdir -p build/ios/iphoneos/Payload
@@ -73,7 +73,7 @@ workflows:
           sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' \
             ios/Runner.xcodeproj/project.pbxproj
       - name: Build iOS app (no codesign)
-        script: flutter build ios --release --no-codesign
+        script: flutter build ios --release --no-codesign --dart-define=VOICE_DIRECT_CONNECT_ENABLED=true
       - name: Package IPA
         script: |
           mkdir -p build/ios/iphoneos/Payload

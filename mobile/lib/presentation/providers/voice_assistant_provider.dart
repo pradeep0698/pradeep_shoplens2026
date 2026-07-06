@@ -140,6 +140,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   // Orders transcript turns chronologically within the transcript chat feed.
   int _seq = 0;
   int _nextSeq() => _seq++;
+  // Direct Gemini transcription arrives as fragments. Tracks the currently
+  // open speaker bubble so each fragment updates one visible turn.
+  String? _openTranscriptRole;
   // Stable key for VoiceSearchResult entries — a separate counter from _seq
   // since search results are no longer ordered by arrival relative to the
   // transcript (they're pinned newest-first in their own section instead).
@@ -168,6 +171,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       await _teardownSession();
       _seq = 0;
       _searchId = 0;
+      _openTranscriptRole = null;
     } else {
       await _socket?.close();
     }
@@ -374,6 +378,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   void sendText(String text) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
+    _openTranscriptRole = null;
     // Closing phrases only mean "review and save" in the preference flow —
     // search mode has no review step, so "done"/"no" is just another turn.
     if (_isOnboarding && _isClosingPhrase(trimmed)) {
@@ -496,12 +501,30 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         final role = json['role'] as String? ?? 'model';
         final text = json['text'] as String? ?? '';
         if (text.isEmpty) return;
-        // Voice user transcripts are only best-effort captions from the Live
-        // API and can be visibly wrong even when the assistant understood the
-        // audio. Typed user messages are already added locally in sendText().
-        if (role == 'user') return;
+        final isFragment = json['fragment'] == true;
+        final isFinal = json['final'] == true;
+        final transcript = [...state.transcript];
+        if (isFragment &&
+            _openTranscriptRole == role &&
+            transcript.isNotEmpty &&
+            transcript.last.role == role) {
+          final current = transcript.last;
+          final mergedText = text.startsWith(current.text)
+              ? text
+              : '${current.text}$text';
+          transcript[transcript.length - 1] = VoiceTranscriptTurn(
+            role: role,
+            text: mergedText,
+            seq: current.seq,
+          );
+        } else {
+          transcript.add(
+            VoiceTranscriptTurn(role: role, text: text, seq: _nextSeq()),
+          );
+        }
+        _openTranscriptRole = isFragment && !isFinal ? role : null;
         state = state.copyWith(
-          transcript: [...state.transcript, VoiceTranscriptTurn(role: role, text: text, seq: _nextSeq())],
+          transcript: transcript,
         );
         if (role == 'model') _markSpeaking();
       case 'preference_patch':

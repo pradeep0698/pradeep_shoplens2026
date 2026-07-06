@@ -440,6 +440,7 @@ def test_tool_search_products_applies_and_returns_products(client, monkeypatch):
     monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
 
     async def fake_apply_search_products(session, query):
+        assert session.assistant_turns_in_search_mode >= main._MIN_ASSISTANT_TURNS_BEFORE_FIRST_SEARCH
         return {"status": "found", "query": query, "products": [{"name": "Test Item"}], "provider": "google_shopping"}
 
     monkeypatch.setattr(main, "apply_search_products", fake_apply_search_products)

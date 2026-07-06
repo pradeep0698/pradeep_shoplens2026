@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 import profile_store
 from live_session import (
     SUPPORTED_LANGUAGES,
+    _MIN_ASSISTANT_TURNS_BEFORE_FIRST_SEARCH,
     _SESSION_MAX_SECONDS,
     SessionState,
     apply_ready_to_finalize,
@@ -478,6 +479,14 @@ async def tool_record_preference(request: RecordPreferenceRequest, http_request:
 async def tool_search_products(request: SearchProductsRequest, http_request: Request) -> JSONResponse:
     uid = _require_uid(http_request)
     session = await _get_owned_session(request.session_id, uid)
+    # The direct Gemini connection holds the clarifying conversation itself,
+    # so the backend relay never gets transcript turns to increment this
+    # proxy-only guard. Reaching this authenticated endpoint means Gemini has
+    # already chosen to call the configured search tool.
+    session.assistant_turns_in_search_mode = max(
+        session.assistant_turns_in_search_mode,
+        _MIN_ASSISTANT_TURNS_BEFORE_FIRST_SEARCH,
+    )
     result = await apply_search_products(session, request.query)
     return JSONResponse(content=result)
 

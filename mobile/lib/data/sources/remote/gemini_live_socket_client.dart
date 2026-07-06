@@ -72,8 +72,6 @@ class GeminiLiveSocketClient implements VoiceTransport {
 
   String? _sessionId;
   int _sampleRate = 16000;
-  String _pendingInputTranscript = '';
-  String _pendingOutputTranscript = '';
 
   // Idle nudge/close-grace watchdog — moved client-side since the backend no
   // longer holds this session's live connection to run its own watchdog
@@ -293,10 +291,6 @@ class GeminiLiveSocketClient implements VoiceTransport {
 
   void _handleServerContent(Map<String, dynamic> serverContent) {
     if (serverContent['interrupted'] == true) {
-      // Barge-in cuts the turn short — matches _pump_gemini_to_client's
-      // handling: drop any buffered fragments, they belong to the cut-off turn.
-      _pendingInputTranscript = '';
-      _pendingOutputTranscript = '';
       _frames.add(const VoiceControlFrame({'type': 'interrupted'}));
     }
 
@@ -312,19 +306,20 @@ class GeminiLiveSocketClient implements VoiceTransport {
       }
     }
 
-    // Mirrors _pump_gemini_to_client's fragment accumulation: flush only on
-    // that stream's own `finished` flag, never on an outer turn-complete
-    // signal — Gemini's docs give no ordering guarantee between the two,
-    // and flushing early can emit an incomplete/wrong fragment.
+    // Raw Live API transcription frames document only `text`; `finished` is
+    // not guaranteed on the wire. Forward every fragment so the provider can
+    // coalesce it into a live conversation bubble instead of buffering forever.
     final inputTranscription = serverContent['inputTranscription'] as Map<String, dynamic>?;
     if (inputTranscription != null) {
       final text = inputTranscription['text'] as String?;
-      if (text != null) _pendingInputTranscript += text;
-      if (inputTranscription['finished'] == true && _pendingInputTranscript.isNotEmpty) {
+      if (text != null && text.isNotEmpty) {
         _frames.add(VoiceControlFrame({
-          'type': 'transcript', 'role': 'user', 'text': _pendingInputTranscript, 'final': true,
+          'type': 'transcript',
+          'role': 'user',
+          'text': text,
+          'final': inputTranscription['finished'] == true,
+          'fragment': true,
         }));
-        _pendingInputTranscript = '';
         _resetIdleTimer();
       }
     }
@@ -332,12 +327,14 @@ class GeminiLiveSocketClient implements VoiceTransport {
     final outputTranscription = serverContent['outputTranscription'] as Map<String, dynamic>?;
     if (outputTranscription != null) {
       final text = outputTranscription['text'] as String?;
-      if (text != null) _pendingOutputTranscript += text;
-      if (outputTranscription['finished'] == true && _pendingOutputTranscript.isNotEmpty) {
+      if (text != null && text.isNotEmpty) {
         _frames.add(VoiceControlFrame({
-          'type': 'transcript', 'role': 'model', 'text': _pendingOutputTranscript, 'final': true,
+          'type': 'transcript',
+          'role': 'model',
+          'text': text,
+          'final': outputTranscription['finished'] == true,
+          'fragment': true,
         }));
-        _pendingOutputTranscript = '';
         _resetIdleTimer();
       }
     }

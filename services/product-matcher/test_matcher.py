@@ -137,27 +137,62 @@ def test_search_products_appends_amazon_when_google_tiers_are_short(monkeypatch)
         return []
 
     monkeypatch.setattr(matcher, "_shopping_search", fake_shopping_search)
+    # Thumbnail validity is a separate concern (see the _thumbnail_is_valid /
+    # _filter_valid_thumbnails tests below) — these fixtures have no
+    # image_url at all, so bypass the check to keep this test focused on
+    # tiering/dedup behavior.
+    monkeypatch.setattr(matcher, "_thumbnail_is_valid", lambda url: True)
 
     results = matcher.search_products("wireless headphones", max_results=15)
 
     assert [r["product_id"] for r in results] == ["g1", "g2", "a1", "a2", "a3"]
 
 
-def test_search_products_skips_amazon_when_google_tier_already_has_five(monkeypatch):
+def test_search_products_tops_up_with_amazon_even_when_google_tier_has_several_results(monkeypatch):
+    """Regression test for the reported "first search returns 15, next search
+    only returns 5" bug: the old code only topped up from Amazon when the
+    running total was under 5, so a Google Shopping tier returning e.g. 8 of
+    a requested 15 silently short-changed the caller. Amazon must now be
+    consulted whenever the total is still short of max_results, not just
+    short of 5."""
     matcher._cache.clear()
     calls = []
 
     def fake_shopping_search(query, num, engine="google_shopping", country=matcher.DEFAULT_COUNTRY):
         calls.append(engine)
         if engine == "google_shopping":
-            return [{"product_id": f"g{i}", "name": f"Item {i}"} for i in range(5)]
-        return [{"product_id": "a1", "name": "Amazon Item"}]
+            return [{"product_id": f"g{i}", "name": f"Item {i}"} for i in range(8)]
+        return [{"product_id": f"a{i}", "name": f"Amazon Item {i}"} for i in range(10)]
 
     monkeypatch.setattr(matcher, "_shopping_search", fake_shopping_search)
+    monkeypatch.setattr(matcher, "_thumbnail_is_valid", lambda url: True)
 
     results = matcher.search_products("desk lamp", max_results=15)
 
-    assert len(results) == 5
+    assert len(results) == 15
+    assert "amazon" in calls
+    assert [r["product_id"] for r in results[:8]] == [f"g{i}" for i in range(8)]
+
+
+def test_search_products_skips_amazon_when_google_tier_already_reaches_max_results(monkeypatch):
+    """The one case where skipping Amazon is still correct: Google Shopping
+    alone already reached max_results. Locks this in so the fix above doesn't
+    regress into "always call Amazon"."""
+    matcher._cache.clear()
+    calls = []
+
+    def fake_shopping_search(query, num, engine="google_shopping", country=matcher.DEFAULT_COUNTRY):
+        calls.append(engine)
+        if engine == "google_shopping":
+            return [{"product_id": f"g{i}", "name": f"Item {i}"} for i in range(15)]
+        return [{"product_id": "a1", "name": "Amazon Item"}]
+
+    monkeypatch.setattr(matcher, "_shopping_search", fake_shopping_search)
+    monkeypatch.setattr(matcher, "_thumbnail_is_valid", lambda url: True)
+
+    results = matcher.search_products("desk lamp", max_results=15)
+
+    assert len(results) == 15
     assert "amazon" not in calls
 
 
@@ -170,6 +205,7 @@ def test_search_products_returns_multiple_parsed_results(monkeypatch):
         ]
     }
     monkeypatch.setattr(matcher._session, "get", lambda *a, **k: _FakeResponse(payload))
+    monkeypatch.setattr(matcher, "_thumbnail_is_valid", lambda url: True)
 
     results = matcher.search_products("wireless headphones", max_results=2)
 
@@ -181,9 +217,8 @@ def test_search_products_caches_by_query_and_max_results(monkeypatch):
     matcher._cache.clear()
     calls = []
 
-    # 5 results so Tier 1 alone satisfies the "under 5" threshold and Tiers
-    # 2/3 never fire — keeps this test's "exactly 1 real HTTP call" intent
-    # intact under the new append-on-insufficient tiering logic.
+    # 5 results so Tier 1 alone satisfies max_results and Tiers 2/3 never
+    # fire — keeps this test's "exactly 1 real HTTP call" intent intact.
     payload = {
         "shopping_results": [
             {"title": f"Item {i}", "source": "Store"} for i in range(5)
@@ -195,6 +230,7 @@ def test_search_products_caches_by_query_and_max_results(monkeypatch):
         return _FakeResponse(payload)
 
     monkeypatch.setattr(matcher._session, "get", fake_get)
+    monkeypatch.setattr(matcher, "_thumbnail_is_valid", lambda url: True)
 
     matcher.search_products("desk lamp", max_results=5)
     matcher.search_products("desk lamp", max_results=5)
@@ -281,6 +317,154 @@ def test_fetch_thumbnail_returns_none_on_fetch_failure(monkeypatch):
     assert matcher.fetch_thumbnail("https://encrypted-tbn1.gstatic.com/shopping?q=tbn:abc") is None
 
 
+def test_fetch_thumbnail_allows_amazon_cdn_hosts(monkeypatch):
+    matcher._THUMBNAIL_CACHE.clear()
+
+    class _ImageResponse:
+        content = b"\xff\xd8\xff\xe0fake"
+        headers = {"Content-Type": "image/jpeg"}
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(matcher._session, "get", lambda *a, **k: _ImageResponse())
+
+    assert matcher.fetch_thumbnail("https://m.media-amazon.com/images/I/abc.jpg") == (b"\xff\xd8\xff\xe0fake", "image/jpeg")
+    assert matcher.fetch_thumbnail("https://images-na.ssl-images-amazon.com/images/I/abc.jpg") == (b"\xff\xd8\xff\xe0fake", "image/jpeg")
+
+
+class _FakeHeadResponse:
+    def __init__(self, status_code=200, content_type="image/jpeg"):
+        self.status_code = status_code
+        self.headers = {"Content-Type": content_type}
+
+
+def test_thumbnail_is_valid_false_for_empty_url_without_network_call(monkeypatch):
+    calls = []
+    monkeypatch.setattr(matcher._session, "head", lambda *a, **k: calls.append(1))
+
+    assert matcher._thumbnail_is_valid("") is False
+    assert calls == []
+
+
+def test_thumbnail_is_valid_false_for_disallowed_host_without_network_call(monkeypatch):
+    calls = []
+    monkeypatch.setattr(matcher._session, "head", lambda *a, **k: calls.append(1))
+
+    assert matcher._thumbnail_is_valid("https://evil.example.com/steal.jpg") is False
+    assert calls == []
+
+
+def test_thumbnail_is_valid_true_for_allowed_host_with_image_content_type(monkeypatch):
+    matcher._THUMBNAIL_VALIDITY_CACHE.clear()
+    matcher._THUMBNAIL_CACHE.clear()
+    monkeypatch.setattr(matcher._session, "head", lambda *a, **k: _FakeHeadResponse(200, "image/jpeg"))
+
+    assert matcher._thumbnail_is_valid("https://encrypted-tbn1.gstatic.com/shopping?q=tbn:abc") is True
+
+
+def test_thumbnail_is_valid_false_for_non_image_content_type(monkeypatch):
+    matcher._THUMBNAIL_VALIDITY_CACHE.clear()
+    matcher._THUMBNAIL_CACHE.clear()
+    monkeypatch.setattr(matcher._session, "head", lambda *a, **k: _FakeHeadResponse(200, "text/html"))
+
+    assert matcher._thumbnail_is_valid("https://encrypted-tbn1.gstatic.com/shopping?q=tbn:abc") is False
+
+
+def test_thumbnail_is_valid_false_for_error_status(monkeypatch):
+    matcher._THUMBNAIL_VALIDITY_CACHE.clear()
+    matcher._THUMBNAIL_CACHE.clear()
+    monkeypatch.setattr(matcher._session, "head", lambda *a, **k: _FakeHeadResponse(404, "image/jpeg"))
+
+    assert matcher._thumbnail_is_valid("https://encrypted-tbn1.gstatic.com/shopping?q=tbn:abc") is False
+
+
+def test_thumbnail_is_valid_caches_result_and_avoids_second_network_call(monkeypatch):
+    matcher._THUMBNAIL_VALIDITY_CACHE.clear()
+    matcher._THUMBNAIL_CACHE.clear()
+    calls = []
+
+    def fake_head(*a, **k):
+        calls.append(1)
+        return _FakeHeadResponse(200, "image/jpeg")
+
+    monkeypatch.setattr(matcher._session, "head", fake_head)
+    url = "https://encrypted-tbn1.gstatic.com/shopping?q=tbn:abc"
+
+    assert matcher._thumbnail_is_valid(url) is True
+    assert matcher._thumbnail_is_valid(url) is True
+    assert len(calls) == 1
+
+
+def test_thumbnail_is_valid_skips_network_call_when_already_in_thumbnail_cache(monkeypatch):
+    matcher._THUMBNAIL_VALIDITY_CACHE.clear()
+    matcher._THUMBNAIL_CACHE.clear()
+    url = "https://encrypted-tbn1.gstatic.com/shopping?q=tbn:abc"
+    matcher._THUMBNAIL_CACHE[url] = (b"bytes", "image/jpeg")
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("should not issue a HEAD request for an already-fetched URL")
+
+    monkeypatch.setattr(matcher._session, "head", fail_if_called)
+
+    assert matcher._thumbnail_is_valid(url) is True
+
+
+def test_thumbnail_is_valid_allows_amazon_cdn_hosts(monkeypatch):
+    matcher._THUMBNAIL_VALIDITY_CACHE.clear()
+    matcher._THUMBNAIL_CACHE.clear()
+    monkeypatch.setattr(matcher._session, "head", lambda *a, **k: _FakeHeadResponse(200, "image/jpeg"))
+
+    assert matcher._thumbnail_is_valid("https://m.media-amazon.com/images/I/abc.jpg") is True
+    assert matcher._thumbnail_is_valid("https://images-na.ssl-images-amazon.com/images/I/abc.jpg") is True
+
+
+def test_filter_valid_thumbnails_drops_invalid_and_preserves_order(monkeypatch):
+    good1, good2 = "https://encrypted-tbn1.gstatic.com/good1", "https://encrypted-tbn1.gstatic.com/good2"
+    dead = "https://encrypted-tbn1.gstatic.com/dead"
+    monkeypatch.setattr(matcher, "_thumbnail_is_valid", lambda url: url in (good1, good2))
+
+    candidates = [
+        {"product_id": "a", "image_url": good1},
+        {"product_id": "b", "image_url": dead},
+        {"product_id": "c", "image_url": good2},
+    ]
+
+    assert [c["product_id"] for c in matcher._filter_valid_thumbnails(candidates)] == ["a", "c"]
+
+
+def test_filter_valid_thumbnails_handles_empty_list():
+    assert matcher._filter_valid_thumbnails([]) == []
+
+
+def test_search_products_drops_dead_thumbnails_and_backfills_from_amazon(monkeypatch):
+    """Integration test tying the Bug 2 (max_results tiering) and Bug 3
+    (thumbnail validity) fixes together: Tier 1 returns a mix of good and
+    dead-thumbnail candidates. The dead one must be dropped, and — because
+    the filtered Tier 1 count then falls short of max_results — Tier 3 must
+    fire to back-fill from Amazon."""
+    matcher._cache.clear()
+    good_url, dead_url = "https://encrypted-tbn1.gstatic.com/good", "https://encrypted-tbn1.gstatic.com/dead"
+
+    def fake_shopping_search(query, num, engine="google_shopping", country=matcher.DEFAULT_COUNTRY):
+        if engine == "google_shopping":
+            return [
+                {"product_id": "g1", "name": "Item 1", "image_url": good_url},
+                {"product_id": "g2", "name": "Item 2", "image_url": dead_url},
+                {"product_id": "g3", "name": "Item 3", "image_url": good_url},
+            ]
+        return [{"product_id": f"a{i}", "name": f"Amazon Item {i}", "image_url": good_url} for i in range(10)]
+
+    monkeypatch.setattr(matcher, "_shopping_search", fake_shopping_search)
+    monkeypatch.setattr(matcher, "_thumbnail_is_valid", lambda url: url == good_url)
+
+    results = matcher.search_products("desk lamp", max_results=5)
+
+    assert "g2" not in [r["product_id"] for r in results]
+    assert len(results) == 5
+    assert all(r["image_url"] == good_url for r in results)
+
+
 def test_thumbnail_endpoint_returns_image_bytes(monkeypatch):
     monkeypatch.setattr(main, "fetch_thumbnail", lambda url: (b"fake-bytes", "image/jpeg"))
     client = TestClient(main.app)
@@ -325,8 +509,8 @@ def test_search_products_does_not_cache_empty_results(monkeypatch):
 
     # Both calls should hit the API — empty results must not be cached.
     # Each search_products call tries Tier 1 (google_shopping, 1 call) then,
-    # since results are still under 5, Tier 3 (amazon, 1 call) — Tier 2 is
-    # skipped since there's no price phrase to strip. 2 calls x 2
+    # since results are still short of max_results, Tier 3 (amazon, 1 call)
+    # — Tier 2 is skipped since there's no price phrase to strip. 2 calls x 2
     # search_products invocations = 4 SerpAPI calls total.
     assert len(calls) >= 4
 

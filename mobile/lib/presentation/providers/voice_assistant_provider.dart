@@ -5,18 +5,27 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 
-import '../../core/constants/api_constants.dart';
 import '../../core/utils/mic_permission.dart';
+import '../../core/utils/pcm16_agc.dart';
 import '../../core/utils/pcm16_resampler.dart';
 import '../../core/utils/pcm16_speech_gate.dart';
+import '../../core/utils/transcript_fragment_merger.dart';
 import '../../core/utils/voice_audio_player.dart';
 import '../../core/utils/web_audio_sample_rate.dart';
 import '../../data/models/voice_session.dart';
 import '../../data/sources/remote/voice_api.dart';
-import '../../data/sources/remote/voice_socket_client.dart';
+import '../../data/sources/remote/voice_transport.dart';
+import '../../data/sources/remote/voice_transport_selector.dart';
 
 // Gemini Live API expects raw 16-bit PCM input at 16kHz.
 const _kInputSampleRate = 16000;
+const _kAssistantTurnTailMs = 140;
+
+String _displayVoiceError(Object error) {
+  return error
+      .toString()
+      .replaceFirst(RegExp(r'^(Bad state|Exception):\s*'), '');
+}
 
 enum VoiceStatus { idle, connecting, listening, speaking, review, saving, done, error }
 
@@ -50,8 +59,9 @@ class VoiceAssistantState {
   final VoiceProfilePatch? finalizeProposal;
   final VoiceFinalizeResult? result;
   final String? errorMessage;
-  // Search-mode only — one entry per search_products tool call, oldest
-  // first, so a refined search appends rather than replaces.
+  // Search-mode only — one entry per search_products tool call, newest
+  // first (inserted at the front) so the overlay can pin the latest search
+  // prominently and collapse older ones into an accordion.
   final List<VoiceSearchResult> searchResults;
 
   VoiceAssistantState copyWith({
@@ -85,11 +95,41 @@ class VoiceAssistantState {
 class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   String? _sessionId;
   AudioRecorder? _recorder;
-  final VoiceSocketClient _socket = VoiceSocketClient();
+  // Constructed lazily in start() once the session-start response's
+  // directConnectAllowed flag is known — createVoiceTransport() (see
+  // voice_transport_selector.dart) picks the WS proxy or the native-only
+  // direct-connect transport based on that flag plus a compile-time flag.
+  VoiceTransport? _socket;
   StreamSubscription<Uint8List>? _micSubscription;
   StreamSubscription<VoiceSocketFrame>? _frameSubscription;
   Timer? _speakingDebounce;
+  // Set on the rising edge into VoiceStatus.speaking (see _markSpeaking) —
+  // used to suppress the optimistic local-VAD barge-in flush for a short
+  // grace period after the assistant starts talking. Right as a fast-
+  // trailing phrase ends, imperfect echo cancellation can leak a bit of the
+  // assistant's own audio into the mic, reading as the user starting to
+  // talk — flushing on that reads as truncated/mushed playback. Within the
+  // grace period, only the server's own authoritative 'interrupted' message
+  // (handled elsewhere) clears playback; outside it, the instant local flush
+  // still applies for genuine mid-utterance barge-in.
+  DateTime? _speakingSince;
+  static const _bargeInGraceMs = 400;
+  // False until the assistant's first utterance on the current player
+  // instance (almost always the opening greeting) has finished — the local
+  // VAD flush is skipped entirely for that one turn (see the
+  // Pcm16SpeechGateEvent.started handler), relying solely on the server's
+  // authoritative 'interrupted' message instead. A fresh FlutterSoundPlayer
+  // is more prone to first-burst timing hiccups (see VoiceAudioPlayer's own
+  // iOS warmup workaround) and the greeting is the one utterance every
+  // session guarantees, so it's worth eating the round-trip latency here to
+  // never truncate it, rather than tuning _bargeInGraceMs against a cold
+  // player's less predictable timing.
+  bool _hadFirstSpeakingTurn = false;
   VoiceAudioPlayer? _player;
+  // Smooths out Gemini's turn-to-turn TTS loudness variance before playback
+  // — see Pcm16Agc. One instance per player/session so its gain state
+  // doesn't carry an odd starting point over from a previous conversation.
+  Pcm16Agc? _agc;
   Pcm16Resampler? _micResampler;
   Pcm16ReArmableSpeechGate? _speechGate;
   int _captureSampleRate = _kInputSampleRate;
@@ -99,11 +139,17 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   // behavior in sendText()/finishNow() below, since search-mode sessions
   // never reach a review step.
   bool _isOnboarding = true;
-  // Stamps transcript turns and search results with their arrival order so
-  // the overlay can interleave the two lists into one conversation instead
-  // of rendering them in two separate blocks — see _nextSeq().
+  // Orders transcript turns chronologically within the transcript chat feed.
   int _seq = 0;
   int _nextSeq() => _seq++;
+  // Direct Gemini transcription arrives as fragments. Tracks the currently
+  // open speaker bubble so each fragment updates one visible turn.
+  String? _openTranscriptRole;
+  // Stable key for VoiceSearchResult entries — a separate counter from _seq
+  // since search results are no longer ordered by arrival relative to the
+  // transcript (they're pinned newest-first in their own section instead).
+  int _searchId = 0;
+  int _nextSearchId() => _searchId++;
   // feedUint8FromStream() must not be called again before the previous call's
   // future completes — this chain serializes frames as they arrive, since the
   // socket can deliver them faster than playback consumes them.
@@ -121,11 +167,15 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
     // (state.transcript/patch/searchResults already hold everything captured
     // before the disconnect — they're the source of truth, not the fresh
     // profile snapshot the REST call below would otherwise overwrite them
-    // with).
+    // with). Still clean up the dangling transport instance from the drop.
     final resumeSessionId = resume ? _sessionId : null;
     if (!resume) {
       await _teardownSession();
       _seq = 0;
+      _searchId = 0;
+      _openTranscriptRole = null;
+    } else {
+      await _socket?.close();
     }
     _isOnboarding = isOnboarding;
     final generation = ++_generation;
@@ -141,7 +191,8 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         return;
       }
 
-      final startResponse = await ref.read(voiceApiProvider).startSession(
+      final voiceApi = ref.read(voiceApiProvider);
+      final startResponse = await voiceApi.startSession(
         isOnboarding: isOnboarding,
         language: language,
         resumeSessionId: resumeSessionId,
@@ -163,10 +214,18 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         return;
       }
       _player = player;
+      _agc = Pcm16Agc(sampleRateHz: VoiceAudioPlayer.outputSampleRate);
+      _speakingSince = null;
+      _hadFirstSpeakingTurn = false;
 
-      await _socket.connect(ApiConstants.voiceAssistantWsUrl(startResponse.wsUrl));
-      if (!_isCurrent(generation)) return;
-      _frameSubscription = _socket.frames.listen(
+      final socket = createVoiceTransport(
+        directConnectAllowed: startResponse.directConnectAllowed,
+        voiceApi: voiceApi,
+      );
+      _socket = socket;
+      // Subscribe before connect so setup failures and a fast opening response
+      // cannot be lost by the transport's broadcast stream.
+      _frameSubscription = socket.frames.listen(
         (frame) {
           if (_isCurrent(generation)) _handleFrame(frame);
         },
@@ -174,6 +233,15 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           if (_isCurrent(generation)) _handleSocketError(error);
         },
       );
+      await socket.connect(
+        sessionId: startResponse.sessionId,
+        wsUrl: startResponse.wsUrl,
+        existingProfile: startResponse.profile,
+        mode: isOnboarding ? 'preferences' : 'search',
+        language: language,
+        resumeTranscript: state.transcript,
+      );
+      if (!_isCurrent(generation)) return;
 
       // On web, record_web ignores RecordConfig.sampleRate and silently
       // captures at whatever rate the browser's AudioContext settles on
@@ -186,19 +254,19 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         inputSampleRate: _captureSampleRate,
         outputSampleRate: _kInputSampleRate,
       );
-      _socket.sendAudioFormat(_kInputSampleRate);
+      socket.sendAudioFormat(_kInputSampleRate);
       _recorder = AudioRecorder();
 
       // The model speaks its own greeting once the backend's hidden trigger
       // turn lands (see live_session.py's _send_greeting_trigger) — it
       // arrives as a normal transcript/audio frame, same as any other turn.
       state = state.copyWith(status: VoiceStatus.listening);
-    } catch (e, st) {
-      // Stack trace is included here (not just e.toString()) purely as a
-      // temporary diagnostic aid since this path is hard to attach a
-      // debugger to on a real device — remove once the cause is found.
-      final frames = st.toString().split('\n').take(8).join('\n');
-      state = state.copyWith(status: VoiceStatus.error, errorMessage: '$e\n\n$frames');
+    } catch (e) {
+      await _stopLiveAudio(invalidate: false);
+      state = state.copyWith(
+        status: VoiceStatus.error,
+        errorMessage: _displayVoiceError(e),
+      );
     }
   }
 
@@ -245,29 +313,42 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           // Barge-in: if the assistant is still talking, cut it off right
           // away instead of waiting for the server's own 'interrupted'
           // frame to round-trip back — _flushPlayback() is idempotent with
-          // that frame if/when it arrives afterward.
-          if (state.status == VoiceStatus.speaking) {
+          // that frame if/when it arrives afterward. Suppressed for a short
+          // grace period right after the assistant starts talking (see
+          // _speakingSince) — imperfect echo cancellation can leak the tail
+          // of a fast-trailing phrase back into the mic and read as the user
+          // starting to talk, which would truncate/mush the assistant's own
+          // audio. During that window the server's own authoritative
+          // 'interrupted' message (handled below) still clears playback if
+          // the user is genuinely interrupting. The very first assistant
+          // turn on this player (the greeting) never gets the optimistic
+          // local flush at all, regardless of grace period — see
+          // _hadFirstSpeakingTurn.
+          _openTranscriptRole = null;
+          final withinBargeInGrace = _speakingSince != null &&
+              DateTime.now().difference(_speakingSince!) < const Duration(milliseconds: _bargeInGraceMs);
+          if (state.status == VoiceStatus.speaking && _hadFirstSpeakingTurn && !withinBargeInGrace) {
             unawaited(_flushPlayback());
             _speakingDebounce?.cancel();
             state = state.copyWith(status: VoiceStatus.listening);
           }
           _speechStarted = true;
           state = state.copyWith(isRecording: true);
-          _socket.sendSpeechStart();
+          _socket?.sendSpeechStart();
           for (final c in result.chunks) {
-            if (c.isNotEmpty) _socket.sendAudio(c);
+            if (c.isNotEmpty) _socket?.sendAudio(c);
           }
         case Pcm16SpeechGateEvent.ended:
           for (final c in result.chunks) {
-            if (c.isNotEmpty) _socket.sendAudio(c);
+            if (c.isNotEmpty) _socket?.sendAudio(c);
           }
-          _socket.sendSpeechEnd();
+          _socket?.sendSpeechEnd();
           _speechStarted = false;
           state = state.copyWith(isRecording: false);
         case Pcm16SpeechGateEvent.none:
           if (_speechStarted) {
             for (final c in result.chunks) {
-              if (c.isNotEmpty) _socket.sendAudio(c);
+              if (c.isNotEmpty) _socket?.sendAudio(c);
             }
           }
       }
@@ -281,7 +362,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   /// tap startHandsFree() again later in the same conversation if they want.
   Future<void> stopHandsFree() async {
     if (!state.isHandsFreeActive) return;
-    if (_speechStarted) _socket.sendSpeechEnd();
+    if (_speechStarted) _socket?.sendSpeechEnd();
     await _micSubscription?.cancel();
     _micSubscription = null;
     try {
@@ -300,6 +381,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   void sendText(String text) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
+    _openTranscriptRole = null;
     // Closing phrases only mean "review and save" in the preference flow —
     // search mode has no review step, so "done"/"no" is just another turn.
     if (_isOnboarding && _isClosingPhrase(trimmed)) {
@@ -309,7 +391,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       finishNow();
       return;
     }
-    _socket.sendText(trimmed);
+    _socket?.sendText(trimmed);
     state = state.copyWith(
       transcript: [...state.transcript, VoiceTranscriptTurn(role: 'user', text: trimmed, seq: _nextSeq())],
     );
@@ -391,16 +473,25 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       case VoiceAudioFrame(data: final data):
         _markSpeaking();
         if (_player?.isReady ?? false) {
+          final leveled = _agc?.process(data) ?? data;
           _feedChain = _feedChain
-              .then((_) => _player!.playPcm16(data))
+              .then((_) => _player!.playPcm16(leveled))
               .catchError((_) => 0);
         }
       case VoiceControlFrame(json: final json):
         _handleControlFrame(json);
-      case VoiceSocketClosed():
+      case VoiceSocketClosed(:final code, :final reason):
+        // Surface the underlying close code/reason when the transport has
+        // one (dart:io's WebSocket exposes these once closed) — the
+        // direct-connect transport in particular bypasses the backend
+        // entirely, so this in-app message is often the only diagnostic
+        // signal available at all, without a device console attached.
+        final detail = reason != null && reason.isNotEmpty
+            ? ' (${code != null ? '$code: ' : ''}$reason)'
+            : '';
         state = state.copyWith(
           status: VoiceStatus.error,
-          errorMessage: 'Connection lost — tap Reconnect to keep talking.',
+          errorMessage: 'Connection lost — tap Reconnect to keep talking.$detail',
           isHandsFreeActive: false,
           isRecording: false,
         );
@@ -413,31 +504,83 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         final role = json['role'] as String? ?? 'model';
         final text = json['text'] as String? ?? '';
         if (text.isEmpty) return;
-        // Voice user transcripts are only best-effort captions from the Live
-        // API and can be visibly wrong even when the assistant understood the
-        // audio. Typed user messages are already added locally in sendText().
-        if (role == 'user') return;
+        // Gemini understands speech more reliably than its best-effort input
+        // captions. Keep spoken user captions off screen; typed turns are
+        // still inserted locally by sendText().
+        if (role == 'user') {
+          _openTranscriptRole = null;
+          return;
+        }
+        final isFragment = json['fragment'] == true;
+        final isFinal = json['final'] == true;
+        final transcript = [...state.transcript];
+        if (transcript.isNotEmpty &&
+            transcript.last.role == role &&
+            transcript.last.text.trim() == text.trim()) {
+          _openTranscriptRole = isFragment && !isFinal ? role : null;
+          return;
+        }
+        if (isFragment &&
+            _openTranscriptRole == role &&
+            transcript.isNotEmpty &&
+            transcript.last.role == role) {
+          final current = transcript.last;
+          transcript[transcript.length - 1] = VoiceTranscriptTurn(
+            role: role,
+            text: mergeTranscriptFragment(current.text, text),
+            seq: current.seq,
+          );
+        } else {
+          transcript.add(
+            VoiceTranscriptTurn(role: role, text: text, seq: _nextSeq()),
+          );
+        }
+        _openTranscriptRole = isFragment && !isFinal ? role : null;
         state = state.copyWith(
-          transcript: [...state.transcript, VoiceTranscriptTurn(role: role, text: text, seq: _nextSeq())],
+          transcript: transcript,
         );
         if (role == 'model') _markSpeaking();
+      case 'assistant_turn_complete':
+        _agc?.resetForTurn();
+        final silenceBytes = VoiceAudioPlayer.outputSampleRate *
+            2 *
+            _kAssistantTurnTailMs ~/
+            1000;
+        final player = _player;
+        if (player?.isReady ?? false) {
+          _feedChain = _feedChain
+              .then((_) => player!.playPcm16(Uint8List(silenceBytes)))
+              .catchError((_) => 0);
+        }
       case 'preference_patch':
         state = state.copyWith(
           patch: VoiceProfilePatch.fromJson(json['patch'] as Map<String, dynamic>? ?? const {}),
         );
+      case 'search_started':
+        // Deterministic loading-state signal sent the instant the backend
+        // dispatches a search_products tool call — arrives well before the
+        // (now up to ~20-25s combined Google Shopping + Amazon fallback)
+        // product_results frame, so the UI shows a spinner immediately
+        // instead of going quiet. Inserted at the front — newest search
+        // first — same ordering rule as product_results below.
+        final startedQuery = json['query'] as String? ?? '';
+        state = state.copyWith(
+          searchResults: [
+            VoiceSearchResult(query: startedQuery, products: const [], id: _nextSearchId(), isPending: true),
+            ...state.searchResults,
+          ],
+        );
       case 'product_results':
-        try {
-          state = state.copyWith(
-            searchResults: [...state.searchResults, VoiceSearchResult.fromJson(json, seq: _nextSeq())],
-          );
-        } catch (_) {
-          state = state.copyWith(
-            searchResults: [
-              ...state.searchResults,
-              VoiceSearchResult(query: json['query'] as String? ?? '', products: const [], seq: _nextSeq()),
-            ],
-          );
-        }
+        // Insert at the front (newest first) instead of appending — fixes
+        // the bug where an earlier, empty search stayed pinned above a
+        // later, successful one. Replaces the pending placeholder for the
+        // same query (if any) rather than leaving both in the list.
+        final resultQuery = json['query'] as String? ?? '';
+        final incoming = VoiceSearchResult.fromJson(json, id: _nextSearchId());
+        final withoutPending = state.searchResults
+            .where((r) => !(r.isPending && r.query == resultQuery))
+            .toList();
+        state = state.copyWith(searchResults: [incoming, ...withoutPending]);
       case 'finalize_proposal':
         _speakingDebounce?.cancel();
         unawaited(_stopLiveAudio());
@@ -494,6 +637,10 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         state.status == VoiceStatus.done) {
       return;
     }
+    if (state.status != VoiceStatus.speaking) {
+      if (_speakingSince != null) _hadFirstSpeakingTurn = true;
+      _speakingSince = DateTime.now();
+    }
     state = state.copyWith(status: VoiceStatus.speaking);
     _speakingDebounce?.cancel();
     _speakingDebounce = Timer(const Duration(milliseconds: 800), () {
@@ -504,7 +651,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   void _handleSocketError(Object error) {
     state = state.copyWith(
       status: VoiceStatus.error,
-      errorMessage: error.toString(),
+      errorMessage: _displayVoiceError(error),
       isHandsFreeActive: false,
       isRecording: false,
     );
@@ -533,8 +680,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       await _player?.close();
     } catch (_) {}
     _player = null;
+    _agc = null;
     _feedChain = Future.value();
-    await _socket.close();
+    await _socket?.close();
   }
 
   // _sessionId must survive _stopLiveAudio (confirm() still needs it for the
@@ -547,7 +695,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
 
   void _disposeSession() {
     unawaited(_teardownSession());
-    _socket.dispose();
+    _socket?.dispose();
   }
 }
 

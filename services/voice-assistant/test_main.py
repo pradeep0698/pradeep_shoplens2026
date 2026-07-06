@@ -212,6 +212,67 @@ def test_start_session_resumes_an_owned_disconnected_session(client, monkeypatch
     assert resumed_session.disconnected_at is None
 
 
+def test_start_session_resume_updates_language_when_body_language_differs(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+
+    start_response = client.post("/voice/session/start", headers={"Authorization": "Bearer faketoken"})
+    session_id = start_response.json()["session_id"]
+    session = main.session_registry._sessions[session_id]
+    import time as _time
+    session.disconnected_at = _time.monotonic() - 10
+
+    resume_response = client.post(
+        "/voice/session/start",
+        json={"resume_session_id": session_id, "language": "Spanish"},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resume_response.status_code == 200
+    assert main.session_registry._sessions[session_id].language == "Spanish"
+
+
+def test_start_session_resume_ignores_invalid_language(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+
+    start_response = client.post("/voice/session/start", headers={"Authorization": "Bearer faketoken"})
+    session_id = start_response.json()["session_id"]
+    session = main.session_registry._sessions[session_id]
+    import time as _time
+    session.disconnected_at = _time.monotonic() - 10
+
+    resume_response = client.post(
+        "/voice/session/start",
+        json={"resume_session_id": session_id, "language": "Klingon"},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resume_response.status_code == 200
+    assert main.session_registry._sessions[session_id].language == "English"
+
+
+def test_start_session_resume_keeps_language_when_body_omits_it(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+
+    start_response = client.post("/voice/session/start", headers={"Authorization": "Bearer faketoken"})
+    session_id = start_response.json()["session_id"]
+    session = main.session_registry._sessions[session_id]
+    session.language = "Spanish"
+    import time as _time
+    session.disconnected_at = _time.monotonic() - 10
+
+    resume_response = client.post(
+        "/voice/session/start",
+        json={"resume_session_id": session_id},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert resume_response.status_code == 200
+    assert main.session_registry._sessions[session_id].language == "Spanish"
+
+
 def test_start_session_falls_back_to_fresh_session_for_unknown_resume_id(client, monkeypatch):
     monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
     monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
@@ -277,3 +338,169 @@ def test_health_reports_status_ok(client):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def _start_session(client, monkeypatch, uid="user-1", mode="search"):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: uid)
+    monkeypatch.setattr(profile_store, "get_profile", lambda u: {})
+    response = client.post(
+        "/voice/session/start", json={"mode": mode}, headers={"Authorization": "Bearer faketoken"}
+    )
+    return response.json()["session_id"]
+
+
+# --- POST /voice/session/token (ephemeral token minting) --------------------
+
+
+def test_mint_session_token_requires_authorization_header(client):
+    response = client.post("/voice/session/token", json={"session_id": "abc"})
+    assert response.status_code == 401
+
+
+def test_mint_session_token_returns_404_for_unknown_session(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+
+    response = client.post(
+        "/voice/session/token", json={"session_id": "not-a-real-session"},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_mint_session_token_returns_404_for_session_owned_by_different_user(client, monkeypatch):
+    session_id = _start_session(client, monkeypatch, uid="user-1")
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-2")
+
+    response = client.post(
+        "/voice/session/token", json={"session_id": session_id}, headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_mint_session_token_returns_minted_token(client, monkeypatch):
+    session_id = _start_session(client, monkeypatch, uid="user-1")
+    monkeypatch.setattr(
+        main, "mint_ephemeral_token",
+        lambda existing_profile, mode, language: {"token": "auth_tokens/fake", "model": "models/fake", "setup": {}},
+    )
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+
+    response = client.post(
+        "/voice/session/token", json={"session_id": session_id}, headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"token": "auth_tokens/fake", "model": "models/fake", "setup": {}}
+
+
+def test_mint_session_token_returns_502_on_mint_failure(client, monkeypatch):
+    session_id = _start_session(client, monkeypatch, uid="user-1")
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(main, "mint_ephemeral_token", _raise)
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+
+    response = client.post(
+        "/voice/session/token", json={"session_id": session_id}, headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert response.status_code == 502
+
+
+# --- POST /voice/tool/* (direct-connect tool-call rerouting) ----------------
+
+
+def test_tool_record_preference_requires_authorization_header(client):
+    response = client.post("/voice/tool/record_preference", json={"session_id": "abc"})
+    assert response.status_code == 401
+
+
+def test_tool_record_preference_applies_and_returns_patch(client, monkeypatch):
+    session_id = _start_session(client, monkeypatch, uid="user-1", mode="preferences")
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+
+    response = client.post(
+        "/voice/tool/record_preference",
+        json={"session_id": session_id, "shopping_categories": ["Clothing"], "preference_terms": ["Nike"]},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "recorded"
+    assert body["patch"]["preference_terms"] == ["Nike"]
+
+
+def test_tool_search_products_applies_and_returns_products(client, monkeypatch):
+    session_id = _start_session(client, monkeypatch, uid="user-1", mode="search")
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+
+    async def fake_apply_search_products(session, query):
+        assert session.assistant_turns_in_search_mode >= main._MIN_ASSISTANT_TURNS_BEFORE_FIRST_SEARCH
+        return {"status": "found", "query": query, "products": [{"name": "Test Item"}], "provider": "google_shopping"}
+
+    monkeypatch.setattr(main, "apply_search_products", fake_apply_search_products)
+
+    response = client.post(
+        "/voice/tool/search_products",
+        json={"session_id": session_id, "query": "wireless headphones"},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "found"
+    assert body["products"] == [{"name": "Test Item"}]
+
+
+def test_tool_ready_to_finalize_applies_and_returns_proposal(client, monkeypatch):
+    session_id = _start_session(client, monkeypatch, uid="user-1", mode="preferences")
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+
+    response = client.post(
+        "/voice/tool/ready_to_finalize",
+        json={"session_id": session_id, "summary": "Saving your style."},
+        headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "proposal_ready"
+    assert body["patch"]["summary"] == "Saving your style."
+
+
+def test_tool_endpoints_return_404_for_session_owned_by_different_user(client, monkeypatch):
+    session_id = _start_session(client, monkeypatch, uid="user-1")
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-2")
+
+    response = client.post(
+        "/voice/tool/record_preference", json={"session_id": session_id}, headers={"Authorization": "Bearer faketoken"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_start_session_reports_direct_connect_allowed_flag(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+    monkeypatch.setenv("VOICE_DIRECT_CONNECT_ENABLED", "true")
+
+    response = client.post("/voice/session/start", headers={"Authorization": "Bearer faketoken"})
+
+    assert response.status_code == 200
+    assert response.json()["direct_connect_allowed"] is True
+
+
+def test_start_session_direct_connect_allowed_defaults_false(client, monkeypatch):
+    monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
+    monkeypatch.setattr(profile_store, "get_profile", lambda uid: {})
+    monkeypatch.delenv("VOICE_DIRECT_CONNECT_ENABLED", raising=False)
+
+    response = client.post("/voice/session/start", headers={"Authorization": "Bearer faketoken"})
+
+    assert response.status_code == 200
+    assert response.json()["direct_connect_allowed"] is False

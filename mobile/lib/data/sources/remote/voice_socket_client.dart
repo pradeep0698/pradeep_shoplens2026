@@ -4,41 +4,41 @@ import 'dart:typed_data';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-sealed class VoiceSocketFrame {
-  const VoiceSocketFrame();
-}
+import '../../../core/constants/api_constants.dart';
+import '../../models/voice_session.dart';
+import 'voice_transport.dart';
 
-/// Raw model speech audio: 16-bit PCM, little-endian, 24kHz, mono (Gemini
-/// Live API's fixed output format). Played back via flutter_sound's
-/// stream-playback API in VoiceAssistantNotifier.
-class VoiceAudioFrame extends VoiceSocketFrame {
-  const VoiceAudioFrame(this.data);
-  final Uint8List data;
-}
-
-/// Any JSON control frame from the backend relay: transcript, preference_patch,
-/// finalize_proposal, or session_timeout (see services/voice-assistant/live_session.py).
-class VoiceControlFrame extends VoiceSocketFrame {
-  const VoiceControlFrame(this.json);
-  final Map<String, dynamic> json;
-}
-
-class VoiceSocketClosed extends VoiceSocketFrame {
-  const VoiceSocketClosed();
-}
-
-/// Thin wrapper around [WebSocketChannel] for the voice-assistant relay.
+/// Thin wrapper around [WebSocketChannel] for the voice-assistant relay —
+/// the WS-proxy transport (client -> backend -> Gemini Live). Used on all
+/// platforms today; on native platforms it's superseded by
+/// GeminiLiveSocketClient when direct-connect is enabled (see
+/// voice_transport_selector.dart), but always used on web since browsers
+/// can't set the custom auth headers a direct connection needs.
+///
 /// Owned by VoiceAssistantNotifier for the lifetime of a single session —
 /// not a shared/singleton provider, since each conversation gets its own socket.
-class VoiceSocketClient {
+class VoiceSocketClient implements VoiceTransport {
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
   final _frames = StreamController<VoiceSocketFrame>.broadcast();
 
+  @override
   Stream<VoiceSocketFrame> get frames => _frames.stream;
 
-  Future<void> connect(String wsUrl) async {
-    final channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+  // existingProfile/mode/language/resumeTranscript are only meaningful to
+  // the direct-connect transport (see voice_transport.dart's doc comment) —
+  // the backend already builds this session's setup, so the proxy path
+  // ignores them.
+  @override
+  Future<void> connect({
+    required String sessionId,
+    required String wsUrl,
+    required VoiceProfilePatch existingProfile,
+    required String mode,
+    required String language,
+    required List<VoiceTranscriptTurn> resumeTranscript,
+  }) async {
+    final channel = WebSocketChannel.connect(Uri.parse(ApiConstants.voiceAssistantWsUrl(wsUrl)));
     await channel.ready;
     _channel = channel;
     _subscription = channel.stream.listen(
@@ -60,8 +60,10 @@ class VoiceSocketClient {
     );
   }
 
+  @override
   void sendAudio(Uint8List chunk) => _channel?.sink.add(chunk);
 
+  @override
   void sendText(String text) =>
       _channel?.sink.add(jsonEncode({'type': 'text', 'text': text}));
 
@@ -69,6 +71,7 @@ class VoiceSocketClient {
   /// any audio bytes. On web the actual rate the browser ends up using is
   /// outside our control (see web_audio_sample_rate_web.dart), so the backend
   /// can't safely assume 16000 for every client.
+  @override
   void sendAudioFormat(int sampleRate) =>
       _channel?.sink.add(jsonEncode({'type': 'audio_format', 'sample_rate': sampleRate}));
 
@@ -76,16 +79,20 @@ class VoiceSocketClient {
   /// backend disables Gemini's own voice-activity detection in favor of
   /// explicit client-driven turn boundaries (see live_session.py's
   /// realtime_input_config).
+  @override
   void sendSpeechStart() => _channel?.sink.add(jsonEncode({'type': 'speech_start'}));
 
+  @override
   void sendSpeechEnd() => _channel?.sink.add(jsonEncode({'type': 'speech_end'}));
 
+  @override
   Future<void> close() async {
     await _subscription?.cancel();
     await _channel?.sink.close();
     _channel = null;
   }
 
+  @override
   void dispose() {
     close();
     _frames.close();

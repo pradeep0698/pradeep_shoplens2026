@@ -51,6 +51,48 @@ class VoiceApi {
     }
   }
 
+  // Mints an ephemeral Gemini Live auth token for the direct-connect
+  // transport (native platforms only, see gemini_live_socket_client.dart) —
+  // POST /voice/session/token.
+  Future<VoiceSessionTokenResponse> mintToken(String sessionId) async {
+    try {
+      final response = await _dio.post('/voice/session/token', data: {'session_id': sessionId});
+      return VoiceSessionTokenResponse.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw AnalyzerException.fromDioException(e);
+    }
+  }
+
+  // The following three reroute tool-call side effects through REST for the
+  // direct-connect transport, instead of the WS-proxy relay handling them
+  // server-side — see services/voice-assistant/main.py's /voice/tool/* routes.
+  Future<Map<String, dynamic>> recordPreference(String sessionId, Map<String, dynamic> args) async {
+    try {
+      final response = await _dio.post('/voice/tool/record_preference', data: {'session_id': sessionId, ...args});
+      return response.data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      throw AnalyzerException.fromDioException(e);
+    }
+  }
+
+  Future<Map<String, dynamic>> searchProducts(String sessionId, String query) async {
+    try {
+      final response = await _dio.post('/voice/tool/search_products', data: {'session_id': sessionId, 'query': query});
+      return response.data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      throw AnalyzerException.fromDioException(e);
+    }
+  }
+
+  Future<Map<String, dynamic>> readyToFinalize(String sessionId, String summary) async {
+    try {
+      final response = await _dio.post('/voice/tool/ready_to_finalize', data: {'session_id': sessionId, 'summary': summary});
+      return response.data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      throw AnalyzerException.fromDioException(e);
+    }
+  }
+
   // Calls POST /voice/session/cancel — explicitly discards the session
   // server-side (immediate delete, not the resumable disconnect grace
   // period) since the user is intentionally leaving voice chat, not just

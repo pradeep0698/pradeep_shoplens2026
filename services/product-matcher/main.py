@@ -170,7 +170,11 @@ async def match(request: MatchRequest) -> JSONResponse:
     "/search",
     tags=["Search"],
     summary="Search for products by query",
-    description="Direct Google Shopping search for a freetext query. Returns up to `max_results` products.",
+    description=(
+        "Freetext product search for a given query. Tries Google Shopping first; if that "
+        "returns nothing, falls back to Amazon (same SERPAPI_KEY, engine=amazon). Returns up "
+        "to `max_results` products plus which provider answered."
+    ),
 )
 async def search(request: SearchRequest) -> JSONResponse:
     # Pydantic's Field(ge=1, le=20) on SearchRequest.max_results already fully
@@ -179,9 +183,20 @@ async def search(request: SearchRequest) -> JSONResponse:
     # specifically for /match's SerpAPI-call-count cap, not /search's result
     # count. Reusing it here silently overrode any requested max_results down
     # to 5 regardless of what the caller asked for.
+    #
+    # search_products() already tries Google Shopping, a price-stripped
+    # simplified retry, then tops up with Amazon if still short — see its
+    # docstring in matcher.py.
     country = normalize_country(request.country)
     products = await asyncio.to_thread(search_products, request.query, request.max_results, country)
-    return JSONResponse(content={"products": products, "country": country, "currency": currency_for_country(country)})
+    # Each product is stamped with its own "provider" (google_shopping/amazon)
+    # in matcher.py's _shopping_search — summarize here so a caller that only
+    # wants "who answered this search" doesn't have to inspect every product.
+    providers = sorted({p["provider"] for p in products if p.get("provider")})
+    provider = "+".join(providers) if providers else "none"
+    return JSONResponse(content={
+        "products": products, "country": country, "currency": currency_for_country(country), "provider": provider,
+    })
 
 
 @app.get(

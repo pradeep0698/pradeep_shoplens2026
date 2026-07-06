@@ -1,0 +1,20 @@
+# gcloud run deploy --source . otherwise uploads everything in this directory
+# as build context, including local dev artifacts that have nothing to do
+# with the container image (a stray 141MB local .venv here once made a
+# deploy take 20+ minutes instead of ~2-3, uploading tens of thousands of
+# unnecessary small files).
+.gcloudignore
+.git
+.gitignore
+
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+.env
+.env.local
+
+# Test files aren't needed in the deployed image.
+test_*.py

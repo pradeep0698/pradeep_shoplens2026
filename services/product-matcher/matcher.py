@@ -121,11 +121,27 @@ def normalize_country(country: str | None) -> str:
 def currency_for_country(country: str | None) -> str:
     return _COUNTRY_CURRENCY.get(normalize_country(country), DEFAULT_CURRENCY)
 
-# Domains SerpAPI's "thumbnail" field actually points at (Google's own image
-# CDN, for both the google_shopping and google_lens engines) — used to scope
+# Domains SerpAPI's "thumbnail"/"thumbnails" fields actually point at —
+# Google's own image CDN for google_shopping/google_lens, and Amazon's media
+# CDN for engine=amazon (confirmed against a live SerpAPI Amazon Search API
+# response: thumbnails come back as https://m.media-amazon.com/images/...;
+# images-na.ssl-images-amazon.com is Amazon's older/regional CDN name, kept
+# for results from long-lived cached listings). Used to scope
 # fetch_thumbnail() below so it can't be used as an arbitrary open proxy.
-_ALLOWED_THUMBNAIL_HOSTS = (".gstatic.com", ".googleusercontent.com", ".google.com")
+_ALLOWED_THUMBNAIL_HOSTS = (
+    ".gstatic.com", ".googleusercontent.com", ".google.com",
+    ".media-amazon.com", ".ssl-images-amazon.com",
+)
 _THUMBNAIL_CACHE: TTLCache = TTLCache(maxsize=500, ttl=3600)
+# Separate from _THUMBNAIL_CACHE (which holds full fetched image bytes) —
+# this only caches the pass/fail verdict from a lightweight HEAD check, so
+# repeated searches don't re-validate the same thumbnail URL over and over.
+_THUMBNAIL_VALIDITY_CACHE: TTLCache = TTLCache(maxsize=1000, ttl=3600)
+# Extra candidates requested per search tier beyond max_results, so filtering
+# out a few dead thumbnails still leaves enough to hit the caller's requested
+# count — cheap because it's a larger `num` on the same SerpAPI call, not an
+# extra request.
+_THUMBNAIL_HEADROOM = 5
 
 
 def fetch_thumbnail(url: str) -> Optional[tuple[bytes, str]]:
@@ -155,6 +171,52 @@ def fetch_thumbnail(url: str) -> Optional[tuple[bytes, str]]:
     result = (resp.content, resp.headers.get("Content-Type", "image/jpeg"))
     _THUMBNAIL_CACHE[cache_key] = result
     return result
+
+
+def _thumbnail_is_valid(url: str) -> bool:
+    """Lightweight check that a product's thumbnail URL will actually render,
+    so search_products() can drop dead-thumbnail candidates instead of
+    surfacing a product whose image never shows. A HEAD request (not a full
+    GET) is enough — we only need status + Content-Type, not the image bytes
+    themselves, which keeps this cheap to run over every search candidate."""
+    if not url:
+        return False
+    if url in _THUMBNAIL_VALIDITY_CACHE:
+        return _THUMBNAIL_VALIDITY_CACHE[url]
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not any(
+        parsed.netloc.endswith(host) for host in _ALLOWED_THUMBNAIL_HOSTS
+    ):
+        return False
+
+    # Already fetched successfully via /thumbnail — no need for a second
+    # network round-trip just to confirm what we already know.
+    if url in _THUMBNAIL_CACHE:
+        _THUMBNAIL_VALIDITY_CACHE[url] = True
+        return True
+
+    try:
+        resp = _session.head(url, timeout=(_SERP_CONNECT_TIMEOUT, 5))
+        valid = resp.status_code < 400 and resp.headers.get("Content-Type", "").startswith("image/")
+    except Exception as exc:
+        logger.warning("Thumbnail validity check failed for '%s': %s", url, exc)
+        valid = False
+    _THUMBNAIL_VALIDITY_CACHE[url] = valid
+    return valid
+
+
+def _filter_valid_thumbnails(candidates: list[dict]) -> list[dict]:
+    """Drops candidates whose image_url is missing or fails to resolve,
+    checked concurrently since each is an independent I/O-bound HEAD request
+    (mirrors the ThreadPoolExecutor pattern in match_products() below).
+    Preserves the original relative order of the survivors."""
+    if not candidates:
+        return []
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        valid_flags = list(pool.map(lambda c: _thumbnail_is_valid(c.get("image_url", "")), candidates))
+    return [c for c, valid in zip(candidates, valid_flags) if valid]
+
 
 _CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "Furniture":          ["chair", "sofa", "couch", "desk", "table", "shelf", "wardrobe", "ottoman", "stool", "bookcase", "dresser", "nightstand", "bed frame"],
@@ -301,6 +363,8 @@ def _shopping_search(query: str, num: int, engine: str = "google_shopping", coun
 
     parser = _parse_amazon_result if engine == "amazon" else _parse_shopping_result
     candidates = [parser(r, query) for r in results]
+    for c in candidates:
+        c["provider"] = engine
     return _rank_by_quality(candidates, num)
 
 
@@ -345,35 +409,43 @@ def search_products(query: str, max_results: int = 15, country: str = DEFAULT_CO
     """Free-text shopping search returning up to max_results distinct products.
     Tries Google Shopping first, then a price-stripped query, then appends
     Amazon results on top of whatever Google Shopping already found (deduped
-    by product_id) whenever the running total is still under 5 — unlike the
-    old Bing fallback, Amazon never replaces Tier 1/2 results, only tops them
-    up. Unlike _search_product (single best match per detected item, used by
-    the image pipeline), this surfaces several options for an explicit user
-    search query to pick from."""
+    by product_id) whenever the running total is still short of max_results —
+    unlike the old Bing fallback, Amazon never replaces Tier 1/2 results, only
+    tops them up. Unlike _search_product (single best match per detected item,
+    used by the image pipeline), this surfaces several options for an explicit
+    user search query to pick from.
+
+    Each tier over-fetches (_THUMBNAIL_HEADROOM extra candidates) and drops any
+    candidate whose thumbnail doesn't actually resolve before counting toward
+    max_results, so a batch of dead-thumbnail results doesn't masquerade as a
+    full tier and wrongly skip the next one."""
     country = normalize_country(country)
     cache_key = f"q::{query.lower().strip()}::{max_results}::{country}"
     if cache_key in _cache:
         logger.info("Cache hit for query: %s (%s)", query, country)
         return _cache[cache_key]
 
+    headroom_n = max_results + _THUMBNAIL_HEADROOM
+
     # Tier 1: Google Shopping, original query
-    products = _shopping_search(query, max_results, engine="google_shopping", country=country)
+    raw = _shopping_search(query, headroom_n, engine="google_shopping", country=country)
+    products = _merge_dedup([], _filter_valid_thumbnails(raw), max_results)
 
     # Tier 2: Google Shopping, price-stripped query — only if still short
-    if len(products) < 5:
+    if len(products) < max_results:
         simplified = _simplify_query(query)
         if simplified:
             logger.info("Only %d Google results for '%s' — retrying simplified: '%s'", len(products), query, simplified)
-            more = _shopping_search(simplified, max_results, engine="google_shopping", country=country)
-            products = _merge_dedup(products, more, max_results)
+            more = _shopping_search(simplified, headroom_n, engine="google_shopping", country=country)
+            products = _merge_dedup(products, _filter_valid_thumbnails(more), max_results)
 
     # Tier 3: Amazon — appended on top of whatever Google Shopping found so
-    # far, only if still short of 5 total (never a full replace).
-    if len(products) < 5:
+    # far, only if still short of max_results total (never a full replace).
+    if len(products) < max_results:
         amazon_query = _simplify_query(query) or query
         logger.info("Only %d results after Google tiers — appending Amazon results for '%s'", len(products), amazon_query)
-        amazon_results = _shopping_search(amazon_query, max_results, engine="amazon", country=country)
-        products = _merge_dedup(products, amazon_results, max_results)
+        amazon_results = _shopping_search(amazon_query, headroom_n, engine="amazon", country=country)
+        products = _merge_dedup(products, _filter_valid_thumbnails(amazon_results), max_results)
 
     if products:
         _cache[cache_key] = products

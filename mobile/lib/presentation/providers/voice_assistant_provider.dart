@@ -214,7 +214,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         return;
       }
       _player = player;
-      _agc = Pcm16Agc();
+      _agc = Pcm16Agc(sampleRateHz: VoiceAudioPlayer.outputSampleRate);
       _speakingSince = null;
       _hadFirstSpeakingTurn = false;
 

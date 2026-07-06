@@ -189,7 +189,14 @@ async def search(request: SearchRequest) -> JSONResponse:
     # docstring in matcher.py.
     country = normalize_country(request.country)
     products = await asyncio.to_thread(search_products, request.query, request.max_results, country)
-    return JSONResponse(content={"products": products, "country": country, "currency": currency_for_country(country)})
+    # Each product is stamped with its own "provider" (google_shopping/amazon)
+    # in matcher.py's _shopping_search — summarize here so a caller that only
+    # wants "who answered this search" doesn't have to inspect every product.
+    providers = sorted({p["provider"] for p in products if p.get("provider")})
+    provider = "+".join(providers) if providers else "none"
+    return JSONResponse(content={
+        "products": products, "country": country, "currency": currency_for_country(country), "provider": provider,
+    })
 
 
 @app.get(

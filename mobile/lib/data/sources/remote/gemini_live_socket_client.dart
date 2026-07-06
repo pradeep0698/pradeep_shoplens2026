@@ -338,6 +338,9 @@ class GeminiLiveSocketClient implements VoiceTransport {
         _resetIdleTimer();
       }
     }
+    if (serverContent['turnComplete'] == true) {
+      _frames.add(const VoiceControlFrame({'type': 'assistant_turn_complete'}));
+    }
   }
 
   Future<void> _handleToolCall(Map<String, dynamic> toolCall) async {

@@ -1149,6 +1149,7 @@ async def test_pump_gemini_to_client_records_output_transcription():
 
     assert session.transcript == [{"role": "model", "text": "Hi there!"}]
     assert {"type": "transcript", "role": "model", "text": "Hi there!", "final": True} in ws.sent_json
+    assert {"type": "assistant_turn_complete"} in ws.sent_json
 
 
 @pytest.mark.asyncio

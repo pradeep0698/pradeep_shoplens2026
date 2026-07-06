@@ -13,7 +13,7 @@ class Pcm16Agc {
     this.maxGain = 4.0,
     this.minGain = 0.4,
     this.attack = 0.5,
-    this.release = 0.1,
+    this.release = 0.03,
     this.noiseFloor = 0.02,
   });
 
@@ -36,6 +36,15 @@ class Pcm16Agc {
   final double noiseFloor;
 
   double _currentGain = 1.0;
+  bool _needsTurnCalibration = true;
+
+  /// Starts a fresh model utterance. The first voiced chunk establishes that
+  /// turn's baseline immediately instead of inheriting another language or
+  /// question's gain.
+  void resetForTurn() {
+    _currentGain = 1.0;
+    _needsTurnCalibration = true;
+  }
 
   Uint8List process(Uint8List input) {
     if (input.length < 2) return input;
@@ -50,9 +59,15 @@ class Pcm16Agc {
     final peakFraction = peak / 32768.0;
 
     if (peakFraction >= noiseFloor) {
-      final idealGain = (targetPeak / peakFraction).clamp(minGain, maxGain);
-      final rate = idealGain < _currentGain ? attack : release;
-      _currentGain += (idealGain - _currentGain) * rate;
+      final idealGain =
+          (targetPeak / peakFraction).clamp(minGain, maxGain).toDouble();
+      if (_needsTurnCalibration) {
+        _currentGain = idealGain;
+        _needsTurnCalibration = false;
+      } else {
+        final rate = idealGain < _currentGain ? attack : release;
+        _currentGain += (idealGain - _currentGain) * rate;
+      }
     }
 
     final output = Uint8List(input.length);

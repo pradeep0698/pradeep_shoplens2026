@@ -19,7 +19,8 @@ class VoiceAudioFrame extends VoiceSocketFrame {
 /// locally from a direct Gemini Live message (direct-connect transport, see
 /// gemini_live_socket_client.dart) — both use the identical `type` vocabulary
 /// (transcript, preference_patch, search_started, product_results,
-/// finalize_proposal, interrupted, auto_saved, session_timeout) so
+/// finalize_proposal, assistant_turn_complete, interrupted, auto_saved,
+/// session_timeout) so
 /// VoiceAssistantNotifier's _handleControlFrame needs no transport-specific logic.
 class VoiceControlFrame extends VoiceSocketFrame {
   const VoiceControlFrame(this.json);

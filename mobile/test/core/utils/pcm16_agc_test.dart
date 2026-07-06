@@ -70,4 +70,16 @@ void main() {
     // should not have moved from its initial value.
     expect(output, silence);
   });
+
+  test('recalibrates immediately for each assistant turn', () {
+    final agc = Pcm16Agc();
+    final loud = _pcm16(List<int>.generate(200, (i) => i.isEven ? 30000 : -30000));
+    final quiet = _pcm16(List<int>.generate(200, (i) => i.isEven ? 4000 : -4000));
+
+    agc.process(loud);
+    agc.resetForTurn();
+    final output = _readPcm16(agc.process(quiet));
+
+    expect(_peak(output), greaterThan(12000));
+  });
 }

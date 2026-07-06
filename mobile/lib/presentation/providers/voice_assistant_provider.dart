@@ -9,6 +9,7 @@ import '../../core/utils/mic_permission.dart';
 import '../../core/utils/pcm16_agc.dart';
 import '../../core/utils/pcm16_resampler.dart';
 import '../../core/utils/pcm16_speech_gate.dart';
+import '../../core/utils/transcript_fragment_merger.dart';
 import '../../core/utils/voice_audio_player.dart';
 import '../../core/utils/web_audio_sample_rate.dart';
 import '../../data/models/voice_session.dart';
@@ -18,6 +19,7 @@ import '../../data/sources/remote/voice_transport_selector.dart';
 
 // Gemini Live API expects raw 16-bit PCM input at 16kHz.
 const _kInputSampleRate = 16000;
+const _kAssistantTurnTailMs = 140;
 
 String _displayVoiceError(Object error) {
   return error
@@ -322,6 +324,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           // turn on this player (the greeting) never gets the optimistic
           // local flush at all, regardless of grace period — see
           // _hadFirstSpeakingTurn.
+          _openTranscriptRole = null;
           final withinBargeInGrace = _speakingSince != null &&
               DateTime.now().difference(_speakingSince!) < const Duration(milliseconds: _bargeInGraceMs);
           if (state.status == VoiceStatus.speaking && _hadFirstSpeakingTurn && !withinBargeInGrace) {
@@ -501,20 +504,30 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         final role = json['role'] as String? ?? 'model';
         final text = json['text'] as String? ?? '';
         if (text.isEmpty) return;
+        // Gemini understands speech more reliably than its best-effort input
+        // captions. Keep spoken user captions off screen; typed turns are
+        // still inserted locally by sendText().
+        if (role == 'user') {
+          _openTranscriptRole = null;
+          return;
+        }
         final isFragment = json['fragment'] == true;
         final isFinal = json['final'] == true;
         final transcript = [...state.transcript];
+        if (transcript.isNotEmpty &&
+            transcript.last.role == role &&
+            transcript.last.text.trim() == text.trim()) {
+          _openTranscriptRole = isFragment && !isFinal ? role : null;
+          return;
+        }
         if (isFragment &&
             _openTranscriptRole == role &&
             transcript.isNotEmpty &&
             transcript.last.role == role) {
           final current = transcript.last;
-          final mergedText = text.startsWith(current.text)
-              ? text
-              : '${current.text}$text';
           transcript[transcript.length - 1] = VoiceTranscriptTurn(
             role: role,
-            text: mergedText,
+            text: mergeTranscriptFragment(current.text, text),
             seq: current.seq,
           );
         } else {
@@ -527,6 +540,18 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           transcript: transcript,
         );
         if (role == 'model') _markSpeaking();
+      case 'assistant_turn_complete':
+        _agc?.resetForTurn();
+        final silenceBytes = VoiceAudioPlayer.outputSampleRate *
+            2 *
+            _kAssistantTurnTailMs ~/
+            1000;
+        final player = _player;
+        if (player?.isReady ?? false) {
+          _feedChain = _feedChain
+              .then((_) => player!.playPcm16(Uint8List(silenceBytes)))
+              .catchError((_) => 0);
+        }
       case 'preference_patch':
         state = state.copyWith(
           patch: VoiceProfilePatch.fromJson(json['patch'] as Map<String, dynamic>? ?? const {}),

@@ -1147,6 +1147,8 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
                     session.pending_output_transcript += output_transcription.text
                 if output_transcription is not None and getattr(output_transcription, "finished", False):
                     await _flush_pending_output(websocket, session)
+                if getattr(server_content, "turn_complete", False):
+                    await websocket.send_json({"type": "assistant_turn_complete"})
 
             tool_call = getattr(response, "tool_call", None)
             if tool_call is not None:

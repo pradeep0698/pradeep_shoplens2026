@@ -132,6 +132,15 @@ Map<String, dynamic> readyToFinalizeTool() => {
 
 Map<String, dynamic> recordPreferenceTool() => {
       'name': 'record_preference',
+      // NON_BLOCKING + the matching 'scheduling': 'SILENT' on the client's
+      // functionResponse (see gemini_live_socket_client.dart's _handleToolCall)
+      // stop the tool round trip from resuming/interrupting the model's
+      // speech — a compound utterance that triggers multiple record_preference
+      // calls in one turn otherwise produced multiple spoken acknowledgements,
+      // since the default BLOCKING behavior resumes generation on every
+      // response. Mirrors the backend's RECORD_PREFERENCE FunctionDeclaration
+      // (live_session.py) for the proxied transport.
+      'behavior': 'NON_BLOCKING',
       'description': 'Call this immediately whenever the user states a shopping category, a '
           'brand/style/material preference, or something to exclude — even '
           'mid-conversation, not just once at the end. Use your own understanding '

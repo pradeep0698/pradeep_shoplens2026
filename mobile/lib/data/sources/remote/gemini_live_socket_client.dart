@@ -384,7 +384,16 @@ class GeminiLiveSocketClient implements VoiceTransport {
           result = {'status': 'unknown_tool'};
       }
 
-      functionResponses.add({'id': id, 'name': name, 'response': result});
+      functionResponses.add({
+        'id': id,
+        'name': name,
+        'response': result,
+        // Matches record_preference's 'behavior': 'NON_BLOCKING' in
+        // gemini_live_setup_builder.dart — SILENT scheduling adds the result
+        // to context without resuming generation, so it can't produce a
+        // second spoken acknowledgement.
+        if (name == 'record_preference') 'scheduling': 'SILENT',
+      });
     }
 
     // Sent back over Gemini's own WebSocket after local tool execution.

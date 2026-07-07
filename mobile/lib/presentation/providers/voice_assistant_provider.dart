@@ -6,7 +6,6 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 
 import '../../core/utils/mic_permission.dart';
-import '../../core/utils/pcm16_agc.dart';
 import '../../core/utils/pcm16_resampler.dart';
 import '../../core/utils/pcm16_speech_gate.dart';
 import '../../core/utils/transcript_fragment_merger.dart';
@@ -126,10 +125,6 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   // player's less predictable timing.
   bool _hadFirstSpeakingTurn = false;
   VoiceAudioPlayer? _player;
-  // Smooths out Gemini's turn-to-turn TTS loudness variance before playback
-  // — see Pcm16Agc. One instance per player/session so its gain state
-  // doesn't carry an odd starting point over from a previous conversation.
-  Pcm16Agc? _agc;
   Pcm16Resampler? _micResampler;
   Pcm16ReArmableSpeechGate? _speechGate;
   int _captureSampleRate = _kInputSampleRate;
@@ -154,6 +149,12 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   // future completes — this chain serializes frames as they arrive, since the
   // socket can deliver them faster than playback consumes them.
   Future<void> _feedChain = Future.value();
+  // Bumped by _flushPlayback() so chunks already chained onto a pre-flush
+  // _feedChain (queued behind an in-flight playPcm16 await) no-op instead of
+  // writing stale audio into the freshly restarted stream — reassigning
+  // _feedChain alone only affects chunks chained after the flush, not ones
+  // already attached to the old chain.
+  int _playbackGeneration = 0;
 
   // Lightweight per-session diagnostics, pushed to the backend (which logs it
   // under the VOICE_TRACE prefix — see live_session.py/main.py) at teardown
@@ -271,7 +272,6 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         return;
       }
       _player = player;
-      _agc = Pcm16Agc(sampleRateHz: VoiceAudioPlayer.outputSampleRate);
       _speakingSince = null;
       _hadFirstSpeakingTurn = false;
 
@@ -575,9 +575,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       case VoiceAudioFrame(data: final data):
         _markSpeaking();
         if (_player?.isReady ?? false) {
-          final leveled = _agc?.process(data) ?? data;
+          final playbackGeneration = _playbackGeneration;
           _feedChain = _feedChain
-              .then((_) => _player!.playPcm16(leveled))
+              .then((_) => playbackGeneration != _playbackGeneration ? null : _player!.playPcm16(data))
               .catchError((_) => 0);
         }
       case VoiceControlFrame(json: final json):
@@ -645,15 +645,15 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         );
         if (role == 'model') _markSpeaking();
       case 'assistant_turn_complete':
-        _agc?.resetForTurn();
         final silenceBytes = VoiceAudioPlayer.outputSampleRate *
             2 *
             _kAssistantTurnTailMs ~/
             1000;
         final player = _player;
         if (player?.isReady ?? false) {
+          final playbackGeneration = _playbackGeneration;
           _feedChain = _feedChain
-              .then((_) => player!.playPcm16(Uint8List(silenceBytes)))
+              .then((_) => playbackGeneration != _playbackGeneration ? null : player!.playPcm16(Uint8List(silenceBytes)))
               .catchError((_) => 0);
         }
       case 'preference_patch':
@@ -725,6 +725,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
 
   Future<void> _flushPlayback() async {
     if (!(_player?.isReady ?? false)) return;
+    // Invalidate chunks already chained onto the pre-flush _feedChain before
+    // it's reassigned below — see _playbackGeneration's declaration.
+    _playbackGeneration++;
     try {
       await _player!.flush();
       _feedChain = Future.value();
@@ -787,7 +790,6 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       await _player?.close();
     } catch (_) {}
     _player = null;
-    _agc = null;
     _feedChain = Future.value();
     await _socket?.close();
   }

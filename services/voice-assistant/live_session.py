@@ -354,6 +354,7 @@ READY_TO_FINALIZE = types.FunctionDeclaration(
 
 RECORD_PREFERENCE = types.FunctionDeclaration(
     name="record_preference",
+    behavior=types.Behavior.NON_BLOCKING,
     description=(
         "Call this immediately whenever the user states a shopping category, a "
         "brand/style/material preference, or something to exclude — even "
@@ -1220,7 +1221,21 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
                         ms=round((time.monotonic() - tool_start) * 1000), status=result.get("status", "?"),
                     )
                     function_responses.append(
-                        types.FunctionResponse(id=call.id, name=call.name, response=result)
+                        types.FunctionResponse(
+                            id=call.id,
+                            name=call.name,
+                            response=result,
+                            # record_preference is NON_BLOCKING (see its
+                            # FunctionDeclaration) — SILENT scheduling adds the
+                            # result to context without resuming generation, so
+                            # a compound utterance that triggers multiple
+                            # record_preference calls in one turn can't produce
+                            # multiple spoken acknowledgements (each BLOCKING
+                            # round trip otherwise resumes the model's speech).
+                            scheduling=types.FunctionResponseScheduling.SILENT
+                            if call.name == "record_preference"
+                            else None,
+                        )
                     )
                     if call.name == "ready_to_finalize":
                         await websocket.send_json(

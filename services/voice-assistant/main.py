@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import time
@@ -25,6 +26,7 @@ from live_session import (
     _MIN_ASSISTANT_TURNS_BEFORE_FIRST_SEARCH,
     _SESSION_MAX_SECONDS,
     SessionState,
+    _trace,
     apply_ready_to_finalize,
     apply_record_preference,
     apply_search_products,
@@ -276,6 +278,7 @@ async def start_session(http_request: Request, body: SessionStartRequest = Sessi
     uid = _require_uid(http_request)
 
     session = None
+    resumed = False
     if body.resume_session_id:
         candidate = await session_registry.get(body.resume_session_id)
         if candidate is not None and candidate.uid == uid:
@@ -283,6 +286,7 @@ async def start_session(http_request: Request, body: SessionStartRequest = Sessi
             if body.language in SUPPORTED_LANGUAGES and body.language != candidate.language:
                 candidate.language = body.language
             session = candidate
+            resumed = True
             logger.info("voice session %s resumed (uid=%s)", session.session_id, uid)
 
     if session is None:
@@ -293,6 +297,7 @@ async def start_session(http_request: Request, body: SessionStartRequest = Sessi
 
     elapsed = time.monotonic() - start
     logger.info("voice session start uid=%s session_id=%s in %.2fs", uid, session.session_id, elapsed)
+    _trace(session.session_id, "session_start", uid=uid, ms=round(elapsed * 1000), resumed=resumed)
 
     response = SessionStartResponse(
         session_id=session.session_id,
@@ -324,9 +329,11 @@ async def session_event(request: SessionEventRequest, http_request: Request) -> 
     req_id = uuid.uuid4().hex[:8]
     _request_id_ctx.set(req_id)
     uid = _require_uid(http_request)
-    logger.info(
-        "voice session event uid=%s session_id=%s event_type=%s", uid, request.session_id, request.event_type,
-    )
+    # Cap the logged payload — this is also how the mobile app's
+    # client_diagnostics event (mic/recorder/turn-latency stats, see
+    # voice_assistant_provider.dart's _flushDiagnostics) reaches Cloud Run
+    # logs, so it must never grow large enough to get truncated mid-JSON.
+    _trace(request.session_id, request.event_type, uid=uid, payload=json.dumps(request.payload)[:6000])
     return JSONResponse(content={"status": "received"}, headers={"X-Request-Id": req_id})
 
 
@@ -389,6 +396,7 @@ async def finalize_session(request: SessionFinalizeRequest, http_request: Reques
             "voice finalize FAILED after %.2fs | uid=%s session_id=%s | %s: %s",
             elapsed, uid, request.session_id, type(exc).__name__, exc,
         )
+        _trace(request.session_id, "finalize_failed", ms=round(elapsed * 1000), error=f"{type(exc).__name__}: {exc}")
         return JSONResponse(
             content={"detail": str(exc), "error_code": "INTERNAL_ERROR"},
             status_code=500,
@@ -400,6 +408,7 @@ async def finalize_session(request: SessionFinalizeRequest, http_request: Reques
         "voice finalize OK in %.2fs | uid=%s session_id=%s conflicts=%d",
         elapsed, uid, request.session_id, len(result.get("conflicts", [])),
     )
+    _trace(request.session_id, "finalize", ms=round(elapsed * 1000), conflicts=len(result.get("conflicts", [])))
     await session_registry.delete(request.session_id)
     return JSONResponse(content=result, headers={"X-Request-Id": req_id})
 
@@ -427,13 +436,16 @@ async def mint_session_token(request: SessionTokenRequest, http_request: Request
     _request_id_ctx.set(req_id)
     uid = _require_uid(http_request)
     session = await _get_owned_session(request.session_id, uid)
+    start = time.monotonic()
     try:
         token_data = await asyncio.to_thread(
             mint_ephemeral_token, session.existing_profile, session.mode, session.language
         )
     except Exception as exc:
         logger.exception("token mint failed for session %s: %s", request.session_id, exc)
+        _trace(request.session_id, "token_mint_failed", ms=round((time.monotonic() - start) * 1000), error=f"{type(exc).__name__}: {exc}")
         raise HTTPException(status_code=502, detail="Failed to mint Gemini Live token")
+    _trace(request.session_id, "token_mint", ms=round((time.monotonic() - start) * 1000))
     return JSONResponse(content=token_data, headers={"X-Request-Id": req_id})
 
 
@@ -455,8 +467,10 @@ async def mint_session_token(request: SessionTokenRequest, http_request: Request
 )
 async def tool_record_preference(request: RecordPreferenceRequest, http_request: Request) -> JSONResponse:
     uid = _require_uid(http_request)
+    start = time.monotonic()
     session = await _get_owned_session(request.session_id, uid)
     result = apply_record_preference(session, request.model_dump(exclude={"session_id"}))
+    _trace(request.session_id, "tool_call", tool="record_preference", ms=round((time.monotonic() - start) * 1000), status=result.get("status", "?"))
     return JSONResponse(content=result)
 
 
@@ -478,6 +492,7 @@ async def tool_record_preference(request: RecordPreferenceRequest, http_request:
 )
 async def tool_search_products(request: SearchProductsRequest, http_request: Request) -> JSONResponse:
     uid = _require_uid(http_request)
+    start = time.monotonic()
     session = await _get_owned_session(request.session_id, uid)
     # The direct Gemini connection holds the clarifying conversation itself,
     # so the backend relay never gets transcript turns to increment this
@@ -488,6 +503,7 @@ async def tool_search_products(request: SearchProductsRequest, http_request: Req
         _MIN_ASSISTANT_TURNS_BEFORE_FIRST_SEARCH,
     )
     result = await apply_search_products(session, request.query)
+    _trace(request.session_id, "tool_call", tool="search_products", ms=round((time.monotonic() - start) * 1000), status=result.get("status", "?"))
     return JSONResponse(content=result)
 
 
@@ -508,8 +524,10 @@ async def tool_search_products(request: SearchProductsRequest, http_request: Req
 )
 async def tool_ready_to_finalize(request: ReadyToFinalizeRequest, http_request: Request) -> JSONResponse:
     uid = _require_uid(http_request)
+    start = time.monotonic()
     session = await _get_owned_session(request.session_id, uid)
     result = apply_ready_to_finalize(session, request.summary.strip())
+    _trace(request.session_id, "tool_call", tool="ready_to_finalize", ms=round((time.monotonic() - start) * 1000), status=result.get("status", "?"))
     return JSONResponse(content=result)
 
 

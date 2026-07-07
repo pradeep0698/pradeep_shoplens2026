@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
@@ -155,6 +155,50 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   // socket can deliver them faster than playback consumes them.
   Future<void> _feedChain = Future.value();
 
+  // Lightweight per-session diagnostics, pushed to the backend (which logs it
+  // under the VOICE_TRACE prefix — see live_session.py/main.py) at teardown
+  // so a "mic seems dead" report can be correlated with server-side timing
+  // without needing a device attached. Reset at the top of start() for a
+  // fresh (non-resume) session.
+  DateTime? _diagSessionStart;
+  final List<Map<String, dynamic>> _diagEvents = [];
+  int _diagMicChunks = 0;
+  int _diagMicBytesReceived = 0;
+  int _diagAudioBytesSent = 0;
+  int _diagGateOpenCount = 0;
+  String? _diagMicPermissionStatus;
+  bool _diagDirectConnect = false;
+  String? _diagRecorderError;
+  // Set the moment sendSpeechEnd() fires; cleared on the first frame back
+  // from the server — end-to-end (network + Gemini + tool-call) latency for
+  // that turn, comparable against the server's own turn_first_response trace
+  // to isolate network overhead from backend/model latency.
+  DateTime? _diagTurnRequestedAt;
+
+  void _diagEvent(String event, [Map<String, dynamic>? data]) {
+    if (_diagEvents.length >= 100) return;
+    final elapsedMs =
+        _diagSessionStart == null ? 0 : DateTime.now().difference(_diagSessionStart!).inMilliseconds;
+    _diagEvents.add({'t_ms': elapsedMs, 'event': event, if (data != null) ...data});
+  }
+
+  void _flushDiagnostics() {
+    final sessionId = _sessionId;
+    if (sessionId == null || _diagEvents.isEmpty) return;
+    final payload = {
+      'platform': defaultTargetPlatform.name,
+      'direct_connect': _diagDirectConnect,
+      'mic_permission': _diagMicPermissionStatus,
+      'recorder_error': _diagRecorderError,
+      'mic_chunks_received': _diagMicChunks,
+      'mic_bytes_received': _diagMicBytesReceived,
+      'audio_bytes_sent': _diagAudioBytesSent,
+      'gate_open_count': _diagGateOpenCount,
+      'events': _diagEvents,
+    };
+    unawaited(ref.read(voiceApiProvider).sendSessionEvent(sessionId, 'client_diagnostics', payload));
+  }
+
   @override
   VoiceAssistantState build() {
     ref.onDispose(_disposeSession);
@@ -174,6 +218,14 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       _seq = 0;
       _searchId = 0;
       _openTranscriptRole = null;
+      _diagSessionStart = DateTime.now();
+      _diagEvents.clear();
+      _diagMicChunks = 0;
+      _diagMicBytesReceived = 0;
+      _diagAudioBytesSent = 0;
+      _diagGateOpenCount = 0;
+      _diagMicPermissionStatus = null;
+      _diagRecorderError = null;
     } else {
       await _socket?.close();
     }
@@ -183,6 +235,8 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
     try {
       final micStatus = await requestMicrophonePermission();
       if (!_isCurrent(generation)) return;
+      _diagMicPermissionStatus = micStatus.name;
+      _diagEvent('mic_permission', {'status': micStatus.name});
       if (!micStatus.isGranted) {
         state = state.copyWith(
           status: VoiceStatus.error,
@@ -192,6 +246,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       }
 
       final voiceApi = ref.read(voiceApiProvider);
+      final sessionStartBegin = DateTime.now();
       final startResponse = await voiceApi.startSession(
         isOnboarding: isOnboarding,
         language: language,
@@ -199,6 +254,8 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       );
       if (!_isCurrent(generation)) return;
       _sessionId = startResponse.sessionId;
+      _diagDirectConnect = startResponse.directConnectAllowed;
+      _diagEvent('session_start', {'ms': DateTime.now().difference(sessionStartBegin).inMilliseconds});
       if (!resume) {
         state = state.copyWith(patch: startResponse.profile);
       }
@@ -233,6 +290,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           if (_isCurrent(generation)) _handleSocketError(error);
         },
       );
+      final socketConnectBegin = DateTime.now();
       await socket.connect(
         sessionId: startResponse.sessionId,
         wsUrl: startResponse.wsUrl,
@@ -242,6 +300,10 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         resumeTranscript: state.transcript,
       );
       if (!_isCurrent(generation)) return;
+      _diagEvent('socket_connect', {
+        'ms': DateTime.now().difference(socketConnectBegin).inMilliseconds,
+        'transport': _diagDirectConnect ? 'direct' : 'proxy',
+      });
 
       // On web, record_web ignores RecordConfig.sampleRate and silently
       // captures at whatever rate the browser's AudioContext settles on
@@ -262,6 +324,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       // arrives as a normal transcript/audio frame, same as any other turn.
       state = state.copyWith(status: VoiceStatus.listening);
     } catch (e) {
+      _diagEvent('start_failed', {'error': e.toString()});
       await _stopLiveAudio(invalidate: false);
       state = state.copyWith(
         status: VoiceStatus.error,
@@ -289,23 +352,45 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   /// barge-in flushes playback immediately.
   Future<void> startHandsFree() async {
     if (state.isHandsFreeActive || _recorder == null) return;
-    state = state.copyWith(isHandsFreeActive: true);
     final generation = _generation;
     _speechGate = Pcm16ReArmableSpeechGate(sampleRate: _kInputSampleRate);
     _speechStarted = false;
-    final stream = await _recorder!.startStream(RecordConfig(
-      encoder: AudioEncoder.pcm16bits,
-      sampleRate: _captureSampleRate,
-      numChannels: 1,
-      echoCancel: true,
-      noiseSuppress: true,
-      autoGain: true,
-      androidConfig: const AndroidRecordConfig(audioSource: AndroidAudioSource.voiceCommunication),
-    ));
+    // isHandsFreeActive is only flipped on AFTER startStream() actually
+    // succeeds (previously it was set optimistically before the await —
+    // if startStream() throws, e.g. AndroidAudioSource.voiceCommunication
+    // failing to open on some Android OEM/emulator builds, the UI showed
+    // "Listening" forever with a mic that was never actually capturing
+    // anything, and no error surfaced at all).
+    final recorderStartBegin = DateTime.now();
+    final Stream<Uint8List> stream;
+    try {
+      stream = await _recorder!.startStream(RecordConfig(
+        encoder: AudioEncoder.pcm16bits,
+        sampleRate: _captureSampleRate,
+        numChannels: 1,
+        echoCancel: true,
+        noiseSuppress: true,
+        autoGain: true,
+        androidConfig: const AndroidRecordConfig(audioSource: AndroidAudioSource.voiceCommunication),
+      ));
+    } catch (e) {
+      _diagRecorderError = e.toString();
+      _diagEvent('recorder_start_failed', {'error': e.toString()});
+      _flushDiagnostics();
+      state = state.copyWith(
+        status: VoiceStatus.error,
+        errorMessage: 'Could not start the microphone (${_displayVoiceError(e)}) — tap the mic to try again.',
+      );
+      return;
+    }
+    _diagEvent('recorder_started', {'ms': DateTime.now().difference(recorderStartBegin).inMilliseconds});
+    state = state.copyWith(isHandsFreeActive: true);
     _micSubscription = stream.listen((chunk) {
       if (!_isCurrent(generation) || !state.isHandsFreeActive) return;
       final outbound = _micResampler?.convert(chunk) ?? chunk;
       if (outbound.isEmpty) return;
+      _diagMicChunks++;
+      _diagMicBytesReceived += outbound.length;
       final result = _speechGate?.add(outbound) ??
           const Pcm16SpeechGateCycleResult(event: Pcm16SpeechGateEvent.none, chunks: []);
       switch (result.event) {
@@ -332,23 +417,36 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
             _speakingDebounce?.cancel();
             state = state.copyWith(status: VoiceStatus.listening);
           }
+          _diagGateOpenCount++;
+          _diagEvent('gate_opened');
           _speechStarted = true;
           state = state.copyWith(isRecording: true);
           _socket?.sendSpeechStart();
           for (final c in result.chunks) {
-            if (c.isNotEmpty) _socket?.sendAudio(c);
+            if (c.isNotEmpty) {
+              _socket?.sendAudio(c);
+              _diagAudioBytesSent += c.length;
+            }
           }
         case Pcm16SpeechGateEvent.ended:
           for (final c in result.chunks) {
-            if (c.isNotEmpty) _socket?.sendAudio(c);
+            if (c.isNotEmpty) {
+              _socket?.sendAudio(c);
+              _diagAudioBytesSent += c.length;
+            }
           }
           _socket?.sendSpeechEnd();
+          _diagTurnRequestedAt = DateTime.now();
+          _diagEvent('gate_closed');
           _speechStarted = false;
           state = state.copyWith(isRecording: false);
         case Pcm16SpeechGateEvent.none:
           if (_speechStarted) {
             for (final c in result.chunks) {
-              if (c.isNotEmpty) _socket?.sendAudio(c);
+              if (c.isNotEmpty) {
+                _socket?.sendAudio(c);
+                _diagAudioBytesSent += c.length;
+              }
             }
           }
       }
@@ -469,6 +567,10 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   }
 
   void _handleFrame(VoiceSocketFrame frame) {
+    if (_diagTurnRequestedAt != null) {
+      _diagEvent('turn_first_response', {'ms': DateTime.now().difference(_diagTurnRequestedAt!).inMilliseconds});
+      _diagTurnRequestedAt = null;
+    }
     switch (frame) {
       case VoiceAudioFrame(data: final data):
         _markSpeaking();
@@ -489,6 +591,8 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         final detail = reason != null && reason.isNotEmpty
             ? ' (${code != null ? '$code: ' : ''}$reason)'
             : '';
+        _diagEvent('socket_closed', {'code': code, 'reason': reason});
+        _flushDiagnostics();
         state = state.copyWith(
           status: VoiceStatus.error,
           errorMessage: 'Connection lost — tap Reconnect to keep talking.$detail',
@@ -649,6 +753,8 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   }
 
   void _handleSocketError(Object error) {
+    _diagEvent('socket_error', {'error': error.toString()});
+    _flushDiagnostics();
     state = state.copyWith(
       status: VoiceStatus.error,
       errorMessage: _displayVoiceError(error),
@@ -662,6 +768,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   // misread as a dropped connection by _handleFrame's VoiceSocketClosed
   // branch. Safe to call more than once — every step is already null-safe.
   Future<void> _stopLiveAudio({bool invalidate = true}) async {
+    _flushDiagnostics();
     if (invalidate) _generation++;
     _speakingDebounce?.cancel();
     await _micSubscription?.cancel();

@@ -18,6 +18,20 @@ import profile_store
 
 logger = logging.getLogger(__name__)
 
+# Single grep-able marker for every timing/failure line emitted by this
+# service, whether computed server-side or reported by the client via
+# POST /voice/session/event (see main.py's session_event, which logs
+# client-sent diagnostics through this same helper) — `grep VOICE_TRACE` in
+# Cloud Run logs surfaces the whole pipeline's timing/failure trail for a
+# session in one place, correlated by session_id.
+_TRACE_PREFIX = "VOICE_TRACE"
+
+
+def _trace(session_id: str, event: str, **fields) -> None:
+    detail = " ".join(f"{k}={v}" for k, v in fields.items())
+    logger.info("%s session=%s event=%s %s", _TRACE_PREFIX, session_id, event, detail)
+
+
 _PROJECT = os.environ.get("PROJECT_ID", "")
 # "us-central1" — unlike the older cascade model (gemini-live-2.5-flash,
 # only reachable at "global"), the native-audio VOICE_MODEL below is
@@ -487,6 +501,11 @@ class SessionState:
     # users — see _profile_note). Not reset on resume: a resumed session
     # already had its clarifying conversation.
     assistant_turns_in_search_mode: int = 0
+    # Set the moment a user turn is handed to Gemini (speech_end or a typed
+    # turn's activity_end) — cleared on the first response chunk back (see
+    # _pump_gemini_to_client), giving a time-to-first-response measurement
+    # per turn. None means "no turn currently awaiting a response".
+    turn_requested_at: Optional[float] = None
 
     def __post_init__(self) -> None:
         normalized = profile_store.normalize_reviewed_patch(self.existing_profile)
@@ -843,6 +862,7 @@ async def _search_shopping(query: str, max_results: int) -> tuple[list[dict], st
     if not _PRODUCT_MATCHER_URL:
         logger.warning("PRODUCT_MATCHER_URL not set — cannot run product search")
         return [], "none"
+    start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
             resp = await client.post(
@@ -850,9 +870,17 @@ async def _search_shopping(query: str, max_results: int) -> tuple[list[dict], st
             )
             resp.raise_for_status()
             data = resp.json()
-            return data.get("products", []), data.get("provider", "unknown")
+            products = data.get("products", [])
+            logger.info(
+                "%s event=matcher_search ms=%d provider=%s count=%d",
+                _TRACE_PREFIX, round((time.monotonic() - start) * 1000), data.get("provider", "unknown"), len(products),
+            )
+            return products, data.get("provider", "unknown")
     except Exception as exc:
-        logger.warning("product-matcher search failed for '%s': %s", query, exc)
+        logger.warning(
+            "%s event=matcher_search_failed ms=%d error=%s: %s",
+            _TRACE_PREFIX, round((time.monotonic() - start) * 1000), type(exc).__name__, exc,
+        )
         return [], "error"
 
 
@@ -886,7 +914,12 @@ async def apply_search_products(session: SessionState, query: str) -> dict:
     # sees the original `query` below (see the returned dict) so the
     # augmentation text never leaks into "Results for '...'" on screen.
     augmented_query = _augment_query(query, session.existing_profile)
+    search_start = time.monotonic()
     products, provider = await _search_shopping(augmented_query, max_results)
+    _trace(
+        session.session_id, "product_search",
+        ms=round((time.monotonic() - search_start) * 1000), provider=provider, count=len(products),
+    )
     if products:
         session.consecutive_no_results = 0
         return {"status": "found", "query": query, "products": products, "provider": provider}
@@ -1039,6 +1072,7 @@ async def _pump_client_to_gemini(websocket: WebSocket, gemini_session, session: 
                     await gemini_session.send_realtime_input(text=text)
                     await gemini_session.send_realtime_input(activity_end=types.ActivityEnd())
                     session.last_activity_at = time.monotonic()
+                    session.turn_requested_at = time.monotonic()
                     await _on_user_turn(websocket, session, text)
                     if session.mode == "preferences":
                         # Typed text is verbatim (no STT step), unlike voice
@@ -1065,6 +1099,7 @@ async def _pump_client_to_gemini(websocket: WebSocket, gemini_session, session: 
                 await gemini_session.send_realtime_input(activity_start=types.ActivityStart())
             elif frame.get("type") == "speech_end":
                 await gemini_session.send_realtime_input(activity_end=types.ActivityEnd())
+                session.turn_requested_at = time.monotonic()
             else:
                 logger.debug("Received control frame from client: %s", frame)
 
@@ -1107,6 +1142,12 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
     reached the client)."""
     while True:
         async for response in gemini_session.receive():
+            if session.turn_requested_at is not None:
+                _trace(
+                    session.session_id, "turn_first_response",
+                    ms=round((time.monotonic() - session.turn_requested_at) * 1000),
+                )
+                session.turn_requested_at = None
             server_content = getattr(response, "server_content", None)
             if server_content is not None:
                 if getattr(server_content, "interrupted", False):
@@ -1164,7 +1205,20 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
                         await websocket.send_json(
                             {"type": "search_started", "query": str(dict(call.args or {}).get("query", "")).strip()}
                         )
-                    result = await _dispatch_tool_call(call.name, dict(call.args or {}), session)
+                    tool_start = time.monotonic()
+                    try:
+                        result = await _dispatch_tool_call(call.name, dict(call.args or {}), session)
+                    except Exception as exc:
+                        _trace(
+                            session.session_id, "tool_call_failed", tool=call.name,
+                            ms=round((time.monotonic() - tool_start) * 1000),
+                            error=f"{type(exc).__name__}: {exc}",
+                        )
+                        raise
+                    _trace(
+                        session.session_id, "tool_call", tool=call.name,
+                        ms=round((time.monotonic() - tool_start) * 1000), status=result.get("status", "?"),
+                    )
                     function_responses.append(
                         types.FunctionResponse(id=call.id, name=call.name, response=result)
                     )
@@ -1492,12 +1546,14 @@ async def run_voice_session(websocket: WebSocket, session: SessionState) -> None
     client = _get_client()
     hard_remaining = max(0.0, _SESSION_MAX_SECONDS - (time.monotonic() - session.created_at))
     resume_transcript = list(session.transcript)
+    connect_start = time.monotonic()
 
     try:
         async with client.aio.live.connect(
             model=_VOICE_MODEL,
             config=_live_config(session.existing_profile, session.mode, session.language, resume_transcript),
         ) as gemini_session:
+            _trace(session.session_id, "gemini_connected", ms=round((time.monotonic() - connect_start) * 1000))
             await _send_greeting_trigger(gemini_session, resumed=bool(resume_transcript))
             session.last_activity_at = time.monotonic()
 
@@ -1518,7 +1574,17 @@ async def run_voice_session(websocket: WebSocket, session: SessionState) -> None
                 # first — absolute last-resort cutoff.
                 logger.info("voice session %s hit hard SESSION_MAX_SECONDS cutoff — auto-saving", session.session_id)
                 await _auto_save_and_close(websocket, session)
+    except Exception as exc:
+        _trace(
+            session.session_id, "session_failed",
+            ms=round((time.monotonic() - connect_start) * 1000), error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
     finally:
+        _trace(
+            session.session_id, "session_ended",
+            duration_s=round(time.monotonic() - session.created_at, 1), turns=len(session.transcript),
+        )
         # Gemini session is torn down by the `async with` block's __aexit__ above
         # regardless of how the wait() above exits — stops audio billing promptly.
         # Do NOT delete the registry entry here — an ordinary WS disconnect

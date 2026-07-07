@@ -93,6 +93,26 @@ class VoiceApi {
     }
   }
 
+  // Calls POST /voice/session/event — a generic, best-effort event sink the
+  // backend logs under the VOICE_TRACE prefix (see main.py's session_event/
+  // live_session.py's _trace). Used to push the client-side diagnostics
+  // buffer (mic/recorder/turn-latency stats — see _flushDiagnostics in
+  // voice_assistant_provider.dart) at session teardown, so a report like
+  // "the mic seems dead" can be correlated with server-side timing without a
+  // device attached. Fire-and-forget, same as cancelSession — diagnostics
+  // must never block or fail the actual teardown.
+  Future<void> sendSessionEvent(String sessionId, String eventType, Map<String, dynamic> payload) async {
+    try {
+      await _dio.post('/voice/session/event', data: {
+        'session_id': sessionId,
+        'event_type': eventType,
+        'payload': payload,
+      });
+    } on DioException catch (_) {
+      // Best-effort — see doc comment above.
+    }
+  }
+
   // Calls POST /voice/session/cancel — explicitly discards the session
   // server-side (immediate delete, not the resumable disconnect grace
   // period) since the user is intentionally leaving voice chat, not just

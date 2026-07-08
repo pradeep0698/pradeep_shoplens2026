@@ -359,11 +359,12 @@ class GeminiLiveSocketClient implements VoiceTransport {
       switch (name) {
         case 'search_products':
           final query = args['query'] as String? ?? '';
+          final category = args['category'] as String?;
           // Sent immediately, before awaiting the (possibly ~20-25s combined
           // Google Shopping + Amazon) result — same deterministic loading-
           // state backstop the backend sends on the proxy path.
           _frames.add(VoiceControlFrame({'type': 'search_started', 'query': query}));
-          result = await _voiceApi.searchProducts(sessionId, query);
+          result = await _voiceApi.searchProducts(sessionId, query, category: category);
           _frames.add(VoiceControlFrame({
             'type': 'product_results',
             'query': result['query'] ?? query,

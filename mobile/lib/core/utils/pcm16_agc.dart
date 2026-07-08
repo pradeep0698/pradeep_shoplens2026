@@ -13,21 +13,26 @@ import 'dart:typed_data';
 /// [calibrationBudgetMs]) using RMS rather than a single chunk's instantaneous
 /// peak — a lone plosive or quiet consonant as the very first chunk of a turn
 /// used to lock in the wrong gain for the whole turn. The calibrated gain is
-/// then reached by the same smoothing used mid-turn, starting from whatever
-/// gain the previous turn ended at (see [resetForTurn]) rather than resetting
-/// to unity, so consecutive turns in a session drift toward a consistent
-/// volume instead of each starting from a blank slate.
+/// then committed in one large jump (see [calibrationConvergence]) rather
+/// than through the gradual attack/release smoothing used for ongoing
+/// mid-turn nudges — that gradual smoothing is still what carries
+/// [_currentGain] forward from wherever the previous turn ended (see
+/// [resetForTurn]) into the pre-calibration window of the next one, so
+/// consecutive turns in a session drift toward a consistent volume instead of
+/// each starting from a blank slate, but the actual per-turn correction needs
+/// to land fast enough that a short turn doesn't finish before converging.
 class Pcm16Agc {
   Pcm16Agc({
     required this.sampleRateHz,
     this.targetPeak = 0.55,
-    this.maxGain = 4.0,
-    this.minGain = 0.4,
+    this.maxGain = 4.5,
+    this.minGain = 0.35,
     this.attack = 0.5,
-    this.release = 0.03,
+    this.release = 0.06,
     this.noiseFloor = 0.02,
-    this.calibrationBudgetMs = 100,
+    this.calibrationBudgetMs = 150,
     this.silenceFallbackMs = 450,
+    this.calibrationConvergence = 0.85,
   })  : _calibrationSampleBudget = (sampleRateHz * calibrationBudgetMs / 1000).round(),
         _silenceFallbackSampleCeiling = (sampleRateHz * silenceFallbackMs / 1000).round();
 
@@ -61,6 +66,15 @@ class Pcm16Agc {
   // budget above — a turn that opens with silence would otherwise never
   // finish calibrating.
   final int silenceFallbackMs;
+  // Fraction of the way _currentGain jumps toward the calibrated ideal gain
+  // the instant the calibration window closes (see [process]) — deliberately
+  // much larger than a single attack/release step. Committing the calibrated
+  // gain through the same slow smoothing used for ongoing mid-turn nudges
+  // meant a short turn could end before ever converging, and a carried-over
+  // gain from an unusually loud/quiet previous turn could take dozens of
+  // chunks to correct. Not 1.0 (full snap) so the very first post-calibration
+  // chunk still blends slightly rather than jumping instantaneously.
+  final double calibrationConvergence;
 
   final int _calibrationSampleBudget;
   final int _silenceFallbackSampleCeiling;
@@ -109,7 +123,7 @@ class Pcm16Agc {
       if (budgetMet || timedOut) {
         if (_calibrationSamples > 0) {
           final calibratedRms = math.sqrt(_calibrationEnergy / _calibrationSamples) / 32768.0;
-          _applyTowardIdeal(calibratedRms);
+          _commitCalibratedGain(calibratedRms);
         }
         _calibrating = false;
       }
@@ -136,5 +150,13 @@ class Pcm16Agc {
     final idealGain = (targetPeak / levelFraction).clamp(minGain, maxGain).toDouble();
     final rate = idealGain < _currentGain ? attack : release;
     _currentGain += (idealGain - _currentGain) * rate;
+  }
+
+  // Jumps most of the way to the calibrated ideal gain in one step rather
+  // than the gradual attack/release used for ongoing mid-turn nudges — see
+  // [calibrationConvergence]'s doc comment for why.
+  void _commitCalibratedGain(double levelFraction) {
+    final idealGain = (targetPeak / levelFraction).clamp(minGain, maxGain).toDouble();
+    _currentGain += (idealGain - _currentGain) * calibrationConvergence;
   }
 }

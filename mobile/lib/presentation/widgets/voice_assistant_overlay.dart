@@ -378,8 +378,6 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> w
                 searchResults: state.searchResults,
                 shoppingCategories: state.patch.shoppingCategories,
               ),
-            if (state.transcript.isNotEmpty)
-              _TranscriptList(transcript: state.transcript),
             const SizedBox(height: 8),
           ],
         ),
@@ -736,35 +734,6 @@ class _PreferencePreview extends StatelessWidget {
           border: Border.all(color: color.withValues(alpha: 0.5)),
         ),
         child: Text(label, style: TextStyle(color: color, fontSize: 12)),
-      );
-}
-
-/// Plain chronological chat feed — transcript turns only. Search results no
-/// longer interleave here (see _PinnedSearchSection below); this list is
-/// ordered purely by VoiceTranscriptTurn.seq.
-class _TranscriptList extends StatelessWidget {
-  const _TranscriptList({required this.transcript});
-
-  final List<VoiceTranscriptTurn> transcript;
-
-  @override
-  Widget build(BuildContext context) {
-    final turns = [...transcript]..sort((a, b) => a.seq.compareTo(b.seq));
-    return Column(children: turns.map(_transcriptBubble).toList());
-  }
-
-  Widget _transcriptBubble(VoiceTranscriptTurn turn) => Align(
-        alignment: turn.role == 'user' ? Alignment.centerRight : Alignment.centerLeft,
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 4),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          constraints: const BoxConstraints(maxWidth: 280),
-          decoration: BoxDecoration(
-            color: turn.role == 'user' ? _kAccent.withValues(alpha: 0.15) : _kSurface,
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: Text(turn.text, style: const TextStyle(color: Colors.white, fontSize: 13)),
-        ),
       );
 }
 

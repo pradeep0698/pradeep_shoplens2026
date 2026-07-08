@@ -154,6 +154,12 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   // future completes — this chain serializes frames as they arrive, since the
   // socket can deliver them faster than playback consumes them.
   Future<void> _feedChain = Future.value();
+  // Bumped by _flushPlayback() so chunks already chained onto a pre-flush
+  // _feedChain (queued behind an in-flight playPcm16 await) no-op instead of
+  // writing stale audio into the freshly restarted stream — reassigning
+  // _feedChain alone only affects chunks chained after the flush, not ones
+  // already attached to the old chain.
+  int _playbackGeneration = 0;
 
   // Lightweight per-session diagnostics, pushed to the backend (which logs it
   // under the VOICE_TRACE prefix — see live_session.py/main.py) at teardown
@@ -576,8 +582,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         _markSpeaking();
         if (_player?.isReady ?? false) {
           final leveled = _agc?.process(data) ?? data;
+          final playbackGeneration = _playbackGeneration;
           _feedChain = _feedChain
-              .then((_) => _player!.playPcm16(leveled))
+              .then((_) => playbackGeneration != _playbackGeneration ? null : _player!.playPcm16(leveled))
               .catchError((_) => 0);
         }
       case VoiceControlFrame(json: final json):
@@ -652,8 +659,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
             1000;
         final player = _player;
         if (player?.isReady ?? false) {
+          final playbackGeneration = _playbackGeneration;
           _feedChain = _feedChain
-              .then((_) => player!.playPcm16(Uint8List(silenceBytes)))
+              .then((_) => playbackGeneration != _playbackGeneration ? null : player!.playPcm16(Uint8List(silenceBytes)))
               .catchError((_) => 0);
         }
       case 'preference_patch':
@@ -725,6 +733,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
 
   Future<void> _flushPlayback() async {
     if (!(_player?.isReady ?? false)) return;
+    // Invalidate chunks already chained onto the pre-flush _feedChain before
+    // it's reassigned below — see _playbackGeneration's declaration.
+    _playbackGeneration++;
     try {
       await _player!.flush();
       _feedChain = Future.value();

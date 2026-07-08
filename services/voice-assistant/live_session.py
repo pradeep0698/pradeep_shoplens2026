@@ -225,7 +225,10 @@ SEARCH_SYSTEM_PROMPT_TEMPLATE = (
     "that you're working on it before you go quiet. Then call search_products "
     "with a concise, well-formed query capturing everything you learned (fold "
     "a budget straight into the query text, e.g. 'wireless headphones under "
-    "$50' — there is no separate price filter).\n\n"
+    "$50' — there is no separate price filter). Also pass your best-guess "
+    "category for the search (e.g. a microwave is Electronics) so the right "
+    "saved brand/style preferences get applied — omit it only if genuinely "
+    "ambiguous.\n\n"
     "ONE CONCLUSION PER SEARCH: call search_products exactly once per distinct "
     "request. Don't call search_products more than once per turn, and don't "
     "search again just because the user rephrased the same request — only "
@@ -354,6 +357,7 @@ READY_TO_FINALIZE = types.FunctionDeclaration(
 
 RECORD_PREFERENCE = types.FunctionDeclaration(
     name="record_preference",
+    behavior=types.Behavior.NON_BLOCKING,
     description=(
         "Call this immediately whenever the user states a shopping category, a "
         "brand/style/material preference, or something to exclude — even "
@@ -402,6 +406,16 @@ SEARCH_PRODUCTS = types.FunctionDeclaration(
         type="OBJECT",
         properties={
             "query": types.Schema(type="STRING", description="The shopping search query."),
+            "category": types.Schema(
+                type="STRING",
+                enum=VOICE_CATEGORIES,
+                description=(
+                    "Your best guess at which of the user's fixed shopping categories this "
+                    "search falls under (e.g. a microwave is Electronics) — used to apply the "
+                    "right saved brand/style preferences to this specific search. Omit if "
+                    "genuinely ambiguous."
+                ),
+            ),
         },
         required=["query"],
     ),
@@ -453,7 +467,10 @@ class SessionState:
     # language_code does nothing on this native-audio model).
     language: str = "English"
     created_at: float = field(default_factory=time.monotonic)
-    latest_patch: dict = field(default_factory=lambda: {"shopping_categories": [], "preference_terms": [], "ignore_terms": []})
+    # preference_terms/ignore_terms are category-keyed (dict[str, list[str]],
+    # see profile_store._coerce_categorized) — __post_init__ overwrites this
+    # default from existing_profile immediately below.
+    latest_patch: dict = field(default_factory=lambda: {"shopping_categories": [], "preference_terms": {}, "ignore_terms": {}})
     finalize_proposal: Optional[dict] = None
     # Accumulated {role, text} turns — the input to _extract_patch_from_transcript.
     transcript: list[dict] = field(default_factory=list)
@@ -825,21 +842,35 @@ def _sanitize_exclusion_term(term: str) -> str:
     return cleaned
 
 
-def _augment_query(query: str, profile: dict) -> str:
+def _augment_query(query: str, profile: dict, category: str | None = None) -> str:
     """Appends the shopping-context phrase, the profile's preference_terms
     (as a soft bias), and ignore_terms (as hard -exclusions) to an
     LLM-produced search query — a second, code-level layer on top of
     whatever the model already folded into its own query text (see
     SEARCH_SYSTEM_PROMPT_TEMPLATE). The augmented string is only ever sent to
     the search backend — callers must keep showing the user the original,
-    unaugmented query."""
+    unaugmented query.
+
+    preference_terms/ignore_terms are category-keyed (see
+    profile_store._coerce_categorized) — only `category`'s own bucket plus
+    the general bucket are applied, not the whole collection, so a brand
+    preference recorded for one category (e.g. LG for Electronics) doesn't
+    bleed into an unrelated search (e.g. shoes)."""
     parts = [query, _SHOPPING_CONTEXT_SUFFIX]
 
-    preferences = [str(p).strip() for p in (profile.get("preference_terms") or []) if str(p).strip()]
+    preference_buckets = profile_store._coerce_categorized(profile.get("preference_terms"))
+    preferences = list(preference_buckets.get(profile_store.GENERAL_BUCKET, []))
+    if category:
+        preferences = profile_store._dedup_case_insensitive(preferences, preference_buckets.get(category, []))
+    preferences = [str(p).strip() for p in preferences if str(p).strip()]
     if preferences:
         parts.append("preferring " + ", ".join(preferences))
 
-    ignore_terms = [str(t).strip() for t in (profile.get("ignore_terms") or []) if str(t).strip()]
+    ignore_buckets = profile_store._coerce_categorized(profile.get("ignore_terms"))
+    ignore_terms = list(ignore_buckets.get(profile_store.GENERAL_BUCKET, []))
+    if category:
+        ignore_terms = profile_store._dedup_case_insensitive(ignore_terms, ignore_buckets.get(category, []))
+    ignore_terms = [str(t).strip() for t in ignore_terms if str(t).strip()]
     exclusions = [f"-{token}" for term in ignore_terms if (token := _sanitize_exclusion_term(term))]
     if exclusions:
         parts.append(" ".join(exclusions))
@@ -884,10 +915,13 @@ async def _search_shopping(query: str, max_results: int) -> tuple[list[dict], st
         return [], "error"
 
 
-async def apply_search_products(session: SessionState, query: str) -> dict:
+async def apply_search_products(session: SessionState, query: str, category: str | None = None) -> dict:
     query = query.strip()
     if not query:
         return {"status": "error", "query": "", "products": []}
+    # Defense in depth: drop anything outside the fixed 8-value enum, in case
+    # structured-output constraints are ever bypassed (same as _filter_categories).
+    category = category if category in VOICE_CATEGORIES else None
     # This is the very first search attempt of the session and the model
     # hasn't held enough of a clarifying conversation yet — a backstop for
     # the prompt's "ask three clarifying questions first" rule, which the
@@ -913,7 +947,7 @@ async def apply_search_products(session: SessionState, query: str) -> dict:
     # The augmented query goes to the search backend; the client/UI still
     # sees the original `query` below (see the returned dict) so the
     # augmentation text never leaks into "Results for '...'" on screen.
-    augmented_query = _augment_query(query, session.existing_profile)
+    augmented_query = _augment_query(query, session.existing_profile, category)
     search_start = time.monotonic()
     products, provider = await _search_shopping(augmented_query, max_results)
     _trace(
@@ -955,8 +989,19 @@ def apply_ready_to_finalize(session: SessionState, summary: str) -> dict:
     # than Gemini's own understanding, and would re-introduce exactly the
     # kind of caption error record_preference exists to avoid, right at
     # the last moment before saving.
-    session.finalize_proposal = {**session.latest_patch, "summary": summary or _summary_from_patch(session.latest_patch)}
+    session.finalize_proposal = {
+        **_flatten_patch_for_client(session.latest_patch),
+        "summary": summary or _summary_from_patch(session.latest_patch),
+    }
     return {"status": "proposal_ready", "patch": session.finalize_proposal}
+
+
+def _bucket_keys_for_call(categories: list[str]) -> list[str]:
+    """Which preference_terms/ignore_terms buckets a record_preference call's
+    terms belong in — the categories given in that same call, or the general
+    bucket if none were given (e.g. "I like minimalist style" with no
+    category mentioned), so the term still applies regardless of category."""
+    return categories or [profile_store.GENERAL_BUCKET]
 
 
 def apply_record_preference(session: SessionState, args: dict) -> dict:
@@ -965,12 +1010,20 @@ def apply_record_preference(session: SessionState, args: dict) -> dict:
     # dedup logic as the final reviewed save.
     categories = _filter_categories(args.get("shopping_categories"), session.latest_user_text())
     session.latest_patch["shopping_categories"] = sorted({*session.latest_patch["shopping_categories"], *categories})
-    session.latest_patch["preference_terms"] = profile_store._dedup_case_insensitive(
-        session.latest_patch["preference_terms"], [str(t) for t in (args.get("preference_terms") or [])]
-    )
-    session.latest_patch["ignore_terms"] = profile_store._dedup_case_insensitive(
-        session.latest_patch["ignore_terms"], [str(t) for t in (args.get("ignore_terms") or [])]
-    )
+
+    buckets = _bucket_keys_for_call(categories)
+    new_preferences = [str(t) for t in (args.get("preference_terms") or [])]
+    new_ignores = [str(t) for t in (args.get("ignore_terms") or [])]
+    for bucket in buckets:
+        if new_preferences:
+            session.latest_patch["preference_terms"][bucket] = profile_store._dedup_case_insensitive(
+                session.latest_patch["preference_terms"].get(bucket, []), new_preferences
+            )
+        if new_ignores:
+            session.latest_patch["ignore_terms"][bucket] = profile_store._dedup_case_insensitive(
+                session.latest_patch["ignore_terms"].get(bucket, []), new_ignores
+            )
+
     normalized = profile_store.normalize_reviewed_patch(session.latest_patch)
     session.latest_patch = {
         "shopping_categories": normalized["shopping_categories"],
@@ -987,7 +1040,7 @@ async def _dispatch_tool_call(name: str, args: dict, session: SessionState) -> d
     main.py instead, so there is exactly one implementation of each tool's
     side effects regardless of transport."""
     if name == "search_products":
-        return await apply_search_products(session, str(args.get("query", "")))
+        return await apply_search_products(session, str(args.get("query", "")), args.get("category"))
 
     if name == "ready_to_finalize":
         return apply_ready_to_finalize(session, str(args.get("summary", "")).strip())
@@ -999,7 +1052,27 @@ async def _dispatch_tool_call(name: str, args: dict, session: SessionState) -> d
     return {"status": "unknown_tool"}
 
 
+def _flatten_patch_for_client(patch: dict) -> dict:
+    """Wire-format view of a patch dict for preference_patch/finalize_proposal
+    frames and the session-start profile payload — flattens the internal
+    category-keyed preference_terms/ignore_terms (see
+    profile_store._coerce_categorized) back to the plain lists the mobile
+    client's VoiceProfilePatch model expects. Other keys (shopping_categories,
+    summary) pass through unchanged."""
+    flattened = dict(patch)
+    if "preference_terms" in flattened:
+        flattened["preference_terms"] = profile_store._flatten_categorized(
+            profile_store._coerce_categorized(flattened["preference_terms"])
+        )
+    if "ignore_terms" in flattened:
+        flattened["ignore_terms"] = profile_store._flatten_categorized(
+            profile_store._coerce_categorized(flattened["ignore_terms"])
+        )
+    return flattened
+
+
 def _summary_from_patch(patch: dict) -> str:
+    patch = _flatten_patch_for_client(patch)
     parts = []
     if patch.get("shopping_categories"):
         parts.append("categories: " + ", ".join(patch["shopping_categories"]))
@@ -1013,7 +1086,7 @@ def _summary_from_patch(patch: dict) -> str:
 
 async def _send_finalize_proposal(websocket: WebSocket, session: SessionState, summary: str | None = None) -> None:
     session.finalize_proposal = {
-        **session.latest_patch,
+        **_flatten_patch_for_client(session.latest_patch),
         "summary": summary or _summary_from_patch(session.latest_patch),
     }
     await websocket.send_json({"type": "finalize_proposal", "patch": session.finalize_proposal})
@@ -1080,13 +1153,42 @@ async def _pump_client_to_gemini(websocket: WebSocket, gemini_session, session: 
                         patch = await asyncio.to_thread(
                             _extract_patch_from_transcript, session.transcript, session.existing_profile
                         )
-                        normalized = profile_store.normalize_reviewed_patch(patch)
+                        # Merge into session.latest_patch rather than replacing it
+                        # outright — this extraction call's own prompt asks it to
+                        # "merge with the existing profile," but that's a soft LLM
+                        # instruction, not a guarantee; an incomplete extraction
+                        # must not silently drop what record_preference (or an
+                        # earlier typed turn) already accumulated. The extraction
+                        # has no per-term category association of its own, so its
+                        # terms land in the general bucket (still applied to every
+                        # search) rather than a specific category's.
+                        merged_categories = sorted({
+                            *session.latest_patch["shopping_categories"],
+                            *(patch.get("shopping_categories") or []),
+                        })
+                        merged_preference_terms = dict(session.latest_patch["preference_terms"])
+                        merged_preference_terms[profile_store.GENERAL_BUCKET] = profile_store._dedup_case_insensitive(
+                            merged_preference_terms.get(profile_store.GENERAL_BUCKET, []),
+                            [str(t) for t in (patch.get("preference_terms") or [])],
+                        )
+                        merged_ignore_terms = dict(session.latest_patch["ignore_terms"])
+                        merged_ignore_terms[profile_store.GENERAL_BUCKET] = profile_store._dedup_case_insensitive(
+                            merged_ignore_terms.get(profile_store.GENERAL_BUCKET, []),
+                            [str(t) for t in (patch.get("ignore_terms") or [])],
+                        )
+                        normalized = profile_store.normalize_reviewed_patch({
+                            "shopping_categories": merged_categories,
+                            "preference_terms": merged_preference_terms,
+                            "ignore_terms": merged_ignore_terms,
+                        })
                         session.latest_patch = {
                             "shopping_categories": normalized["shopping_categories"],
                             "preference_terms": normalized["preference_terms"],
                             "ignore_terms": normalized["ignore_terms"],
                         }
-                        await websocket.send_json({"type": "preference_patch", "patch": session.latest_patch})
+                        await websocket.send_json(
+                            {"type": "preference_patch", "patch": _flatten_patch_for_client(session.latest_patch)}
+                        )
             elif frame.get("type") == "audio_format":
                 try:
                     session.input_sample_rate = int(frame.get("sample_rate", 16000))
@@ -1220,7 +1322,21 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
                         ms=round((time.monotonic() - tool_start) * 1000), status=result.get("status", "?"),
                     )
                     function_responses.append(
-                        types.FunctionResponse(id=call.id, name=call.name, response=result)
+                        types.FunctionResponse(
+                            id=call.id,
+                            name=call.name,
+                            response=result,
+                            # record_preference is NON_BLOCKING (see its
+                            # FunctionDeclaration) — SILENT scheduling adds the
+                            # result to context without resuming generation, so
+                            # a compound utterance that triggers multiple
+                            # record_preference calls in one turn can't produce
+                            # multiple spoken acknowledgements (each BLOCKING
+                            # round trip otherwise resumes the model's speech).
+                            scheduling=types.FunctionResponseScheduling.SILENT
+                            if call.name == "record_preference"
+                            else None,
+                        )
                     )
                     if call.name == "ready_to_finalize":
                         await websocket.send_json(
@@ -1228,7 +1344,7 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
                         )
                     elif call.name == "record_preference":
                         await websocket.send_json(
-                            {"type": "preference_patch", "patch": session.latest_patch}
+                            {"type": "preference_patch", "patch": _flatten_patch_for_client(session.latest_patch)}
                         )
                     elif call.name == "search_products":
                         await websocket.send_json(
@@ -1324,6 +1440,7 @@ def _classify_clause(clause: str) -> tuple[str, str]:
 
 
 def _mock_summary(patch: dict) -> str:
+    patch = _flatten_patch_for_client(patch)
     parts = []
     if patch["shopping_categories"]:
         parts.append("categories: " + ", ".join(patch["shopping_categories"]))
@@ -1339,6 +1456,7 @@ def _next_mock_prompt(patch: dict) -> str:
     """A small bit of context-awareness so the mock doesn't repeat the exact
     same line every turn — still scripted, not real conversation, but asks
     about whichever bucket is still empty rather than a static loop."""
+    patch = _flatten_patch_for_client(patch)
     if not patch["ignore_terms"]:
         return "Nice, that helps. Is there anything you usually want filtered out?"
     if not patch["shopping_categories"] and not patch["preference_terms"]:
@@ -1384,7 +1502,7 @@ async def _run_mock_session(websocket: WebSocket, session: SessionState) -> None
             has_content = any(session.latest_patch.values())
             if has_content:
                 summary = _mock_summary(session.latest_patch)
-                session.finalize_proposal = {**session.latest_patch, "summary": summary}
+                session.finalize_proposal = {**_flatten_patch_for_client(session.latest_patch), "summary": summary}
                 await websocket.send_json({"type": "transcript", "role": "model", "text": summary, "final": True})
                 await websocket.send_json({"type": "finalize_proposal", "patch": session.finalize_proposal})
             else:
@@ -1402,17 +1520,18 @@ async def _run_mock_session(websocket: WebSocket, session: SessionState) -> None
                     {*session.latest_patch["shopping_categories"], value}
                 )
             elif bucket == "ignore":
-                session.latest_patch["ignore_terms"] = sorted(
-                    {*session.latest_patch["ignore_terms"], value}
-                )
+                # No per-category context of its own (unlike record_preference,
+                # which gets an explicit shopping_categories argument) — lands
+                # in the general bucket, applied regardless of category.
+                general = session.latest_patch["ignore_terms"].get(profile_store.GENERAL_BUCKET, [])
+                session.latest_patch["ignore_terms"][profile_store.GENERAL_BUCKET] = sorted({*general, value})
             else:
-                session.latest_patch["preference_terms"] = sorted(
-                    {*session.latest_patch["preference_terms"], value}
-                )
+                general = session.latest_patch["preference_terms"].get(profile_store.GENERAL_BUCKET, [])
+                session.latest_patch["preference_terms"][profile_store.GENERAL_BUCKET] = sorted({*general, value})
 
         reply = _next_mock_prompt(session.latest_patch)
         await websocket.send_json({"type": "transcript", "role": "model", "text": reply, "final": True})
-        await websocket.send_json({"type": "preference_patch", "patch": session.latest_patch})
+        await websocket.send_json({"type": "preference_patch", "patch": _flatten_patch_for_client(session.latest_patch)})
 
 
 async def _run_pumps(websocket: WebSocket, gemini_session, session: SessionState, timeout: float) -> bool:
@@ -1490,9 +1609,20 @@ async def _auto_save_and_close(websocket: WebSocket, session: SessionState) -> N
         return
     session.auto_saved = True
     try:
-        await websocket.send_json({"type": "session_timeout"})
+        result = profile_store.merge_and_save(session.uid, session.finalize_proposal or session.latest_patch)
     except Exception:
-        logger.exception("voice session %s timeout notification failed", session.session_id)
+        # Save failed — fall back to the honest timeout/error framing rather
+        # than telling the client it's done when nothing was actually saved.
+        logger.exception("voice session %s auto-save failed", session.session_id)
+        try:
+            await websocket.send_json({"type": "session_timeout"})
+        except Exception:
+            logger.exception("voice session %s timeout notification failed", session.session_id)
+        return
+    try:
+        await websocket.send_json({"type": "auto_saved", **result})
+    except Exception:
+        logger.exception("voice session %s auto-saved notification failed", session.session_id)
 
 
 async def _watch_inactivity(websocket: WebSocket, gemini_session, session: SessionState) -> None:
@@ -1508,7 +1638,7 @@ async def _watch_inactivity(websocket: WebSocket, gemini_session, session: Sessi
     nudged = False
     while True:
         await asyncio.sleep(_INACTIVITY_POLL_SECONDS)
-        if False and session.finalize_proposal is not None:
+        if session.finalize_proposal is not None:
             logger.info("voice session %s inactive after confirmation — auto-saving", session.session_id)
             await _auto_save_and_close(websocket, session)
             return

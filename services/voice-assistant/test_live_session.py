@@ -535,8 +535,11 @@ async def test_dispatch_record_preference_merges_into_latest_patch():
     assert result["status"] == "recorded"
     assert result["patch"] == session.latest_patch
     assert session.latest_patch["shopping_categories"] == ["Clothing"]
-    assert session.latest_patch["preference_terms"] == ["Nike"]
-    assert session.latest_patch["ignore_terms"] == ["leather"]
+    # Terms land in the bucket for the category given in the same call —
+    # preserves the term<->category link so a later category-scoped search
+    # (e.g. _augment_query) can find them (see profile_store.GENERAL_BUCKET).
+    assert session.latest_patch["preference_terms"] == {"Clothing": ["Nike"]}
+    assert session.latest_patch["ignore_terms"] == {"Clothing": ["leather"]}
 
 
 @pytest.mark.asyncio
@@ -547,8 +550,11 @@ async def test_dispatch_record_preference_accumulates_and_dedupes_across_calls()
     await _dispatch_tool_call("record_preference", {"shopping_categories": ["Clothing"], "preference_terms": ["nike", "Adidas"]}, session)
 
     assert session.latest_patch["shopping_categories"] == ["Clothing"]
-    # "nike" deduped case-insensitively against the already-recorded "Nike".
-    assert session.latest_patch["preference_terms"] == ["Nike", "Adidas"]
+    # First call had no category, so "Nike" landed in the general bucket;
+    # the second call's terms land in Clothing instead — "nike" is only
+    # deduped case-insensitively against terms already in the SAME bucket, so
+    # it appears in both (matching the call-time category each was recorded under).
+    assert session.latest_patch["preference_terms"] == {"_general": ["Nike"], "Clothing": ["nike", "Adidas"]}
 
 
 @pytest.mark.asyncio
@@ -560,7 +566,7 @@ async def test_dispatch_record_preference_ignore_term_removes_matching_category(
     await _dispatch_tool_call("record_preference", {"ignore_terms": ["clothes"]}, session)
 
     assert session.latest_patch["shopping_categories"] == []
-    assert session.latest_patch["ignore_terms"] == ["clothes"]
+    assert session.latest_patch["ignore_terms"] == {"_general": ["clothes"]}
 
 
 def test_sanitize_exclusion_term_collapses_to_hyphenated_token():
@@ -797,7 +803,7 @@ def test_apply_record_preference_merges_into_latest_patch():
 
     assert result["status"] == "recorded"
     assert result["patch"] == session.latest_patch
-    assert session.latest_patch["preference_terms"] == ["Nike"]
+    assert session.latest_patch["preference_terms"] == {"Clothing": ["Nike"]}
 
 
 def test_apply_ready_to_finalize_packages_existing_latest_patch():
@@ -1257,7 +1263,7 @@ async def test_pump_gemini_to_client_input_transcription_records_without_extract
 
     assert session.transcript == [{"role": "user", "text": "I like clothes"}]
     assert extraction_calls == []
-    assert session.latest_patch == {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}
+    assert session.latest_patch == {"shopping_categories": [], "preference_terms": {}, "ignore_terms": {}}
 
 
 @pytest.mark.asyncio
@@ -1317,7 +1323,9 @@ async def test_pump_gemini_to_client_record_preference_tool_call_sends_patch():
     with pytest.raises(_FakeSessionClosed):
         await _pump_gemini_to_client(ws, gemini, session)
 
-    assert session.latest_patch["preference_terms"] == ["Nike"]
+    # No category given in this call — lands in the general bucket internally,
+    # but the client-facing frame below is still flattened to a plain list.
+    assert session.latest_patch["preference_terms"] == {"_general": ["Nike"]}
     patch_frames = [m for m in ws.sent_json if m.get("type") == "preference_patch"]
     assert len(patch_frames) == 1
     assert patch_frames[0]["patch"]["preference_terms"] == ["Nike"]
@@ -1446,7 +1454,9 @@ async def test_run_mock_session_splits_compound_message_into_separate_buckets():
     await _run_mock_session(ws, session)
 
     assert session.latest_patch["shopping_categories"] == ["Kitchen & Cookware"]
-    assert session.latest_patch["preference_terms"] == ["skincare"]
+    # The mock heuristic has no per-category context of its own — lands in
+    # the general bucket (see profile_store.GENERAL_BUCKET).
+    assert session.latest_patch["preference_terms"] == {"_general": ["skincare"]}
 
 
 @pytest.mark.asyncio
@@ -1480,8 +1490,8 @@ async def test_run_mock_session_exclusion_phrase_goes_to_ignore_terms():
 
     await _run_mock_session(ws, session)
 
-    assert session.latest_patch["ignore_terms"] == ["plastic items"]
-    assert session.latest_patch["preference_terms"] == []
+    assert session.latest_patch["ignore_terms"] == {"_general": ["plastic items"]}
+    assert session.latest_patch["preference_terms"] == {}
 
 
 @pytest.mark.asyncio
@@ -1536,7 +1546,7 @@ async def test_run_mock_session_splits_multi_sentence_message_with_filler():
     await _run_mock_session(ws, session)
 
     assert session.latest_patch["shopping_categories"] == ["Clothing", "Electronics"]
-    assert set(session.latest_patch["preference_terms"]) == {
+    assert set(session.latest_patch["preference_terms"]["_general"]) == {
         "household essentials", "affordable options", "sales", "products with strong reviews",
     }
 
@@ -1586,10 +1596,18 @@ async def test_send_timeout_nudge_sends_activity_bracketed_text():
 
 
 @pytest.mark.asyncio
-async def test_auto_save_and_close_sends_timeout_without_saving(monkeypatch):
+async def test_auto_save_and_close_saves_and_sends_auto_saved(monkeypatch):
+    """A timed-out session must not silently drop what was accumulated —
+    merge_and_save persists whatever's captured (the confirmed proposal if
+    one exists, else the live patch) and the client is told 'auto_saved'
+    (the client's done-screen frame), not 'session_timeout' (its error frame)."""
     calls = []
-    monkeypatch.setattr(profile_store, "merge_and_save", lambda uid, patch: calls.append((uid, patch)))
-    monkeypatch.setattr(profile_store, "save_reviewed_profile", lambda uid, patch: calls.append((uid, patch)))
+
+    def fake_merge_and_save(uid, patch):
+        calls.append((uid, patch))
+        return {"shopping_categories": ["Clothing"], "preference_terms": [], "ignore_terms": [], "conflicts": []}
+
+    monkeypatch.setattr(profile_store, "merge_and_save", fake_merge_and_save)
     ws = _FakeWebSocket([])
     session = SessionState(session_id="s1", uid="user-1", existing_profile={})
     session.finalize_proposal = {
@@ -1601,21 +1619,44 @@ async def test_auto_save_and_close_sends_timeout_without_saving(monkeypatch):
 
     await _auto_save_and_close(ws, session)
 
-    assert calls == []
+    assert len(calls) == 1
+    assert calls[0][0] == "user-1"
+    assert ws.sent_json == [
+        {"type": "auto_saved", "shopping_categories": ["Clothing"], "preference_terms": [], "ignore_terms": [], "conflicts": []}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_auto_save_and_close_falls_back_to_timeout_error_when_save_fails(monkeypatch):
+    def _raise(uid, patch):
+        raise RuntimeError("firestore unavailable")
+
+    monkeypatch.setattr(profile_store, "merge_and_save", _raise)
+    ws = _FakeWebSocket([])
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+
+    await _auto_save_and_close(ws, session)
+
     assert ws.sent_json == [{"type": "session_timeout"}]
 
 
 @pytest.mark.asyncio
 async def test_auto_save_and_close_timeout_is_idempotent(monkeypatch):
-    monkeypatch.setattr(profile_store, "merge_and_save", lambda uid, patch: pytest.fail("must not save"))
-    monkeypatch.setattr(profile_store, "save_reviewed_profile", lambda uid, patch: pytest.fail("must not save"))
+    calls = []
+    monkeypatch.setattr(
+        profile_store, "merge_and_save",
+        lambda uid, patch: calls.append(1) or {"shopping_categories": [], "preference_terms": [], "ignore_terms": [], "conflicts": []},
+    )
     ws = _FakeWebSocket([])
     session = SessionState(session_id="s1", uid="user-1", existing_profile={})
 
     await _auto_save_and_close(ws, session)
     await _auto_save_and_close(ws, session)
 
-    assert ws.sent_json == [{"type": "session_timeout"}]
+    assert len(calls) == 1
+    assert ws.sent_json == [
+        {"type": "auto_saved", "shopping_categories": [], "preference_terms": [], "ignore_terms": [], "conflicts": []}
+    ]
 
 
 # --- _watch_inactivity --------------------------------------------------------
@@ -1661,12 +1702,15 @@ async def test_watch_inactivity_does_not_nudge_while_activity_keeps_resetting_cl
 
 
 @pytest.mark.asyncio
-async def test_watch_inactivity_times_out_after_nudge_grace_period_without_saving(monkeypatch):
+async def test_watch_inactivity_times_out_after_nudge_grace_period_and_saves(monkeypatch):
     monkeypatch.setattr(live_session, "_INACTIVITY_NUDGE_SECONDS", 0.02)
     monkeypatch.setattr(live_session, "_INACTIVITY_CLOSE_GRACE_SECONDS", 0.02)
     monkeypatch.setattr(live_session, "_INACTIVITY_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(profile_store, "merge_and_save", lambda uid, patch: pytest.fail("must not save"))
-    monkeypatch.setattr(profile_store, "save_reviewed_profile", lambda uid, patch: pytest.fail("must not save"))
+    calls = []
+    monkeypatch.setattr(
+        profile_store, "merge_and_save",
+        lambda uid, patch: calls.append(1) or {"shopping_categories": [], "preference_terms": [], "ignore_terms": [], "conflicts": []},
+    )
     ws = _FakeWebSocket([])
     gemini = _FakeGeminiSession()
     session = SessionState(session_id="s1", uid="user-1", existing_profile={})
@@ -1675,17 +1719,21 @@ async def test_watch_inactivity_times_out_after_nudge_grace_period_without_savin
 
     assert session.auto_saved is True
     assert gemini.activity_calls == ["start", "end"]  # nudged once before giving up
-    assert ws.sent_json == [{"type": "session_timeout"}]
+    assert len(calls) == 1
+    assert ws.sent_json[-1]["type"] == "auto_saved"
 
 
 @pytest.mark.asyncio
-async def test_watch_inactivity_does_not_save_when_proposal_exists(monkeypatch):
+async def test_watch_inactivity_saves_immediately_when_proposal_already_confirmed(monkeypatch):
     """If the user already verbally confirmed (finalize_proposal set), there's
     nothing left to nudge for — auto-save right away, skipping the nudge."""
     monkeypatch.setattr(live_session, "_INACTIVITY_NUDGE_SECONDS", 10)
     monkeypatch.setattr(live_session, "_INACTIVITY_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(profile_store, "merge_and_save", lambda uid, patch: pytest.fail("must not save"))
-    monkeypatch.setattr(profile_store, "save_reviewed_profile", lambda uid, patch: pytest.fail("must not save"))
+    calls = []
+    monkeypatch.setattr(
+        profile_store, "merge_and_save",
+        lambda uid, patch: calls.append(1) or {"shopping_categories": [], "preference_terms": [], "ignore_terms": [], "conflicts": []},
+    )
     ws = _FakeWebSocket([])
     gemini = _FakeGeminiSession()
     session = SessionState(session_id="s1", uid="user-1", existing_profile={})
@@ -1693,9 +1741,9 @@ async def test_watch_inactivity_does_not_save_when_proposal_exists(monkeypatch):
         "shopping_categories": [], "preference_terms": [], "ignore_terms": [], "summary": "done",
     }
 
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(_watch_inactivity(ws, gemini, session), timeout=0.05)
+    await asyncio.wait_for(_watch_inactivity(ws, gemini, session), timeout=0.5)
 
-    assert gemini.activity_calls == []
-    assert session.auto_saved is False
-    assert ws.sent_json == []
+    assert gemini.activity_calls == []  # no nudge — closed out on the very first poll tick
+    assert session.auto_saved is True
+    assert len(calls) == 1
+    assert ws.sent_json[-1]["type"] == "auto_saved"

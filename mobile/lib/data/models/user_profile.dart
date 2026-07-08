@@ -15,6 +15,20 @@ int clampMaxSearchesPerRun(int? value) {
   return value.clamp(1, maxSearchesPerRunCeiling);
 }
 
+// preference_terms/ignore_terms are stored category-keyed in Firestore by the
+// voice-assistant backend (services/voice-assistant/profile_store.py's
+// _coerce_categorized) — a Map<String, List> there, not a flat List, so a
+// naive `List<String>.from(...)` throws "Map is not a subtype of Iterable".
+// This screen only needs a flat list of terms, not the category association,
+// so flatten across every bucket. Still handles a plain List for documents
+// that predate category-scoping.
+List<String> _termsFromFirestore(dynamic value) {
+  if (value is Map) {
+    return value.values.whereType<List>().expand((terms) => terms).map((t) => t.toString()).toList();
+  }
+  return List<String>.from(value as List? ?? const []);
+}
+
 @freezed
 class UserProfile with _$UserProfile {
   const factory UserProfile({
@@ -39,8 +53,8 @@ class UserProfile with _$UserProfile {
         gender:              data['gender']             as String? ?? '',
         country:             data['country']            as String? ?? '',
         shoppingCategories:  List<String>.from(data['shopping_categories'] ?? []),
-        preferenceTerms:     List<String>.from(data['preference_terms']    ?? []),
-        ignoreTerms:         List<String>.from(data['ignore_terms']        ?? []),
+        preferenceTerms:     _termsFromFirestore(data['preference_terms']),
+        ignoreTerms:         _termsFromFirestore(data['ignore_terms']),
         maxSearchesPerRun:   clampMaxSearchesPerRun(data['max_searches_per_run'] as int?),
         voiceOnboardingSeen: data['voice_onboarding_seen'] as bool? ?? false,
         voiceLanguage:       data['voice_language'] as String? ?? 'English',

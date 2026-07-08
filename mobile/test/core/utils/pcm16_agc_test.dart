@@ -104,8 +104,10 @@ void main() {
     expect(_readPcm16(output), _readPcm16(loudFirstChunk));
   });
 
-  test("carries the previous turn's calibrated gain forward instead of resetting to unity", () {
-    final agc = Pcm16Agc(sampleRateHz: 1000, calibrationBudgetMs: 50);
+  test("plays mid-calibration chunks of a new turn at the carried-forward gain, not unity", () {
+    // Budget (200 samples) deliberately larger than each 100-sample chunk so
+    // calibration spans multiple calls instead of committing within one.
+    final agc = Pcm16Agc(sampleRateHz: 1000, calibrationBudgetMs: 200);
     final quiet = List<int>.generate(100, (i) => i.isEven ? 2000 : -2000); // well under target
 
     // Drive turn 1 to a settled, boosted gain over several chunks.
@@ -117,12 +119,28 @@ void main() {
 
     agc.resetForTurn();
 
-    // The very first chunk of turn 2 should already reflect something close
-    // to turn 1's ending gain rather than unity — even though turn 2's own
-    // calibration window hasn't committed yet (the same input chunk alone
-    // exceeds the budget and triggers an immediate commit here, but starting
-    // from the carried-forward gain, not from 1.0).
+    // Turn 2's first chunk alone (100 samples) is still under this turn's
+    // 200-sample calibration budget, so it hasn't committed yet — it should
+    // already reflect turn 1's ending gain rather than resetting to unity.
     final turn2Output = _readPcm16(agc.process(_pcm16(quiet)));
     expect(_peak(turn2Output), greaterThan((_peak(quiet) * 1.5).round()));
+  });
+
+  test('commits the calibrated gain in one large jump rather than a slow attack/release step', () {
+    final agc = Pcm16Agc(sampleRateHz: 1000, calibrationBudgetMs: 100);
+    // Amplitude chosen so the resulting ideal gain (~3x) falls inside
+    // [minGain, maxGain] rather than being clamped against it — isolates the
+    // convergence-speed behavior from the gain-range clamp.
+    final moderate = List<int>.generate(100, (i) => i.isEven ? 6000 : -6000);
+
+    // A single 100-sample chunk meets the 100-sample calibration budget in
+    // this one call, so it also commits within this call.
+    final output = _readPcm16(agc.process(_pcm16(moderate)));
+
+    // A release-sized (0.06) nudge from the default gain of 1.0 toward an
+    // ideal of ~3x would only reach ~1.12x (a peak around 6720) — the fast
+    // calibration commit should land much closer to the full ~3x ideal gain
+    // instead of creeping toward it like ongoing mid-turn adjustments do.
+    expect(_peak(output), greaterThan(6000 * 2));
   });
 }

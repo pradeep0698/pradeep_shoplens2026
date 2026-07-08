@@ -48,6 +48,25 @@ def verify_id_token(authorization_header: str | None) -> str:
     return uid
 
 
+# Bucket key for preference/ignore terms recorded without a specific shopping
+# category (e.g. "I like minimalist style") — applied regardless of which
+# category a later search falls under, alongside that category's own bucket.
+GENERAL_BUCKET = "_general"
+
+
+def _coerce_categorized(value) -> dict[str, list[str]]:
+    """Normalizes a Firestore preference_terms/ignore_terms value into the
+    category-keyed shape. Old documents (pre category-scoping) stored a flat
+    list — those become the general bucket on read so existing users' data
+    isn't lost or misinterpreted; every write from here on persists the dict
+    shape, so this is a lazy, on-read migration rather than a batch script."""
+    if isinstance(value, dict):
+        return {str(k): [str(t) for t in (v or [])] for k, v in value.items()}
+    if isinstance(value, list) and value:
+        return {GENERAL_BUCKET: [str(t) for t in value]}
+    return {}
+
+
 def get_profile(uid: str) -> dict:
     """Read UserProfiles/{uid}, returning an empty-shaped dict if it doesn't exist yet."""
     db = _get_db()
@@ -55,8 +74,8 @@ def get_profile(uid: str) -> dict:
     data = snapshot.to_dict() if snapshot.exists else {}
     return {
         "shopping_categories": list(data.get("shopping_categories", [])),
-        "preference_terms": list(data.get("preference_terms", [])),
-        "ignore_terms": list(data.get("ignore_terms", [])),
+        "preference_terms": _coerce_categorized(data.get("preference_terms", [])),
+        "ignore_terms": _coerce_categorized(data.get("ignore_terms", [])),
     }
 
 
@@ -77,12 +96,62 @@ def _dedup_case_insensitive(existing: list[str], incoming: list[str]) -> list[st
     return merged
 
 
-def _find_conflicts(preference_terms: list[str], ignore_terms: list[str]) -> list[str]:
-    """Terms that ended up in both lists after merging — must be surfaced to the
-    user to resolve, never silently dropped from either side."""
-    pref_lower = {t.lower() for t in preference_terms}
-    ignore_lower = {t.lower() for t in ignore_terms}
-    return sorted(pref_lower & ignore_lower)
+def merge_categorized(
+    existing: dict[str, list[str]], incoming: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    """Per-bucket case-insensitive union — same semantics as
+    _dedup_case_insensitive, applied independently to each category (plus
+    GENERAL_BUCKET) so a term recorded under one category never spills into
+    another's bucket."""
+    merged: dict[str, list[str]] = {}
+    for category in {*existing.keys(), *incoming.keys()}:
+        bucket = _dedup_case_insensitive(existing.get(category, []), incoming.get(category, []))
+        if bucket:
+            merged[category] = bucket
+    return merged
+
+
+def _flatten_categorized(value: dict[str, list[str]]) -> list[str]:
+    """Deduped flat list across all buckets — used at API/WS boundaries so the
+    wire format stays the flat list the mobile client already expects."""
+    flat: list[str] = []
+    for bucket in value.values():
+        flat = _dedup_case_insensitive(flat, bucket)
+    return flat
+
+
+def reconcile_confirmed_terms(confirmed: list[str], categorized: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Reconciles a flat, possibly user-trimmed list of surviving terms (from
+    the mobile review screen's delete-only chips, which have no concept of
+    category buckets) against the session's category-keyed map: a surviving
+    term keeps whatever bucket it was already in. Anything in `confirmed` but
+    not found in `categorized` (e.g. the in-memory session/grace period
+    already expired by the time /finalize is called) falls into
+    GENERAL_BUCKET rather than being dropped."""
+    confirmed_lower = {t.lower(): t for t in confirmed}
+    result: dict[str, list[str]] = {}
+    matched_lower: set[str] = set()
+    for category, terms in categorized.items():
+        kept = [t for t in terms if t.lower() in confirmed_lower]
+        if kept:
+            result[category] = kept
+            matched_lower.update(t.lower() for t in kept)
+    leftover = [confirmed_lower[lower] for lower in confirmed_lower if lower not in matched_lower]
+    if leftover:
+        result[GENERAL_BUCKET] = _dedup_case_insensitive(result.get(GENERAL_BUCKET, []), leftover)
+    return result
+
+
+def _find_conflicts(preference_terms: dict[str, list[str]], ignore_terms: dict[str, list[str]]) -> list[str]:
+    """Terms that ended up in both preference and ignore buckets for the same
+    category (or both general) after merging — must be surfaced to the user to
+    resolve, never silently dropped from either side."""
+    conflicts: set[str] = set()
+    for category in {*preference_terms.keys(), *ignore_terms.keys()}:
+        pref_lower = {t.lower() for t in preference_terms.get(category, [])}
+        ignore_lower = {t.lower() for t in ignore_terms.get(category, [])}
+        conflicts |= pref_lower & ignore_lower
+    return sorted(conflicts)
 
 
 VOICE_CATEGORIES = [
@@ -108,8 +177,15 @@ _CATEGORY_IGNORE_ALIASES: dict[str, set[str]] = {
 }
 
 
-def _normalize_terms(values: list[str] | None) -> list[str]:
-    return _dedup_case_insensitive([], [str(v) for v in (values or [])])
+def _normalize_categorized_terms(values) -> dict[str, list[str]]:
+    """Dedups each bucket of a category-keyed preference/ignore-terms value,
+    coercing an old flat list into GENERAL_BUCKET first if needed."""
+    categorized = _coerce_categorized(values)
+    return {
+        category: deduped
+        for category, terms in categorized.items()
+        if (deduped := _dedup_case_insensitive([], terms))
+    }
 
 
 def _normalize_categories(values: list[str] | None) -> list[str]:
@@ -117,8 +193,8 @@ def _normalize_categories(values: list[str] | None) -> list[str]:
     return [category for category in _dedup_case_insensitive([], [str(v) for v in (values or [])]) if category in allowed]
 
 
-def _ignored_category_names(ignore_terms: list[str]) -> set[str]:
-    ignored = {term.strip().lower() for term in ignore_terms if term.strip()}
+def _ignored_category_names(ignore_terms: dict[str, list[str]]) -> set[str]:
+    ignored = {term.strip().lower() for terms in ignore_terms.values() for term in terms if term.strip()}
     blocked: set[str] = set()
     for category, aliases in _CATEGORY_IGNORE_ALIASES.items():
         if ignored & aliases:
@@ -129,16 +205,21 @@ def _ignored_category_names(ignore_terms: list[str]) -> set[str]:
 def normalize_reviewed_patch(patch: dict) -> dict:
     """Normalize the exact profile shape approved on the review screen.
 
-    Unlike merge_and_save, this is not an append-only patch. The reviewed chips
-    are authoritative for the three voice-managed fields.
+    Unlike merge_and_save, this is not an append-only patch. The reviewed
+    chips are authoritative for the three voice-managed fields.
+    preference_terms/ignore_terms are expected already in the category-keyed
+    shape (see _coerce_categorized) — callers reconciling a flat,
+    client-submitted list (e.g. main.py's finalize handler) must do so before
+    calling this.
     """
-    ignore_terms = _normalize_terms(patch.get("ignore_terms"))
-    ignore_lower = {term.lower() for term in ignore_terms}
+    ignore_terms = _normalize_categorized_terms(patch.get("ignore_terms"))
+    ignore_lower = {term.lower() for terms in ignore_terms.values() for term in terms}
 
-    preference_terms = [
-        term for term in _normalize_terms(patch.get("preference_terms"))
-        if term.lower() not in ignore_lower
-    ]
+    preference_terms = {
+        category: filtered
+        for category, terms in _normalize_categorized_terms(patch.get("preference_terms")).items()
+        if (filtered := [term for term in terms if term.lower() not in ignore_lower])
+    }
 
     blocked_categories = _ignored_category_names(ignore_terms)
     shopping_categories = [
@@ -155,7 +236,12 @@ def normalize_reviewed_patch(patch: dict) -> dict:
 
 
 def save_reviewed_profile(uid: str, patch: dict) -> dict:
-    """Save the reviewed voice profile exactly, preserving unrelated fields."""
+    """Save the reviewed voice profile exactly, preserving unrelated fields.
+
+    Firestore stores preference_terms/ignore_terms in the category-keyed
+    shape; the returned dict flattens them back to plain lists so the
+    external API response contract (what the mobile client parses) is
+    unchanged."""
     db = _get_db()
     ref = db.collection("UserProfiles").document(uid)
     normalized = normalize_reviewed_patch(patch)
@@ -169,16 +255,29 @@ def save_reviewed_profile(uid: str, patch: dict) -> dict:
         merge=True,
     )
 
-    return normalized
+    return {
+        "shopping_categories": normalized["shopping_categories"],
+        "preference_terms": _flatten_categorized(normalized["preference_terms"]),
+        "ignore_terms": _flatten_categorized(normalized["ignore_terms"]),
+        "conflicts": normalized["conflicts"],
+    }
 
 
 def merge_and_save(uid: str, patch: dict) -> dict:
     """Merge a confirmed voice-derived patch into UserProfiles/{uid}.
 
     - shopping_categories: set union with existing.
-    - preference_terms / ignore_terms: case-insensitive de-duped union.
-    - Conflicts (a term present in both lists after merge) are returned, not
-      auto-resolved — the caller must surface them to the user.
+    - preference_terms / ignore_terms: case-insensitive de-duped union, per
+      category bucket (see merge_categorized) — a flat list in either
+      `patch` or the existing Firestore doc is coerced into GENERAL_BUCKET
+      first (see _coerce_categorized).
+    - Conflicts (a term present in both buckets for the same category after
+      merge) are returned, not auto-resolved — the caller must surface them
+      to the user.
+
+    Returns preference_terms/ignore_terms flattened to plain lists, matching
+    save_reviewed_profile's external contract — Firestore itself still stores
+    the category-keyed shape.
     """
     db = _get_db()
     ref = db.collection("UserProfiles").document(uid)
@@ -189,11 +288,13 @@ def merge_and_save(uid: str, patch: dict) -> dict:
     incoming_categories = set(patch.get("shopping_categories", []))
     merged_categories = sorted(existing_categories | incoming_categories)
 
-    merged_preference_terms = _dedup_case_insensitive(
-        existing.get("preference_terms", []), patch.get("preference_terms", [])
+    merged_preference_terms = merge_categorized(
+        _coerce_categorized(existing.get("preference_terms", [])),
+        _coerce_categorized(patch.get("preference_terms", {})),
     )
-    merged_ignore_terms = _dedup_case_insensitive(
-        existing.get("ignore_terms", []), patch.get("ignore_terms", [])
+    merged_ignore_terms = merge_categorized(
+        _coerce_categorized(existing.get("ignore_terms", [])),
+        _coerce_categorized(patch.get("ignore_terms", {})),
     )
 
     conflicts = _find_conflicts(merged_preference_terms, merged_ignore_terms)
@@ -209,7 +310,7 @@ def merge_and_save(uid: str, patch: dict) -> dict:
 
     return {
         "shopping_categories": merged_categories,
-        "preference_terms": merged_preference_terms,
-        "ignore_terms": merged_ignore_terms,
+        "preference_terms": _flatten_categorized(merged_preference_terms),
+        "ignore_terms": _flatten_categorized(merged_ignore_terms),
         "conflicts": conflicts,
     }

@@ -75,9 +75,13 @@ class VoiceApi {
     }
   }
 
-  Future<Map<String, dynamic>> searchProducts(String sessionId, String query) async {
+  Future<Map<String, dynamic>> searchProducts(String sessionId, String query, {String? category}) async {
     try {
-      final response = await _dio.post('/voice/tool/search_products', data: {'session_id': sessionId, 'query': query});
+      final response = await _dio.post('/voice/tool/search_products', data: {
+        'session_id': sessionId,
+        'query': query,
+        if (category != null) 'category': category,
+      });
       return response.data as Map<String, dynamic>;
     } on DioException catch (e) {
       throw AnalyzerException.fromDioException(e);

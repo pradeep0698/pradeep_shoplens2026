@@ -26,6 +26,7 @@ from live_session import (
     _MIN_ASSISTANT_TURNS_BEFORE_FIRST_SEARCH,
     _SESSION_MAX_SECONDS,
     SessionState,
+    _flatten_patch_for_client,
     _trace,
     apply_ready_to_finalize,
     apply_record_preference,
@@ -203,6 +204,7 @@ class SessionEventRequest(BaseModel):
 
 
 class PreferencePatch(BaseModel):
+    shopping_categories: list[str] | None = Field(None, description="Shopping categories the user is interested in")
     preference_terms: list[str] | None = Field(None, description="Product attributes the user prefers")
     ignore_terms: list[str] | None = Field(None, description="Product names/terms to exclude from results")
     allergies: list[str] | None = Field(None, description="Food allergies")
@@ -245,6 +247,9 @@ class RecordPreferenceRequest(BaseModel):
 class SearchProductsRequest(BaseModel):
     session_id: str = Field(..., description="Session ID from /voice/session/start")
     query: str = Field(..., description="Freetext shopping search query")
+    category: str | None = Field(
+        None, description="Best-guess shopping category for this search, used to scope which saved brand/style preferences apply"
+    )
 
 
 class ReadyToFinalizeRequest(BaseModel):
@@ -305,7 +310,10 @@ async def start_session(http_request: Request, body: SessionStartRequest = Sessi
         # session.existing_profile (not the local `existing_profile` var above)
         # since that local is only assigned on the fresh-session branch — a
         # resumed session must report its own already-set profile instead.
-        profile=session.existing_profile,
+        # preference_terms/ignore_terms are category-keyed internally (see
+        # profile_store._coerce_categorized) — flattened back to plain lists
+        # here since that's the shape the mobile client's profile model expects.
+        profile=_flatten_patch_for_client(session.existing_profile),
         direct_connect_allowed=os.environ.get("VOICE_DIRECT_CONNECT_ENABLED", "false").lower() == "true",
     )
     return JSONResponse(content=response.model_dump(), headers={"X-Request-Id": req_id})
@@ -388,8 +396,26 @@ async def finalize_session(request: SessionFinalizeRequest, http_request: Reques
     start = time.monotonic()
 
     uid = _require_uid(http_request)
+    confirmed = request.confirmed_patch.model_dump(exclude_none=True)
+    # Mobile's review chips are flat and delete-only (no category concept) —
+    # reconcile the surviving flat lists against the session's category-keyed
+    # map (if the session is still resolvable within its disconnect grace
+    # period) so a term keeps whatever category it was recorded under instead
+    # of collapsing into the general bucket. Falls back gracefully (treats
+    # the confirmed lists as general) if the session already expired.
+    session = await session_registry.get(request.session_id)
+    if session is not None and session.uid == uid:
+        confirmed = {
+            **confirmed,
+            "preference_terms": profile_store.reconcile_confirmed_terms(
+                confirmed.get("preference_terms", []), session.latest_patch["preference_terms"]
+            ),
+            "ignore_terms": profile_store.reconcile_confirmed_terms(
+                confirmed.get("ignore_terms", []), session.latest_patch["ignore_terms"]
+            ),
+        }
     try:
-        result = profile_store.save_reviewed_profile(uid, request.confirmed_patch.model_dump(exclude_none=True))
+        result = profile_store.save_reviewed_profile(uid, confirmed)
     except Exception as exc:
         elapsed = time.monotonic() - start
         logger.exception(
@@ -471,7 +497,10 @@ async def tool_record_preference(request: RecordPreferenceRequest, http_request:
     session = await _get_owned_session(request.session_id, uid)
     result = apply_record_preference(session, request.model_dump(exclude={"session_id"}))
     _trace(request.session_id, "tool_call", tool="record_preference", ms=round((time.monotonic() - start) * 1000), status=result.get("status", "?"))
-    return JSONResponse(content=result)
+    # result["patch"] is session.latest_patch — category-keyed internally
+    # (see profile_store._coerce_categorized) — flatten back to plain lists,
+    # the shape the mobile client's VoiceProfilePatch model expects.
+    return JSONResponse(content={**result, "patch": _flatten_patch_for_client(result["patch"])})
 
 
 @app.post(
@@ -502,7 +531,7 @@ async def tool_search_products(request: SearchProductsRequest, http_request: Req
         session.assistant_turns_in_search_mode,
         _MIN_ASSISTANT_TURNS_BEFORE_FIRST_SEARCH,
     )
-    result = await apply_search_products(session, request.query)
+    result = await apply_search_products(session, request.query, request.category)
     _trace(request.session_id, "tool_call", tool="search_products", ms=round((time.monotonic() - start) * 1000), status=result.get("status", "?"))
     return JSONResponse(content=result)
 

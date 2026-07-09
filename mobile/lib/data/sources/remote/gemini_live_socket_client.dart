@@ -20,6 +20,35 @@ const _kNudgeText =
     'still there — if you already have enough to summarize, do that now and ask '
     'them to confirm.)';
 
+/// Categories explicitly present in a record_preference call's args, if any.
+List<String> categoriesFromRecordPreferenceArgs(Map<String, dynamic> args) =>
+    (args['shopping_categories'] as List?)?.whereType<String>().toList() ?? const [];
+
+/// Fills in shopping_categories from [lastCategories] when this call's args
+/// omit it but still report a preference or exclusion term — the model
+/// reliably states a category once, then reports terms for it in later
+/// calls without repeating shopping_categories (see the
+/// kSystemPromptTemplate clause requiring this, which the model doesn't
+/// always follow). Mirrors live_session.py's SessionState.last_categories/
+/// _bucket_keys_for_call fallback, applied client-side here so the
+/// direct-connect transport doesn't depend on that backend fix being
+/// deployed. The backend still re-validates whatever category name is
+/// threaded through against the fixed 8-value enum and the current turn's
+/// transcript (see _filter_categories) — a stale category can still get
+/// dropped there if the current turn's wording gives no evidence for it.
+Map<String, dynamic> recordPreferenceArgsWithCategoryFallback(
+  Map<String, dynamic> args, {
+  required List<String> lastCategories,
+}) {
+  if (categoriesFromRecordPreferenceArgs(args).isNotEmpty) return args;
+  final hasTerms = ((args['preference_terms'] as List?)?.isNotEmpty ?? false) ||
+      ((args['ignore_terms'] as List?)?.isNotEmpty ?? false);
+  if (hasTerms && lastCategories.isNotEmpty) {
+    return {...args, 'shopping_categories': lastCategories};
+  }
+  return args;
+}
+
 /// Direct client -> Gemini Live WebSocket transport (native platforms only —
 /// dart:io's WebSocket.connect supports the custom auth headers ephemeral
 /// tokens require; browsers cannot set custom headers on a WS handshake, so
@@ -93,6 +122,15 @@ class GeminiLiveSocketClient implements VoiceTransport {
     'preference_terms': <String>[],
     'ignore_terms': <String>[],
   };
+
+  // Categories from the most recent record_preference call that actually
+  // named one — mirrors live_session.py's SessionState.last_categories, kept
+  // client-side too so this transport doesn't depend on that backend fix
+  // being deployed: the model reliably states a category once, then reports
+  // preferences/exclusions for it in later calls without repeating
+  // shopping_categories, so we fill it back in here before the call ever
+  // reaches the backend (see _handleToolCall's 'record_preference' case).
+  List<String> _lastCategories = const [];
 
   @override
   Stream<VoiceSocketFrame> get frames => _frames.stream;
@@ -372,7 +410,10 @@ class GeminiLiveSocketClient implements VoiceTransport {
             'provider': result['provider'] ?? 'unknown',
           }));
         case 'record_preference':
-          result = await _voiceApi.recordPreference(sessionId, args);
+          final effectiveArgs = recordPreferenceArgsWithCategoryFallback(args, lastCategories: _lastCategories);
+          final calledCategories = categoriesFromRecordPreferenceArgs(args);
+          if (calledCategories.isNotEmpty) _lastCategories = calledCategories;
+          result = await _voiceApi.recordPreference(sessionId, effectiveArgs);
           if (result['patch'] is Map<String, dynamic>) {
             _latestPatch = result['patch'] as Map<String, dynamic>;
           }

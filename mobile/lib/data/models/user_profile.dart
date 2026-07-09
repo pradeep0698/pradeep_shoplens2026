@@ -17,16 +17,62 @@ int clampMaxSearchesPerRun(int? value) {
 
 // preference_terms/ignore_terms are stored category-keyed in Firestore by the
 // voice-assistant backend (services/voice-assistant/profile_store.py's
-// _coerce_categorized) — a Map<String, List> there, not a flat List, so a
-// naive `List<String>.from(...)` throws "Map is not a subtype of Iterable".
-// This screen only needs a flat list of terms, not the category association,
-// so flatten across every bucket. Still handles a plain List for documents
-// that predate category-scoping.
-List<String> _termsFromFirestore(dynamic value) {
-  if (value is Map) {
-    return value.values.whereType<List>().expand((terms) => terms).map((t) => t.toString()).toList();
+// _coerce_categorized) — a Map<String, List> there, not a flat List. Terms
+// recorded without a specific category (e.g. by voice, pre category-scoping
+// documents) land in this bucket, matching profile_store.py's GENERAL_BUCKET.
+const String generalPreferenceBucket = '_general';
+
+// Case-insensitive de-duplicated union, preserving the casing of whichever
+// occurrence is seen first — mirrors profile_store.py's _dedup_case_insensitive
+// so client-side normalization matches what the backend does on merge.
+List<String> dedupeTermsCaseInsensitive(Iterable<String> terms) {
+  final seen = <String>{};
+  final result = <String>[];
+  for (final raw in terms) {
+    final value = raw.trim();
+    if (value.isEmpty) continue;
+    final lower = value.toLowerCase();
+    if (seen.add(lower)) result.add(value);
   }
-  return List<String>.from(value as List? ?? const []);
+  return result;
+}
+
+// Parses a Firestore preference_terms/ignore_terms value into its
+// category-keyed shape. Handles a plain List for documents that predate
+// category-scoping by bucketing it under generalPreferenceBucket.
+Map<String, List<String>> _categorizedTermsFromFirestore(dynamic value) {
+  if (value is Map) {
+    return value.map((k, v) => MapEntry(
+          k.toString(),
+          List<String>.from((v as List?) ?? const []),
+        ));
+  }
+  if (value is List && value.isNotEmpty) {
+    return {generalPreferenceBucket: value.map((t) => t.toString()).toList()};
+  }
+  return {};
+}
+
+Map<String, CategoryTerms> _mergePreferencesByCategory(
+  Map<String, List<String>> include,
+  Map<String, List<String>> exclude,
+) {
+  final categories = {...include.keys, ...exclude.keys};
+  return {
+    for (final category in categories)
+      category: CategoryTerms(
+        include: include[category] ?? const [],
+        exclude: exclude[category] ?? const [],
+      ),
+  };
+}
+
+@freezed
+class CategoryTerms with _$CategoryTerms {
+  const factory CategoryTerms({
+    @Default([]) List<String> include,
+    @Default([]) List<String> exclude,
+  }) = _CategoryTerms;
 }
 
 @freezed
@@ -38,12 +84,23 @@ class UserProfile with _$UserProfile {
     @Default('') String gender,
     @Default('') String country,
     @Default([]) List<String> shoppingCategories,
-    @Default([]) List<String> preferenceTerms,
-    @Default([]) List<String> ignoreTerms,
+    @Default({}) Map<String, CategoryTerms> preferencesByCategory,
     @Default(defaultMaxSearchesPerRun) int maxSearchesPerRun,
     @Default(false) bool voiceOnboardingSeen,
     @Default('English') String voiceLanguage,
   }) = _UserProfile;
+
+  const UserProfile._();
+
+  // Flattened across every category bucket — the shape the analyze/match
+  // pipeline and voice-assistant wire contract expect (see
+  // profile_store.py's _flatten_categorized). Category association only
+  // matters to the profile settings screen, which reads preferencesByCategory
+  // directly instead.
+  List<String> get preferenceTerms => dedupeTermsCaseInsensitive(
+      preferencesByCategory.values.expand((c) => c.include));
+  List<String> get ignoreTerms => dedupeTermsCaseInsensitive(
+      preferencesByCategory.values.expand((c) => c.exclude));
 
   // Field names must match existing Firestore UserProfiles documents exactly
   factory UserProfile.fromFirestore(Map<String, dynamic> data) => UserProfile(
@@ -53,24 +110,38 @@ class UserProfile with _$UserProfile {
         gender:              data['gender']             as String? ?? '',
         country:             data['country']            as String? ?? '',
         shoppingCategories:  List<String>.from(data['shopping_categories'] ?? []),
-        preferenceTerms:     _termsFromFirestore(data['preference_terms']),
-        ignoreTerms:         _termsFromFirestore(data['ignore_terms']),
+        preferencesByCategory: _mergePreferencesByCategory(
+          _categorizedTermsFromFirestore(data['preference_terms']),
+          _categorizedTermsFromFirestore(data['ignore_terms']),
+        ),
         maxSearchesPerRun:   clampMaxSearchesPerRun(data['max_searches_per_run'] as int?),
         voiceOnboardingSeen: data['voice_onboarding_seen'] as bool? ?? false,
         voiceLanguage:       data['voice_language'] as String? ?? 'English',
       );
 
-  static Map<String, dynamic> toFirestore(UserProfile p) => {
-        'username':              p.username,
-        'dob':                   p.dob,
-        'profile_photo_url':     p.profilePhotoUrl,
-        'gender':                p.gender,
-        'country':               p.country,
-        'shopping_categories':   p.shoppingCategories,
-        'preference_terms':      p.preferenceTerms,
-        'ignore_terms':          p.ignoreTerms,
-        'max_searches_per_run':  p.maxSearchesPerRun,
-        'voice_onboarding_seen': p.voiceOnboardingSeen,
-        'voice_language':        p.voiceLanguage,
-      };
+  // Writes preference_terms/ignore_terms back out as the same category-keyed
+  // maps the backend expects (empty buckets dropped, matching
+  // profile_store.py's merge_categorized) instead of clobbering them with a
+  // flat list.
+  static Map<String, dynamic> toFirestore(UserProfile p) {
+    final preferenceTerms = <String, List<String>>{};
+    final ignoreTerms = <String, List<String>>{};
+    p.preferencesByCategory.forEach((category, terms) {
+      if (terms.include.isNotEmpty) preferenceTerms[category] = terms.include;
+      if (terms.exclude.isNotEmpty) ignoreTerms[category] = terms.exclude;
+    });
+    return {
+      'username':              p.username,
+      'dob':                   p.dob,
+      'profile_photo_url':     p.profilePhotoUrl,
+      'gender':                p.gender,
+      'country':               p.country,
+      'shopping_categories':   p.shoppingCategories,
+      'preference_terms':      preferenceTerms,
+      'ignore_terms':          ignoreTerms,
+      'max_searches_per_run':  p.maxSearchesPerRun,
+      'voice_onboarding_seen': p.voiceOnboardingSeen,
+      'voice_language':        p.voiceLanguage,
+    };
+  }
 }

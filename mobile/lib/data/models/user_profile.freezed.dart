@@ -15,6 +15,172 @@ final _privateConstructorUsedError = UnsupportedError(
     'It seems like you constructed your class using `MyClass._()`. This constructor is only meant to be used by freezed and you are not supposed to need it nor use it.\nPlease check the documentation here for more information: https://github.com/rrousselGit/freezed#adding-getters-and-methods-to-our-models');
 
 /// @nodoc
+mixin _$CategoryTerms {
+  List<String> get include => throw _privateConstructorUsedError;
+  List<String> get exclude => throw _privateConstructorUsedError;
+
+  /// Create a copy of CategoryTerms
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $CategoryTermsCopyWith<CategoryTerms> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $CategoryTermsCopyWith<$Res> {
+  factory $CategoryTermsCopyWith(
+          CategoryTerms value, $Res Function(CategoryTerms) then) =
+      _$CategoryTermsCopyWithImpl<$Res, CategoryTerms>;
+  @useResult
+  $Res call({List<String> include, List<String> exclude});
+}
+
+/// @nodoc
+class _$CategoryTermsCopyWithImpl<$Res, $Val extends CategoryTerms>
+    implements $CategoryTermsCopyWith<$Res> {
+  _$CategoryTermsCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of CategoryTerms
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? include = null,
+    Object? exclude = null,
+  }) {
+    return _then(_value.copyWith(
+      include: null == include
+          ? _value.include
+          : include // ignore: cast_nullable_to_non_nullable
+              as List<String>,
+      exclude: null == exclude
+          ? _value.exclude
+          : exclude // ignore: cast_nullable_to_non_nullable
+              as List<String>,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$CategoryTermsImplCopyWith<$Res>
+    implements $CategoryTermsCopyWith<$Res> {
+  factory _$$CategoryTermsImplCopyWith(
+          _$CategoryTermsImpl value, $Res Function(_$CategoryTermsImpl) then) =
+      __$$CategoryTermsImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call({List<String> include, List<String> exclude});
+}
+
+/// @nodoc
+class __$$CategoryTermsImplCopyWithImpl<$Res>
+    extends _$CategoryTermsCopyWithImpl<$Res, _$CategoryTermsImpl>
+    implements _$$CategoryTermsImplCopyWith<$Res> {
+  __$$CategoryTermsImplCopyWithImpl(
+      _$CategoryTermsImpl _value, $Res Function(_$CategoryTermsImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of CategoryTerms
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? include = null,
+    Object? exclude = null,
+  }) {
+    return _then(_$CategoryTermsImpl(
+      include: null == include
+          ? _value._include
+          : include // ignore: cast_nullable_to_non_nullable
+              as List<String>,
+      exclude: null == exclude
+          ? _value._exclude
+          : exclude // ignore: cast_nullable_to_non_nullable
+              as List<String>,
+    ));
+  }
+}
+
+/// @nodoc
+
+class _$CategoryTermsImpl implements _CategoryTerms {
+  const _$CategoryTermsImpl(
+      {final List<String> include = const [],
+      final List<String> exclude = const []})
+      : _include = include,
+        _exclude = exclude;
+
+  final List<String> _include;
+  @override
+  @JsonKey()
+  List<String> get include {
+    if (_include is EqualUnmodifiableListView) return _include;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_include);
+  }
+
+  final List<String> _exclude;
+  @override
+  @JsonKey()
+  List<String> get exclude {
+    if (_exclude is EqualUnmodifiableListView) return _exclude;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_exclude);
+  }
+
+  @override
+  String toString() {
+    return 'CategoryTerms(include: $include, exclude: $exclude)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$CategoryTermsImpl &&
+            const DeepCollectionEquality().equals(other._include, _include) &&
+            const DeepCollectionEquality().equals(other._exclude, _exclude));
+  }
+
+  @override
+  int get hashCode => Object.hash(
+      runtimeType,
+      const DeepCollectionEquality().hash(_include),
+      const DeepCollectionEquality().hash(_exclude));
+
+  /// Create a copy of CategoryTerms
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$CategoryTermsImplCopyWith<_$CategoryTermsImpl> get copyWith =>
+      __$$CategoryTermsImplCopyWithImpl<_$CategoryTermsImpl>(this, _$identity);
+}
+
+abstract class _CategoryTerms implements CategoryTerms {
+  const factory _CategoryTerms(
+      {final List<String> include,
+      final List<String> exclude}) = _$CategoryTermsImpl;
+
+  @override
+  List<String> get include;
+  @override
+  List<String> get exclude;
+
+  /// Create a copy of CategoryTerms
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$CategoryTermsImplCopyWith<_$CategoryTermsImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
 mixin _$UserProfile {
   String get username => throw _privateConstructorUsedError;
   String get dob => throw _privateConstructorUsedError;
@@ -22,8 +188,8 @@ mixin _$UserProfile {
   String get gender => throw _privateConstructorUsedError;
   String get country => throw _privateConstructorUsedError;
   List<String> get shoppingCategories => throw _privateConstructorUsedError;
-  List<String> get preferenceTerms => throw _privateConstructorUsedError;
-  List<String> get ignoreTerms => throw _privateConstructorUsedError;
+  Map<String, CategoryTerms> get preferencesByCategory =>
+      throw _privateConstructorUsedError;
   int get maxSearchesPerRun => throw _privateConstructorUsedError;
   bool get voiceOnboardingSeen => throw _privateConstructorUsedError;
   String get voiceLanguage => throw _privateConstructorUsedError;
@@ -48,8 +214,7 @@ abstract class $UserProfileCopyWith<$Res> {
       String gender,
       String country,
       List<String> shoppingCategories,
-      List<String> preferenceTerms,
-      List<String> ignoreTerms,
+      Map<String, CategoryTerms> preferencesByCategory,
       int maxSearchesPerRun,
       bool voiceOnboardingSeen,
       String voiceLanguage});
@@ -76,8 +241,7 @@ class _$UserProfileCopyWithImpl<$Res, $Val extends UserProfile>
     Object? gender = null,
     Object? country = null,
     Object? shoppingCategories = null,
-    Object? preferenceTerms = null,
-    Object? ignoreTerms = null,
+    Object? preferencesByCategory = null,
     Object? maxSearchesPerRun = null,
     Object? voiceOnboardingSeen = null,
     Object? voiceLanguage = null,
@@ -107,14 +271,10 @@ class _$UserProfileCopyWithImpl<$Res, $Val extends UserProfile>
           ? _value.shoppingCategories
           : shoppingCategories // ignore: cast_nullable_to_non_nullable
               as List<String>,
-      preferenceTerms: null == preferenceTerms
-          ? _value.preferenceTerms
-          : preferenceTerms // ignore: cast_nullable_to_non_nullable
-              as List<String>,
-      ignoreTerms: null == ignoreTerms
-          ? _value.ignoreTerms
-          : ignoreTerms // ignore: cast_nullable_to_non_nullable
-              as List<String>,
+      preferencesByCategory: null == preferencesByCategory
+          ? _value.preferencesByCategory
+          : preferencesByCategory // ignore: cast_nullable_to_non_nullable
+              as Map<String, CategoryTerms>,
       maxSearchesPerRun: null == maxSearchesPerRun
           ? _value.maxSearchesPerRun
           : maxSearchesPerRun // ignore: cast_nullable_to_non_nullable
@@ -146,8 +306,7 @@ abstract class _$$UserProfileImplCopyWith<$Res>
       String gender,
       String country,
       List<String> shoppingCategories,
-      List<String> preferenceTerms,
-      List<String> ignoreTerms,
+      Map<String, CategoryTerms> preferencesByCategory,
       int maxSearchesPerRun,
       bool voiceOnboardingSeen,
       String voiceLanguage});
@@ -172,8 +331,7 @@ class __$$UserProfileImplCopyWithImpl<$Res>
     Object? gender = null,
     Object? country = null,
     Object? shoppingCategories = null,
-    Object? preferenceTerms = null,
-    Object? ignoreTerms = null,
+    Object? preferencesByCategory = null,
     Object? maxSearchesPerRun = null,
     Object? voiceOnboardingSeen = null,
     Object? voiceLanguage = null,
@@ -203,14 +361,10 @@ class __$$UserProfileImplCopyWithImpl<$Res>
           ? _value._shoppingCategories
           : shoppingCategories // ignore: cast_nullable_to_non_nullable
               as List<String>,
-      preferenceTerms: null == preferenceTerms
-          ? _value._preferenceTerms
-          : preferenceTerms // ignore: cast_nullable_to_non_nullable
-              as List<String>,
-      ignoreTerms: null == ignoreTerms
-          ? _value._ignoreTerms
-          : ignoreTerms // ignore: cast_nullable_to_non_nullable
-              as List<String>,
+      preferencesByCategory: null == preferencesByCategory
+          ? _value._preferencesByCategory
+          : preferencesByCategory // ignore: cast_nullable_to_non_nullable
+              as Map<String, CategoryTerms>,
       maxSearchesPerRun: null == maxSearchesPerRun
           ? _value.maxSearchesPerRun
           : maxSearchesPerRun // ignore: cast_nullable_to_non_nullable
@@ -229,7 +383,7 @@ class __$$UserProfileImplCopyWithImpl<$Res>
 
 /// @nodoc
 
-class _$UserProfileImpl implements _UserProfile {
+class _$UserProfileImpl extends _UserProfile {
   const _$UserProfileImpl(
       {this.username = '',
       this.dob = '',
@@ -237,14 +391,13 @@ class _$UserProfileImpl implements _UserProfile {
       this.gender = '',
       this.country = '',
       final List<String> shoppingCategories = const [],
-      final List<String> preferenceTerms = const [],
-      final List<String> ignoreTerms = const [],
+      final Map<String, CategoryTerms> preferencesByCategory = const {},
       this.maxSearchesPerRun = defaultMaxSearchesPerRun,
       this.voiceOnboardingSeen = false,
       this.voiceLanguage = 'English'})
       : _shoppingCategories = shoppingCategories,
-        _preferenceTerms = preferenceTerms,
-        _ignoreTerms = ignoreTerms;
+        _preferencesByCategory = preferencesByCategory,
+        super._();
 
   @override
   @JsonKey()
@@ -271,22 +424,14 @@ class _$UserProfileImpl implements _UserProfile {
     return EqualUnmodifiableListView(_shoppingCategories);
   }
 
-  final List<String> _preferenceTerms;
+  final Map<String, CategoryTerms> _preferencesByCategory;
   @override
   @JsonKey()
-  List<String> get preferenceTerms {
-    if (_preferenceTerms is EqualUnmodifiableListView) return _preferenceTerms;
+  Map<String, CategoryTerms> get preferencesByCategory {
+    if (_preferencesByCategory is EqualUnmodifiableMapView)
+      return _preferencesByCategory;
     // ignore: implicit_dynamic_type
-    return EqualUnmodifiableListView(_preferenceTerms);
-  }
-
-  final List<String> _ignoreTerms;
-  @override
-  @JsonKey()
-  List<String> get ignoreTerms {
-    if (_ignoreTerms is EqualUnmodifiableListView) return _ignoreTerms;
-    // ignore: implicit_dynamic_type
-    return EqualUnmodifiableListView(_ignoreTerms);
+    return EqualUnmodifiableMapView(_preferencesByCategory);
   }
 
   @override
@@ -301,7 +446,7 @@ class _$UserProfileImpl implements _UserProfile {
 
   @override
   String toString() {
-    return 'UserProfile(username: $username, dob: $dob, profilePhotoUrl: $profilePhotoUrl, gender: $gender, country: $country, shoppingCategories: $shoppingCategories, preferenceTerms: $preferenceTerms, ignoreTerms: $ignoreTerms, maxSearchesPerRun: $maxSearchesPerRun, voiceOnboardingSeen: $voiceOnboardingSeen, voiceLanguage: $voiceLanguage)';
+    return 'UserProfile(username: $username, dob: $dob, profilePhotoUrl: $profilePhotoUrl, gender: $gender, country: $country, shoppingCategories: $shoppingCategories, preferencesByCategory: $preferencesByCategory, maxSearchesPerRun: $maxSearchesPerRun, voiceOnboardingSeen: $voiceOnboardingSeen, voiceLanguage: $voiceLanguage)';
   }
 
   @override
@@ -319,9 +464,7 @@ class _$UserProfileImpl implements _UserProfile {
             const DeepCollectionEquality()
                 .equals(other._shoppingCategories, _shoppingCategories) &&
             const DeepCollectionEquality()
-                .equals(other._preferenceTerms, _preferenceTerms) &&
-            const DeepCollectionEquality()
-                .equals(other._ignoreTerms, _ignoreTerms) &&
+                .equals(other._preferencesByCategory, _preferencesByCategory) &&
             (identical(other.maxSearchesPerRun, maxSearchesPerRun) ||
                 other.maxSearchesPerRun == maxSearchesPerRun) &&
             (identical(other.voiceOnboardingSeen, voiceOnboardingSeen) ||
@@ -339,8 +482,7 @@ class _$UserProfileImpl implements _UserProfile {
       gender,
       country,
       const DeepCollectionEquality().hash(_shoppingCategories),
-      const DeepCollectionEquality().hash(_preferenceTerms),
-      const DeepCollectionEquality().hash(_ignoreTerms),
+      const DeepCollectionEquality().hash(_preferencesByCategory),
       maxSearchesPerRun,
       voiceOnboardingSeen,
       voiceLanguage);
@@ -354,7 +496,7 @@ class _$UserProfileImpl implements _UserProfile {
       __$$UserProfileImplCopyWithImpl<_$UserProfileImpl>(this, _$identity);
 }
 
-abstract class _UserProfile implements UserProfile {
+abstract class _UserProfile extends UserProfile {
   const factory _UserProfile(
       {final String username,
       final String dob,
@@ -362,11 +504,11 @@ abstract class _UserProfile implements UserProfile {
       final String gender,
       final String country,
       final List<String> shoppingCategories,
-      final List<String> preferenceTerms,
-      final List<String> ignoreTerms,
+      final Map<String, CategoryTerms> preferencesByCategory,
       final int maxSearchesPerRun,
       final bool voiceOnboardingSeen,
       final String voiceLanguage}) = _$UserProfileImpl;
+  const _UserProfile._() : super._();
 
   @override
   String get username;
@@ -381,9 +523,7 @@ abstract class _UserProfile implements UserProfile {
   @override
   List<String> get shoppingCategories;
   @override
-  List<String> get preferenceTerms;
-  @override
-  List<String> get ignoreTerms;
+  Map<String, CategoryTerms> get preferencesByCategory;
   @override
   int get maxSearchesPerRun;
   @override

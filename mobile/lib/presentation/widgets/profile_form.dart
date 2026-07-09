@@ -75,9 +75,26 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
     _photoUrl        = TextEditingController(text: p.profilePhotoUrl);
     _gender          = TextEditingController(text: p.gender);
     _selectedCategories = Set<String>.from(p.shoppingCategories);
-    _preferencesByCategory = Map<String, CategoryTerms>.from(p.preferencesByCategory);
+    _preferencesByCategory = _initialPreferencesByCategory(p);
     _country = p.country.isEmpty ? null : p.country;
     _maxSearchesPerRun = clampMaxSearchesPerRun(p.maxSearchesPerRun);
+  }
+
+  Map<String, CategoryTerms> _initialPreferencesByCategory(UserProfile p) {
+    final preferences = Map<String, CategoryTerms>.from(p.preferencesByCategory);
+    final general = preferences[generalPreferenceBucket];
+
+    if (general != null && _selectedCategories.length == 1) {
+      final category = _selectedCategories.first;
+      final current = preferences[category] ?? const CategoryTerms();
+      preferences[category] = CategoryTerms(
+        include: dedupeTermsCaseInsensitive([...current.include, ...general.include]),
+        exclude: dedupeTermsCaseInsensitive([...current.exclude, ...general.exclude]),
+      );
+      preferences.remove(generalPreferenceBucket);
+    }
+
+    return preferences;
   }
 
   @override
@@ -95,6 +112,9 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
     final store = isInclude ? _includeInputs : _excludeInputs;
     return store.putIfAbsent(category, () => TextEditingController());
   }
+
+  String _normalizedTerm(String value) =>
+      value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
 
   // Category chips control shopping_categories; toggling one off is an
   // explicit user removal, so it also drops that category's preference
@@ -126,15 +146,18 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
   void _addTerm(String category, {required bool isInclude, required String raw}) {
     final value = raw.trim();
     if (value.isEmpty) return;
-    final lower = value.toLowerCase();
+    final normalizedValue = _normalizedTerm(value);
     setState(() {
       final current = _preferencesByCategory[category] ?? const CategoryTerms();
       final list = isInclude ? current.include : current.exclude;
-      if (list.any((t) => t.toLowerCase() == lower)) return;
+      if (list.any((t) => _normalizedTerm(t) == normalizedValue)) return;
       final updated = [...list, value];
+      final opposite = (isInclude ? current.exclude : current.include)
+          .where((t) => _normalizedTerm(t) != normalizedValue)
+          .toList();
       _preferencesByCategory[category] = isInclude
-          ? current.copyWith(include: updated)
-          : current.copyWith(exclude: updated);
+          ? current.copyWith(include: updated, exclude: opposite)
+          : current.copyWith(include: opposite, exclude: updated);
     });
     _inputFor(category, isInclude: isInclude).clear();
   }
@@ -144,8 +167,8 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
       final current = _preferencesByCategory[category];
       if (current == null) return;
       _preferencesByCategory[category] = isInclude
-          ? current.copyWith(include: current.include.where((t) => t != term).toList())
-          : current.copyWith(exclude: current.exclude.where((t) => t != term).toList());
+          ? current.copyWith(include: current.include.where((t) => _normalizedTerm(t) != _normalizedTerm(term)).toList())
+          : current.copyWith(exclude: current.exclude.where((t) => _normalizedTerm(t) != _normalizedTerm(term)).toList());
     });
   }
 
@@ -154,6 +177,7 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
   // shopping-category chip, so it's only shown when it already has content;
   // otherwise it round-trips untouched through save.
   bool get _hasGeneralBucket {
+    if (_selectedCategories.isNotEmpty) return false;
     final general = _preferencesByCategory[generalPreferenceBucket];
     return general != null && (general.include.isNotEmpty || general.exclude.isNotEmpty);
   }
@@ -220,6 +244,8 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
       shoppingCategories:    _selectedCategories.toList(),
       preferencesByCategory: normalized,
       maxSearchesPerRun:     _maxSearchesPerRun,
+      voiceOnboardingSeen:   widget.profile.voiceOnboardingSeen,
+      voiceLanguage:         widget.profile.voiceLanguage,
     ));
   }
 

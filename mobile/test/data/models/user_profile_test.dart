@@ -81,6 +81,21 @@ void main() {
       expect(data['ignore_terms'], {'Kitchen & Cookware': ['plastic']});
     });
 
+    test('uses selected category buckets instead of saving edited terms under general', () {
+      const profile = UserProfile(
+        shoppingCategories: ['Kitchen & Cookware'],
+        preferencesByCategory: {
+          generalPreferenceBucket: CategoryTerms(include: ['legacy']),
+          'Kitchen & Cookware': CategoryTerms(include: ['cast iron'], exclude: ['plastic']),
+        },
+      );
+
+      final data = UserProfile.toFirestore(profile);
+
+      expect(data['preference_terms'], {'Kitchen & Cookware': ['cast iron']});
+      expect(data['ignore_terms'], {'Kitchen & Cookware': ['plastic']});
+    });
+
     test('preserves unrelated fields via merge-style save payload', () {
       const profile = UserProfile(username: 'Ava', dob: '1990-01-01');
       final data = UserProfile.toFirestore(profile);

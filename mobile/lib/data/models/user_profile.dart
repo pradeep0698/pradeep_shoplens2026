@@ -67,6 +67,26 @@ Map<String, CategoryTerms> _mergePreferencesByCategory(
   };
 }
 
+Map<String, CategoryTerms> _saveablePreferenceBuckets(UserProfile p) {
+  final selectedCategories = p.shoppingCategories.toSet();
+  final result = <String, CategoryTerms>{};
+
+  p.preferencesByCategory.forEach((category, terms) {
+    if (selectedCategories.isNotEmpty) {
+      if (category == generalPreferenceBucket) return;
+      if (!selectedCategories.contains(category)) return;
+    }
+
+    final include = dedupeTermsCaseInsensitive(terms.include);
+    final exclude = dedupeTermsCaseInsensitive(terms.exclude);
+    if (include.isEmpty && exclude.isEmpty) return;
+
+    result[category] = CategoryTerms(include: include, exclude: exclude);
+  });
+
+  return result;
+}
+
 @freezed
 class CategoryTerms with _$CategoryTerms {
   const factory CategoryTerms({
@@ -126,7 +146,7 @@ class UserProfile with _$UserProfile {
   static Map<String, dynamic> toFirestore(UserProfile p) {
     final preferenceTerms = <String, List<String>>{};
     final ignoreTerms = <String, List<String>>{};
-    p.preferencesByCategory.forEach((category, terms) {
+    _saveablePreferenceBuckets(p).forEach((category, terms) {
       if (terms.include.isNotEmpty) preferenceTerms[category] = terms.include;
       if (terms.exclude.isNotEmpty) ignoreTerms[category] = terms.exclude;
     });

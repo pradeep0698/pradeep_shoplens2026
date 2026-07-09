@@ -27,9 +27,10 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
   late TextEditingController _dob;
   late TextEditingController _photoUrl;
   late TextEditingController _gender;
-  late TextEditingController _ignoreTerms;
-  late TextEditingController _preferenceTerms;
   late Set<String> _selectedCategories;
+  late Map<String, CategoryTerms> _preferencesByCategory;
+  final Map<String, TextEditingController> _includeInputs = {};
+  final Map<String, TextEditingController> _excludeInputs = {};
   String? _country;
   late int _maxSearchesPerRun;
 
@@ -73,23 +74,113 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
     _dob             = TextEditingController(text: p.dob);
     _photoUrl        = TextEditingController(text: p.profilePhotoUrl);
     _gender          = TextEditingController(text: p.gender);
-    _ignoreTerms     = TextEditingController(text: p.ignoreTerms.join(', '));
-    _preferenceTerms = TextEditingController(text: p.preferenceTerms.join(', '));
     _selectedCategories = Set<String>.from(p.shoppingCategories);
+    _preferencesByCategory = _initialPreferencesByCategory(p);
     _country = p.country.isEmpty ? null : p.country;
     _maxSearchesPerRun = clampMaxSearchesPerRun(p.maxSearchesPerRun);
   }
 
+  Map<String, CategoryTerms> _initialPreferencesByCategory(UserProfile p) {
+    final preferences = Map<String, CategoryTerms>.from(p.preferencesByCategory);
+    final general = preferences[generalPreferenceBucket];
+
+    if (general != null && _selectedCategories.length == 1) {
+      final category = _selectedCategories.first;
+      final current = preferences[category] ?? const CategoryTerms();
+      preferences[category] = CategoryTerms(
+        include: dedupeTermsCaseInsensitive([...current.include, ...general.include]),
+        exclude: dedupeTermsCaseInsensitive([...current.exclude, ...general.exclude]),
+      );
+      preferences.remove(generalPreferenceBucket);
+    }
+
+    return preferences;
+  }
+
   @override
   void dispose() {
-    for (final c in [_username, _dob, _photoUrl, _gender, _ignoreTerms, _preferenceTerms]) {
+    for (final c in [_username, _dob, _photoUrl, _gender]) {
+      c.dispose();
+    }
+    for (final c in [..._includeInputs.values, ..._excludeInputs.values]) {
       c.dispose();
     }
     super.dispose();
   }
 
-  List<String> _splitTerms(String raw) =>
-      raw.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+  TextEditingController _inputFor(String category, {required bool isInclude}) {
+    final store = isInclude ? _includeInputs : _excludeInputs;
+    return store.putIfAbsent(category, () => TextEditingController());
+  }
+
+  String _normalizedTerm(String value) =>
+      value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
+  // Category chips control shopping_categories; toggling one off is an
+  // explicit user removal, so it also drops that category's preference
+  // bucket rather than leaving orphaned data behind.
+  void _toggleCategory(String category) {
+    setState(() {
+      if (_selectedCategories.contains(category)) {
+        _selectedCategories.remove(category);
+        _preferencesByCategory.remove(category);
+        _includeInputs.remove(category)?.dispose();
+        _excludeInputs.remove(category)?.dispose();
+      } else {
+        _selectedCategories.add(category);
+      }
+    });
+  }
+
+  void _removeCategoryBucket(String category) {
+    setState(() {
+      _selectedCategories.remove(category);
+      _preferencesByCategory.remove(category);
+      _includeInputs.remove(category)?.dispose();
+      _excludeInputs.remove(category)?.dispose();
+    });
+  }
+
+  // Duplicate handling is silent: if the normalized term already exists in
+  // that same list, do nothing — no user-facing warning.
+  void _addTerm(String category, {required bool isInclude, required String raw}) {
+    final value = raw.trim();
+    if (value.isEmpty) return;
+    final normalizedValue = _normalizedTerm(value);
+    setState(() {
+      final current = _preferencesByCategory[category] ?? const CategoryTerms();
+      final list = isInclude ? current.include : current.exclude;
+      if (list.any((t) => _normalizedTerm(t) == normalizedValue)) return;
+      final updated = [...list, value];
+      final opposite = (isInclude ? current.exclude : current.include)
+          .where((t) => _normalizedTerm(t) != normalizedValue)
+          .toList();
+      _preferencesByCategory[category] = isInclude
+          ? current.copyWith(include: updated, exclude: opposite)
+          : current.copyWith(include: opposite, exclude: updated);
+    });
+    _inputFor(category, isInclude: isInclude).clear();
+  }
+
+  void _removeTerm(String category, {required bool isInclude, required String term}) {
+    setState(() {
+      final current = _preferencesByCategory[category];
+      if (current == null) return;
+      _preferencesByCategory[category] = isInclude
+          ? current.copyWith(include: current.include.where((t) => _normalizedTerm(t) != _normalizedTerm(term)).toList())
+          : current.copyWith(exclude: current.exclude.where((t) => _normalizedTerm(t) != _normalizedTerm(term)).toList());
+    });
+  }
+
+  // General (not category-specific) terms — legacy pre-category-scoping data
+  // or voice-assistant terms recorded without a category. Not tied to a
+  // shopping-category chip, so it's only shown when it already has content;
+  // otherwise it round-trips untouched through save.
+  bool get _hasGeneralBucket {
+    if (_selectedCategories.isNotEmpty) return false;
+    final general = _preferencesByCategory[generalPreferenceBucket];
+    return general != null && (general.include.isNotEmpty || general.exclude.isNotEmpty);
+  }
 
   // Opens the same voice-onboarding flow the forced first-run trigger uses
   // (see main_screen.dart's _maybeShowOnboarding) so users can (re-)run it
@@ -134,16 +225,27 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
       }
     }
 
+    // Final normalize pass: trim/drop-blank/dedupe (already applied
+    // incrementally by _addTerm) plus a stable sort for display.
+    final normalized = <String, CategoryTerms>{
+      for (final entry in _preferencesByCategory.entries)
+        entry.key: CategoryTerms(
+          include: dedupeTermsCaseInsensitive(entry.value.include)..sort(),
+          exclude: dedupeTermsCaseInsensitive(entry.value.exclude)..sort(),
+        ),
+    };
+
     await widget.onSave(UserProfile(
-      username:           _username.text.trim(),
-      dob:                _dob.text.trim(),
-      profilePhotoUrl:    _photoUrl.text.trim(),
-      gender:             _gender.text.trim(),
-      country:            _country ?? '',
-      shoppingCategories: _selectedCategories.toList(),
-      ignoreTerms:        _splitTerms(_ignoreTerms.text),
-      preferenceTerms:    _splitTerms(_preferenceTerms.text),
-      maxSearchesPerRun:  _maxSearchesPerRun,
+      username:              _username.text.trim(),
+      dob:                   _dob.text.trim(),
+      profilePhotoUrl:       photoUrl,
+      gender:                _gender.text.trim(),
+      country:               _country ?? '',
+      shoppingCategories:    _selectedCategories.toList(),
+      preferencesByCategory: normalized,
+      maxSearchesPerRun:     _maxSearchesPerRun,
+      voiceOnboardingSeen:   widget.profile.voiceOnboardingSeen,
+      voiceLanguage:         widget.profile.voiceLanguage,
     ));
   }
 
@@ -160,9 +262,17 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
           _field('Photo URL', _photoUrl, hint: 'https://example.com/avatar.jpg'),
           _dropdown('Gender', _gender, _genderOptions),
           _countryDropdown(),
-          _categorySection(),
-          _textArea('Ignore terms', _ignoreTerms, hint: 'item1, item2', hint2: 'Hidden from analysis and matching'),
-          _textArea('Preference terms', _preferenceTerms, hint: 'item1, item2', hint2: 'These matches float to the top'),
+          _categoryPicker(),
+          ..._selectedCategories.map(
+            (cat) => _categoryPreferencesCard(cat, removable: true),
+          ),
+          if (_hasGeneralBucket)
+            _categoryPreferencesCard(
+              generalPreferenceBucket,
+              removable: false,
+              title: 'General preferences',
+              subtitle: "Terms not tied to a specific category — e.g. from voice setup",
+            ),
           _maxSearchesSection(),
           if (_localError != null)
             Container(
@@ -244,18 +354,18 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
         ),
       );
 
-  Widget _categorySection() => Padding(
+  Widget _categoryPicker() => Padding(
         padding: const EdgeInsets.only(bottom: 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Shopping preferences',
+              'Shopping categories',
               style: TextStyle(color: Color(0xFFCBD5E1), fontSize: 13, fontWeight: FontWeight.w500),
             ),
             const SizedBox(height: 4),
             const Text(
-              'Select the categories you shop for',
+              'Select the categories you shop for, then add include/exclude terms below',
               style: TextStyle(color: Color(0xFF64748B), fontSize: 11),
             ),
             const SizedBox(height: 10),
@@ -265,13 +375,7 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
               children: _categoryOptions.map((cat) {
                 final selected = _selectedCategories.contains(cat);
                 return GestureDetector(
-                  onTap: () => setState(() {
-                    if (selected) {
-                      _selectedCategories.remove(cat);
-                    } else {
-                      _selectedCategories.add(cat);
-                    }
-                  }),
+                  onTap: () => _toggleCategory(cat),
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 150),
                     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -297,6 +401,143 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
           ],
         ),
       );
+
+  Widget _categoryPreferencesCard(
+    String category, {
+    required bool removable,
+    String? title,
+    String? subtitle,
+  }) {
+    final terms = _preferencesByCategory[category] ?? const CategoryTerms();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E293B),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title ?? category,
+                  style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+                ),
+              ),
+              if (removable)
+                IconButton(
+                  icon: const Icon(Icons.close, color: Color(0xFF64748B), size: 18),
+                  onPressed: () => _removeCategoryBucket(category),
+                  tooltip: 'Remove category',
+                  constraints: const BoxConstraints(),
+                  padding: EdgeInsets.zero,
+                ),
+            ],
+          ),
+          if (subtitle != null) ...[
+            const SizedBox(height: 2),
+            Text(subtitle, style: const TextStyle(color: Color(0xFF64748B), fontSize: 11)),
+          ],
+          const SizedBox(height: 12),
+          _termListEditor(
+            category: category,
+            label: 'Include',
+            hint2: 'These matches float to the top',
+            terms: terms.include,
+            isInclude: true,
+            chipColor: const Color(0xFF34D399),
+          ),
+          const SizedBox(height: 12),
+          _termListEditor(
+            category: category,
+            label: 'Exclude',
+            hint2: 'Hidden from analysis and matching',
+            terms: terms.exclude,
+            isInclude: false,
+            chipColor: const Color(0xFFF87171),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _termListEditor({
+    required String category,
+    required String label,
+    required String hint2,
+    required List<String> terms,
+    required bool isInclude,
+    required Color chipColor,
+  }) {
+    final input = _inputFor(category, isInclude: isInclude);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: const TextStyle(color: Color(0xFFCBD5E1), fontSize: 12, fontWeight: FontWeight.w500)),
+        const SizedBox(height: 2),
+        Text(hint2, style: const TextStyle(color: Color(0xFF64748B), fontSize: 11)),
+        const SizedBox(height: 8),
+        if (terms.isNotEmpty)
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: terms.map((term) {
+              return Chip(
+                label: Text(term, style: const TextStyle(color: Colors.white, fontSize: 12)),
+                backgroundColor: chipColor.withValues(alpha: 0.15),
+                side: BorderSide(color: chipColor.withValues(alpha: 0.4)),
+                deleteIcon: const Icon(Icons.close, size: 14, color: Color(0xFF94A3B8)),
+                onDeleted: () => _removeTerm(category, isInclude: isInclude, term: term),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
+              );
+            }).toList(),
+          ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: input,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                decoration: InputDecoration(
+                  hintText: 'Add a term...',
+                  hintStyle: const TextStyle(color: Color(0xFF64748B)),
+                  isDense: true,
+                  filled: true,
+                  fillColor: const Color(0xFF0F172A),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: Color(0xFF6EE7B7)),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                ),
+                onSubmitted: (raw) => _addTerm(category, isInclude: isInclude, raw: raw),
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              icon: const Icon(Icons.add_circle, color: Color(0xFF34D399)),
+              onPressed: () => _addTerm(category, isInclude: isInclude, raw: input.text),
+              tooltip: 'Add term',
+            ),
+          ],
+        ),
+      ],
+    );
+  }
 
   Widget _maxSearchesSection() => Padding(
         padding: const EdgeInsets.only(bottom: 14),
@@ -451,45 +692,6 @@ class _ProfileFormState extends ConsumerState<ProfileForm> {
                   .toList(),
               onChanged: (v) => setState(() => _country = v),
             ),
-          ],
-        ),
-      );
-
-  Widget _textArea(String label, TextEditingController ctrl, {String hint = '', String hint2 = ''}) => Padding(
-        padding: const EdgeInsets.only(bottom: 14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(label, style: const TextStyle(color: Color(0xFFCBD5E1), fontSize: 13, fontWeight: FontWeight.w500)),
-            const SizedBox(height: 6),
-            TextField(
-              controller: ctrl,
-              maxLines: 3,
-              style: const TextStyle(color: Colors.white, fontSize: 14),
-              decoration: InputDecoration(
-                hintText: hint,
-                hintStyle: const TextStyle(color: Color(0xFF64748B)),
-                filled: true,
-                fillColor: const Color(0xFF0F172A),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: Color(0xFF6EE7B7)),
-                ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-              ),
-            ),
-            if (hint2.isNotEmpty) ...[
-              const SizedBox(height: 4),
-              Text(hint2, style: const TextStyle(color: Color(0xFF64748B), fontSize: 11)),
-            ],
           ],
         ),
       );

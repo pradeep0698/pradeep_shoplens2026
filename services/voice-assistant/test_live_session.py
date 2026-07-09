@@ -326,6 +326,24 @@ def test_profile_note_carve_out_does_not_exempt_per_search_clarifying_questions(
     assert "gather first" in note.lower()
 
 
+def test_profile_note_flattens_category_keyed_terms_instead_of_joining_dict_keys():
+    """Regression guard: existing_profile (as returned by
+    profile_store.get_profile) stores preference_terms/ignore_terms as
+    category-keyed dicts, not flat lists. ", ".join(a_dict) silently
+    iterates its keys instead of raising — so without flattening first, the
+    spoken note said things like "likes Clothing, _general" (dict keys)
+    instead of the actual saved terms."""
+    note = _profile_note({
+        "shopping_categories": ["Clothing"],
+        "preference_terms": {"Clothing": ["Nike"], "_general": ["minimalist"]},
+        "ignore_terms": {"Clothing": ["leather"]},
+    })
+    assert "Nike" in note and "minimalist" in note
+    assert "leather" in note
+    assert "_general" not in note
+    assert "Clothing, _general" not in note
+
+
 def test_system_prompt_embeds_profile_note():
     prompt = _system_prompt(
         {"shopping_categories": ["Electronics"], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
@@ -566,7 +584,40 @@ async def test_dispatch_record_preference_ignore_term_removes_matching_category(
     await _dispatch_tool_call("record_preference", {"ignore_terms": ["clothes"]}, session)
 
     assert session.latest_patch["shopping_categories"] == []
-    assert session.latest_patch["ignore_terms"] == {"_general": ["clothes"]}
+    # The second call didn't repeat shopping_categories, but "Clothing" was
+    # the most recently mentioned category (see SessionState.last_categories),
+    # so the ignore term still attaches to it rather than falling back to
+    # general — even though the alias match above then blocks "Clothing"
+    # from shopping_categories.
+    assert session.latest_patch["ignore_terms"] == {"Clothing": ["clothes"]}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_record_preference_followup_call_uses_last_mentioned_category():
+    """Regression guard: the model states a category once, then reports a
+    preference for it in a separate follow-up call without repeating
+    shopping_categories — matching real conversational behavior more closely
+    than the mock/scripted session helpers above. The term must attach to
+    that category, not silently fall back to the general bucket."""
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+
+    await _dispatch_tool_call("record_preference", {"shopping_categories": ["Kitchen & Cookware"]}, session)
+    await _dispatch_tool_call("record_preference", {"preference_terms": ["cast iron"]}, session)
+
+    assert session.latest_patch["preference_terms"] == {"Kitchen & Cookware": ["cast iron"]}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_record_preference_new_category_replaces_last_mentioned_fallback():
+    """Once the model moves on to a new category, later category-less calls
+    should follow the newest mention, not an older one."""
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+
+    await _dispatch_tool_call("record_preference", {"shopping_categories": ["Clothing"]}, session)
+    await _dispatch_tool_call("record_preference", {"shopping_categories": ["Electronics"]}, session)
+    await _dispatch_tool_call("record_preference", {"preference_terms": ["Sony"]}, session)
+
+    assert session.latest_patch["preference_terms"] == {"Electronics": ["Sony"]}
 
 
 def test_sanitize_exclusion_term_collapses_to_hyphenated_token():

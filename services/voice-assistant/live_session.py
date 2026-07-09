@@ -169,7 +169,11 @@ SYSTEM_PROMPT_TEMPLATE = (
     "Whenever the user states a shopping category, a brand/style/material "
     "preference, or something to exclude, call record_preference right away "
     "with exactly what you understood — do this throughout the conversation "
-    "every time something new comes up, not just once at the end. Trust your "
+    "every time something new comes up, not just once at the end. Every "
+    "record_preference call must include shopping_categories set to whichever "
+    "category the preference or exclusion you're recording belongs to, even "
+    "if you already stated that category in an earlier call — never omit it "
+    "just because it hasn't changed since last time. Trust your "
     "own understanding of their speech over the caption shown on screen, "
     "which can sometimes be wrong even when you understood correctly — never "
     "read the caption back, just record what you actually heard. Never "
@@ -269,10 +273,17 @@ def _profile_note(existing_profile: dict) -> str:
     spoken output, since Gemini Live doesn't resume speaking once turn_complete
     fires for a turn that was just a function call (confirmed by direct testing
     against the real API) — baking the profile into the prompt avoids that turn
-    entirely."""
-    categories = existing_profile.get("shopping_categories") or []
-    preferences = existing_profile.get("preference_terms") or []
-    exclusions = existing_profile.get("ignore_terms") or []
+    entirely.
+
+    existing_profile's preference_terms/ignore_terms are the internal
+    category-keyed dict shape (see profile_store._coerce_categorized), not
+    the flat list of terms this function speaks — flatten first, or
+    ", ".join(...) below silently joins the dict's category keys (e.g.
+    "_general") instead of the actual terms."""
+    flat = _flatten_patch_for_client(existing_profile)
+    categories = flat.get("shopping_categories") or []
+    preferences = flat.get("preference_terms") or []
+    exclusions = flat.get("ignore_terms") or []
     if not (categories or preferences or exclusions):
         return "The user has no saved preferences yet — this is their first time."
     parts = []
@@ -523,6 +534,12 @@ class SessionState:
     # _pump_gemini_to_client), giving a time-to-first-response measurement
     # per turn. None means "no turn currently awaiting a response".
     turn_requested_at: Optional[float] = None
+    # Categories from the most recent record_preference call that actually
+    # named one — carried forward so a later call reporting only preference/
+    # ignore terms (the model rarely repeats shopping_categories once it's
+    # already said the category) still attaches to that category instead of
+    # falling back to the general bucket (see _bucket_keys_for_call).
+    last_categories: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         normalized = profile_store.normalize_reviewed_patch(self.existing_profile)
@@ -996,12 +1013,15 @@ def apply_ready_to_finalize(session: SessionState, summary: str) -> dict:
     return {"status": "proposal_ready", "patch": session.finalize_proposal}
 
 
-def _bucket_keys_for_call(categories: list[str]) -> list[str]:
+def _bucket_keys_for_call(categories: list[str], fallback_categories: list[str] | None = None) -> list[str]:
     """Which preference_terms/ignore_terms buckets a record_preference call's
-    terms belong in — the categories given in that same call, or the general
-    bucket if none were given (e.g. "I like minimalist style" with no
-    category mentioned), so the term still applies regardless of category."""
-    return categories or [profile_store.GENERAL_BUCKET]
+    terms belong in — the categories given in that same call; failing that,
+    the most recently mentioned categories earlier in this session (the model
+    usually states a category once, then reports preferences for it in
+    separate follow-up calls without repeating shopping_categories); failing
+    that, the general bucket (e.g. "I like minimalist style" with no category
+    ever mentioned), so the term still applies regardless of category."""
+    return categories or fallback_categories or [profile_store.GENERAL_BUCKET]
 
 
 def apply_record_preference(session: SessionState, args: dict) -> dict:
@@ -1010,8 +1030,10 @@ def apply_record_preference(session: SessionState, args: dict) -> dict:
     # dedup logic as the final reviewed save.
     categories = _filter_categories(args.get("shopping_categories"), session.latest_user_text())
     session.latest_patch["shopping_categories"] = sorted({*session.latest_patch["shopping_categories"], *categories})
+    if categories:
+        session.last_categories = categories
 
-    buckets = _bucket_keys_for_call(categories)
+    buckets = _bucket_keys_for_call(categories, session.last_categories)
     new_preferences = [str(t) for t in (args.get("preference_terms") or [])]
     new_ignores = [str(t) for t in (args.get("ignore_terms") or [])]
     for bucket in buckets:

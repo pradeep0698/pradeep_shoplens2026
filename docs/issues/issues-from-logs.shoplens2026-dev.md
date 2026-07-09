@@ -10,7 +10,7 @@ https://console.cloud.google.com/run/detail/us-central1/ai-analyzer/observabilit
 Each entry's **First seen / Last seen / Occurrences** fields are maintained by the skill —
 don't hand-edit those. Free-form notes you add under an entry are preserved across runs.
 
-Last checked: 2026-07-06T15:44:37Z — no new log entries
+Last checked: 2026-07-08T01:47:06Z — 1 new log line, 1 new issue (429 misrouting now also seen on /analyze/stream)
 
 ## Open
 
@@ -50,6 +50,15 @@ Last checked: 2026-07-06T15:44:37Z — no new log entries
 - Suggested fix: add a check for `google.genai.errors` exception types (or the module name, e.g.
   `type(exc).__module__`) in `classify_exception` so `ClientError`/`ServerError` from the Gemini SDK
   map to `502 UPSTREAM_ERROR` (or a dedicated `429`/`503` passthrough) instead of `500`.
+
+### Gemini 429 RESOURCE_EXHAUSTED surfaces to clients as 500 instead of 502 (analyze/stream path) — ERROR
+- First seen: 2026-07-08T01:47:06Z
+- Last seen: 2026-07-08T01:47:06Z
+- Occurrences: 1
+- Endpoint/source: `POST /analyze/stream` → `main.py:_produce` → `analyzer.py:analyze_media_stream` (`analyzer.py:1404`, `generate_content` call) → `analyzer.py:classify_exception` (`analyzer.py:876-886`)
+- Sample: `req` producer thread → traceback through `main.py:404` → `analyzer.py:1404` → `google.genai.errors.ClientError: 429 RESOURCE_EXHAUSTED. {'message': 'Resource exhausted. Please try again later.'}` → emitted to the client as `{"type": "error", "error_code": "INTERNAL_ERROR"}`
+- Likely cause: same root cause as the non-stream entry above — `classify_exception` (`analyzer.py:876-886`) only maps to `502 UPSTREAM_ERROR` when the exception message contains a timeout/connection keyword or `type(exc).__name__` contains `google`/`api`/`grpc`/`rpc`/`transport`. `google.genai.errors.ClientError` matches none of those, so it falls to the generic `500`/`INTERNAL_ERROR` branch. This call site is `analyze_media_stream`'s Gemini detection call (`analyzer.py:1404`), which is used by **both** the mobile app's live-scan "Scan All" button and its gallery-image-upload "Scan Image" button (`mobile/lib/domain/usecases/analyze_image_usecase.dart` — both call `analyzeStream`/`/analyze/stream`). Note this bug is compounded client-side: `mobile/lib/data/models/analyzer_error.dart`'s `displayMessage`/`isRetryable` switches have no case for `AnalyzerErrorCode.internalError`, so it falls to the generic default (`'Something went wrong — please try again.'`, `isRetryable: false`) instead of a friendly "AI is busy, retry" message. Also note the client-side codes `GEMINI_QUOTA_EXCEEDED`/`GEMINI_UNAVAILABLE`/`GEMINI_TIMEOUT`/`GEMINI_AUTH_ERROR`/`GEMINI_INVALID_INPUT`/`GEMINI_ERROR` are never actually emitted by the backend (only `INVALID_REQUEST`/`UPSTREAM_ERROR`/`INTERNAL_ERROR` exist in `classify_exception`), and `UPSTREAM_ERROR` itself isn't in the client's `AnalyzerErrorCode.fromWire` switch either — so even fixing the backend to emit `502 UPSTREAM_ERROR` would still land on `AnalyzerErrorCode.unknown` client-side today, not a friendly/retryable state.
+- Suggested fix: two-part. (1) Backend — in `classify_exception` (`analyzer.py:876-886`), check `type(exc).__module__` (or import `google.genai.errors` and `isinstance` check) so `ClientError`/`ServerError` map to `502` with a specific `error_code` (e.g. `GEMINI_QUOTA_EXCEEDED` for 429, `GEMINI_UNAVAILABLE` for 503) instead of the generic `500`/`INTERNAL_ERROR`. (2) Client — add `UPSTREAM_ERROR` to `AnalyzerErrorCode.fromWire` in `mobile/lib/data/models/analyzer_error.dart:20-33`, and make sure `displayMessage`/`isRetryable` (lines 80-101) have explicit cases for whatever codes the backend actually sends, rather than relying on the default branch.
 
 ## Resolved
 

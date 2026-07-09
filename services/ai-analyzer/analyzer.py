@@ -22,6 +22,7 @@ import requests as _req
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 from PIL import Image
 
@@ -877,6 +878,18 @@ def classify_exception(exc: Exception) -> tuple[int, str]:
     """Map an exception to (HTTP status code, error_code string)."""
     if isinstance(exc, ValueError):
         return 400, "INVALID_REQUEST"
+    if isinstance(exc, genai_errors.APIError):
+        code   = exc.code
+        status = (exc.status or "").upper()
+        if code == 429 or status == "RESOURCE_EXHAUSTED":
+            return 502, "GEMINI_QUOTA_EXCEEDED"
+        if code in (503, 504) or status in ("UNAVAILABLE", "DEADLINE_EXCEEDED"):
+            return 502, "GEMINI_UNAVAILABLE"
+        if code in (401, 403) or status in ("UNAUTHENTICATED", "PERMISSION_DENIED"):
+            return 502, "GEMINI_AUTH_ERROR"
+        if code == 400 or status == "INVALID_ARGUMENT":
+            return 502, "GEMINI_INVALID_INPUT"
+        return 502, "GEMINI_ERROR"
     msg = str(exc).lower()
     if any(kw in msg for kw in ("timeout", "timed out", "connection", "network", "ssl", "remote end closed")):
         return 502, "UPSTREAM_ERROR"

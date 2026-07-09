@@ -12,26 +12,55 @@ Each sample gets a permanent `#` id assigned in chronological order (oldest = 1)
 
 Timestamps are US Central Time (source Cloud Run logs are UTC; converted at UTC-5 CDT for these dates — adjust to UTC-6 CST for entries falling in the Nov-Mar standard-time window).
 
-Last updated: 2026-07-06T10:44:37 CDT — no new log entries
+Last updated: 2026-07-07T21:16:30 CDT — +18 analyze/stream, +11 identify samples
 
 ## Summary (from current samples below)
 
 | Endpoint | n | min | p50 | p95 | max | mean |
 |---|---|---|---|---|---|---|
-| `analyze` | 62 | 1.05s | 8.35s | 54.54s | 59.93s | 17.15s |
-| `analyze/stream` | 58 | 1.62s | 25.17s | 58.70s | 93.38s | 27.33s |
-| `identify` | 57 | 0.33s | 16.85s | 29.74s | 78.76s | 17.73s |
+| `analyze` | 62 | 1.05s | 8.08s | 54.54s | 59.93s | 17.15s |
+| `analyze/stream` | 76 | 1.62s | 23.07s | 58.70s | 101.70s | 26.53s |
+| `identify` | 68 | 0.33s | 17.01s | 46.61s | 78.76s | 18.37s |
 
 ## Analysis
 
-- **`analyze`** is bimodal: most calls (`items=0`) are Postman placeholder smoke-tests — Gemini runs but finds nothing, so `items_phase` is 0 by design and total latency is just Gemini's 1-14s response time. A separate `n=20` perf-test burst (`items=5`, documented in `docs/analyze-perf-test-results.md`) against a real product photo drives the 20-60s tail — both Gemini detection and real Lens/Shopping search work are slow there. This run's new samples (`#146-177` where applicable) are all more placeholder smoke-tests, which is why `mean`/`p50` dropped even as `n` grew — no new perf-burst traffic since the last check.
-- **`analyze/stream`** samples are almost all real 1-2 item detections (the live-scan flow), where `items_phase` (concurrent Lens/Shopping search per item) typically accounts for 40-75% of total latency — this is the dominant cost, not Gemini. A handful of `items=0` rows are fast health-check pings.
-- **`identify`** splits into three regimes: (1) calls with `shopping=0.0s` resolve via Lens alone, with latency scaling directly with Lens response time (anywhere from <1s to 60s+); (2) a large recurring cluster has `lens` pinned almost exactly to ~12.0-12.1s with `shopping` varying 1.6-10.0s — consistent with a fixed test fixture/image hitting both steps; (3) two separate requests (`#113`, `#111`) both hit `lens=60.1s` exactly, paired with a capped `shopping=10.0s` — the repeated identical value across two different requests suggests a ~60s timeout ceiling on the Lens call rather than organic slowness. Worth flagging if `lens=60.1s` recurs. Starting 2026-07-04T19:35 UTC (`#142` onward), the Lens/Gemini/Shopping hedge shipped (see `ecdae19`) — samples since then all show `hedge_triggered=False` with `shopping=0.0s`, i.e. Lens is answering comfortably inside the hedge window (`LENS_HEDGE_DELAY_SECONDS`, default 25s) and Gemini/Shopping never fire. None of the post-hedge samples so far have triggered the hedge or hit quota exhaustion — worth watching once one does.
+- **`analyze`** is bimodal: most calls (`items=0`) are Postman placeholder smoke-tests — Gemini runs but finds nothing, so `items_phase` is 0 by design and total latency is just Gemini's 1-14s response time. A separate `n=20` perf-test burst (`items=5`, documented in `docs/analyze-perf-test-results.md`) against a real product photo drives the 20-60s tail — both Gemini detection and real Lens/Shopping search work are slow there. No new `analyze` (non-stream) samples this run.
+- **`analyze/stream`** samples are almost all real 1-2 item detections (the live-scan flow, plus the gallery-image-upload "Scan Image" flow, which also calls this same endpoint), where `items_phase` (concurrent Lens/Shopping search per item) typically accounts for 40-75% of total latency — this is the dominant cost, not Gemini. A handful of `items=0` rows are fast health-check pings. New sample `#178` (req `6c0f6f1a`, 101.70s) is the new max for this endpoint, driven by a slow `items_phase` (68.34s) across 2 items — not itself an error, just a slow real search.
+- **`identify`** splits into three regimes: (1) calls with `shopping=0.0s` resolve via Lens alone, with latency scaling directly with Lens response time (anywhere from <1s to 60s+); (2) a large recurring cluster has `lens` pinned almost exactly to ~12.0-12.1s with `shopping` varying 1.6-10.0s — consistent with a fixed test fixture/image hitting both steps; (3) two separate requests (`#113`, `#111`) both hit `lens=60.1s` exactly, paired with a capped `shopping=10.0s` — the repeated identical value across two different requests suggests a ~60s timeout ceiling on the Lens call rather than organic slowness. Worth flagging if `lens=60.1s` recurs. Starting 2026-07-04T19:35 UTC (`#142` onward), the Lens/Gemini/Shopping hedge shipped (see `ecdae19`). Contrary to the previous note here, the hedge **has now started triggering** — this run added several `hedge_triggered=True` samples (`#179`, `#180`, `#190`, `#203`), all with `gemini>0` and `shopping=0.0s`, i.e. Lens ran past the hedge window so Gemini kicked in but still beat Shopping to an answer. None have hit `quota_exhausted=True` yet — worth watching once one does. This tail is also why `identify`'s `p95` jumped from 29.74s to 46.61s this run.
 
 ## All Samples (newest first)
 
 | # | API | Time (Central) | req | Duration | Breakdown | Notes |
 |---|---|---|---|---|---|---|
+| 206 | `identify` | 2026-07-07 21:16:30 | `0dce4811` | 4.41s | upload=0.10s lens=4.31s gemini=0.00s shopping=0.00s hedge=False timed_out=False quota=False | Fast path — Lens answered within the hedge window (LENS_HEDGE_DELAY_SECONDS, default 25s), Gemini never touched |
+| 205 | `analyze/stream` | 2026-07-07 21:15:50 | `d2231118` | 49.89s | gemini=5.08s items_phase=44.81s items=2 | Two items detected — items_phase covers concurrent Lens/Shopping search for both |
+| 204 | `analyze/stream` | 2026-07-07 21:02:11 | `c6d93b03` | 38.15s | gemini=10.27s items_phase=27.88s items=2 | Two items detected — items_phase covers concurrent Lens/Shopping search for both |
+| 203 | `identify` | 2026-07-07 20:47:56 | `fb5526cb` | 31.67s | upload=0.08s lens=31.58s gemini=2.39s shopping=0.00s hedge=True timed_out=False quota=False | Lens answered mid-hedge — Gemini ran but Shopping was never needed |
+| 202 | `analyze/stream` | 2026-07-07 20:45:33 | `1f7fff15` | 5.71s | gemini=5.71s items_phase=0.00s items=0 | Placeholder/health-check image — no items detected, items_phase 0 by design |
+| 201 | `analyze/stream` | 2026-07-07 20:45:15 | `c3ebf274` | 34.23s | gemini=15.37s items_phase=18.85s items=5 | Five items detected — items_phase covers concurrent Lens/Shopping search for all five |
+| 200 | `identify` | 2026-07-07 20:45:08 | `711fc5bc` | 13.06s | upload=0.09s lens=12.96s gemini=0.00s shopping=0.00s hedge=False timed_out=False quota=False | Fast path — Lens answered within the hedge window (LENS_HEDGE_DELAY_SECONDS, default 25s), Gemini never touched |
+| 199 | `analyze/stream` | 2026-07-07 20:44:47 | `502e542a` | 3.35s | gemini=3.35s items_phase=0.00s items=0 | Placeholder/health-check image — no items detected, items_phase 0 by design |
+| 198 | `analyze/stream` | 2026-07-07 20:44:10 | `fce0fec1` | 3.41s | gemini=3.41s items_phase=0.00s items=0 | Placeholder/health-check image — no items detected, items_phase 0 by design |
+| 197 | `analyze/stream` | 2026-07-07 20:43:51 | `41ac74a0` | 5.19s | gemini=5.18s items_phase=0.00s items=0 | Placeholder/health-check image — no items detected, items_phase 0 by design |
+| 196 | `analyze/stream` | 2026-07-07 20:43:37 | `5561fb01` | 22.37s | gemini=7.84s items_phase=14.52s items=2 | Two items detected — items_phase covers concurrent Lens/Shopping search for both |
+| 195 | `identify` | 2026-07-07 20:43:32 | `25a0e9d7` | 18.15s | upload=0.09s lens=18.05s gemini=0.00s shopping=0.00s hedge=False timed_out=False quota=False | Fast path — Lens answered within the hedge window (LENS_HEDGE_DELAY_SECONDS, default 25s), Gemini never touched |
+| 194 | `analyze/stream` | 2026-07-07 20:42:53 | `3b5af935` | 44.09s | gemini=29.30s items_phase=14.79s items=2 | Two items detected — items_phase covers concurrent Lens/Shopping search for both |
+| 193 | `analyze/stream` | 2026-07-07 20:42:47 | `35b8c8e7` | 30.46s | gemini=14.52s items_phase=15.94s items=2 | Two items detected — items_phase covers concurrent Lens/Shopping search for both |
+| 192 | `identify` | 2026-07-07 20:41:40 | `3349eef8` | 6.68s | upload=0.07s lens=6.60s gemini=0.00s shopping=0.00s hedge=False timed_out=False quota=False | Fast path — Lens answered within the hedge window (LENS_HEDGE_DELAY_SECONDS, default 25s), Gemini never touched |
+| 191 | `analyze/stream` | 2026-07-07 20:41:33 | `fa65aa0d` | 2.26s | gemini=2.25s items_phase=0.00s items=0 | Placeholder/health-check image — no items detected, items_phase 0 by design |
+| 190 | `identify` | 2026-07-07 20:40:49 | `01e69734` | 42.67s | upload=0.09s lens=42.58s gemini=2.63s shopping=0.00s hedge=True timed_out=False quota=False | Lens answered mid-hedge — Gemini ran but Shopping was never needed |
+| 189 | `identify` | 2026-07-07 20:40:16 | `1462f5ff` | 10.61s | upload=0.08s lens=10.52s gemini=0.00s shopping=0.00s hedge=False timed_out=False quota=False | Fast path — Lens answered within the hedge window (LENS_HEDGE_DELAY_SECONDS, default 25s), Gemini never touched |
+| 188 | `analyze/stream` | 2026-07-07 20:39:58 | `6137dc79` | 4.60s | gemini=4.60s items_phase=0.00s items=0 | Placeholder/health-check image — no items detected, items_phase 0 by design |
+| 187 | `analyze/stream` | 2026-07-07 20:39:44 | `c56757ed` | 3.27s | gemini=3.27s items_phase=0.00s items=0 | Placeholder/health-check image — no items detected, items_phase 0 by design |
+| 186 | `analyze/stream` | 2026-07-07 20:39:29 | `6cef4857` | 3.38s | gemini=3.38s items_phase=0.00s items=0 | Placeholder/health-check image — no items detected, items_phase 0 by design |
+| 185 | `identify` | 2026-07-07 20:37:50 | `acbdbe2b` | 6.80s | upload=0.13s lens=6.66s gemini=0.00s shopping=0.00s hedge=False timed_out=False quota=False | Fast path — Lens answered within the hedge window (LENS_HEDGE_DELAY_SECONDS, default 25s), Gemini never touched |
+| 184 | `analyze/stream` | 2026-07-07 20:37:14 | `4406abce` | 32.17s | gemini=12.25s items_phase=19.91s items=2 | Two items detected — items_phase covers concurrent Lens/Shopping search for both |
+| 183 | `identify` | 2026-07-07 20:36:21 | `3b946ff8` | 17.13s | upload=0.15s lens=16.98s gemini=0.00s shopping=0.00s hedge=False timed_out=False quota=False | Fast path — Lens answered within the hedge window (LENS_HEDGE_DELAY_SECONDS, default 25s), Gemini never touched |
+| 182 | `analyze/stream` | 2026-07-07 20:32:54 | `3d9a8d76` | 23.88s | gemini=8.13s items_phase=15.75s items=2 | Two items detected — items_phase covers concurrent Lens/Shopping search for both |
+| 181 | `analyze/stream` | 2026-07-07 20:29:23 | `06812dbb` | 23.07s | gemini=9.35s items_phase=13.71s items=1 | One item detected — items_phase covers the Lens/Shopping search for it |
+| 180 | `identify` | 2026-07-07 20:25:34 | `5a6075f4` | 40.65s | upload=0.24s lens=40.27s gemini=4.93s shopping=0.00s hedge=True timed_out=False quota=False | Lens answered mid-hedge — Gemini ran but Shopping was never needed |
+| 179 | `identify` | 2026-07-06 12:17:28 | `96d84237` | 46.61s | upload=0.13s lens=46.48s gemini=3.46s shopping=0.00s hedge=True timed_out=False quota=False | Lens answered mid-hedge — Gemini ran but Shopping was never needed |
+| 178 | `analyze/stream` | 2026-07-06 12:13:54 | `6c0f6f1a` | 101.70s | gemini=32.92s items_phase=68.34s items=2 | Two items detected — items_phase covers concurrent Lens/Shopping search for both — new max for this endpoint |
 | 177 | `analyze` | 2026-07-05 20:25:43 | `4bc0932e` | 7.85s | gemini=7.19s items_phase=0.0s items=0 | Placeholder smoke-test image — no items to search, by design |
 | 176 | `identify` | 2026-07-05 20:25:22 | `fd414190` | 16.85s | upload=0.16s lens=16.69s gemini=0.00s shopping=0.00s hedge=False timed_out=False quota=False | Fast path — Lens answered within the hedge window (LENS_HEDGE_DELAY_SECONDS, default 25s), Gemini never touched |
 | 175 | `analyze/stream` | 2026-07-05 20:25:05 | `cc86b71f` | 9.24s | gemini=8.57s items_phase=0.0s items=0 | Placeholder/health-check image — no items detected, items_phase 0 by design |

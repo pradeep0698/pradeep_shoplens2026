@@ -11,6 +11,7 @@ enum AnalyzerErrorCode {
   geminiAuthError,
   geminiInvalidInput,
   geminiError,
+  upstreamError,
   internalError,
   requestError,
   networkTimeout,
@@ -27,6 +28,7 @@ enum AnalyzerErrorCode {
         'GEMINI_AUTH_ERROR'     => AnalyzerErrorCode.geminiAuthError,
         'GEMINI_INVALID_INPUT'  => AnalyzerErrorCode.geminiInvalidInput,
         'GEMINI_ERROR'          => AnalyzerErrorCode.geminiError,
+        'UPSTREAM_ERROR'        => AnalyzerErrorCode.upstreamError,
         'INTERNAL_ERROR'        => AnalyzerErrorCode.internalError,
         'REQUEST_ERROR'         => AnalyzerErrorCode.requestError,
         _                       => AnalyzerErrorCode.unknown,
@@ -82,6 +84,9 @@ class AnalyzerException implements Exception {
         AnalyzerErrorCode.geminiUnavailable   => 'The AI service is temporarily unavailable — please try again shortly.',
         AnalyzerErrorCode.geminiTimeout       => 'That took too long to process — please try again.',
         AnalyzerErrorCode.geminiAuthError     => 'The AI service is misconfigured — please contact support.',
+        AnalyzerErrorCode.geminiInvalidInput  => "That image couldn't be processed — please try a different photo.",
+        AnalyzerErrorCode.geminiError         => 'The AI service hit an error — please try again.',
+        AnalyzerErrorCode.upstreamError       => 'The AI service is temporarily unavailable — please try again shortly.',
         AnalyzerErrorCode.imageFetchFailed    => 'Could not load that image — please try a different one.',
         AnalyzerErrorCode.imageDecodeFailed   => "That image couldn't be read — please try a different photo.",
         AnalyzerErrorCode.networkTimeout      => message,
@@ -94,6 +99,8 @@ class AnalyzerException implements Exception {
         AnalyzerErrorCode.geminiQuotaExceeded ||
         AnalyzerErrorCode.geminiUnavailable ||
         AnalyzerErrorCode.geminiTimeout ||
+        AnalyzerErrorCode.geminiError ||
+        AnalyzerErrorCode.upstreamError ||
         AnalyzerErrorCode.networkTimeout ||
         AnalyzerErrorCode.networkError =>
           true,

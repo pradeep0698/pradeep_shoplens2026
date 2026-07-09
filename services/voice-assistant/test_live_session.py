@@ -568,11 +568,13 @@ async def test_dispatch_record_preference_accumulates_and_dedupes_across_calls()
     await _dispatch_tool_call("record_preference", {"shopping_categories": ["Clothing"], "preference_terms": ["nike", "Adidas"]}, session)
 
     assert session.latest_patch["shopping_categories"] == ["Clothing"]
-    # First call had no category, so "Nike" landed in the general bucket;
-    # the second call's terms land in Clothing instead — "nike" is only
-    # deduped case-insensitively against terms already in the SAME bucket, so
-    # it appears in both (matching the call-time category each was recorded under).
-    assert session.latest_patch["preference_terms"] == {"_general": ["Nike"], "Clothing": ["nike", "Adidas"]}
+    # First call had no category, so "Nike" landed in the general bucket.
+    # The second call's "nike" is the same term (case-insensitive) already
+    # recorded in a different bucket, so it's NOT also duplicated into
+    # Clothing — only the genuinely new "Adidas" lands there (see
+    # _terms_used_in_other_buckets: a term recorded under one bucket never
+    # spills into another).
+    assert session.latest_patch["preference_terms"] == {"_general": ["Nike"], "Clothing": ["Adidas"]}
 
 
 @pytest.mark.asyncio
@@ -855,6 +857,57 @@ def test_apply_record_preference_merges_into_latest_patch():
     assert result["status"] == "recorded"
     assert result["patch"] == session.latest_patch
     assert session.latest_patch["preference_terms"] == {"Clothing": ["Nike"]}
+
+
+def test_apply_record_preference_does_not_duplicate_a_term_into_a_new_category():
+    """Regression guard: a brand recorded under one category earlier in the
+    conversation must not also get tagged onto a different category later —
+    e.g. "I like Adidas and Nike" under Clothing, then moving on to
+    Electronics, must never also attribute Adidas/Nike to Electronics (the
+    reported real-world bug this guards against)."""
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+
+    apply_record_preference(
+        session, {"shopping_categories": ["Clothing"], "preference_terms": ["Adidas", "Nike"]}
+    )
+    apply_record_preference(
+        session, {"shopping_categories": ["Electronics"], "preference_terms": ["Adidas", "Nike", "Apple", "LG"]}
+    )
+
+    assert session.latest_patch["preference_terms"] == {
+        "Clothing": ["Adidas", "Nike"],
+        "Electronics": ["Apple", "LG"],
+    }
+
+
+def test_apply_record_preference_allows_same_call_multi_category_attribution():
+    """A single call naming multiple categories together for the same brand
+    (e.g. "Nike, for both my sneakers and my gym clothes") is a genuine
+    multi-category preference, not a stale restatement — it must still land
+    in every category named in THAT call."""
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+
+    apply_record_preference(
+        session,
+        {"shopping_categories": ["Clothing", "Sports & Outdoors"], "preference_terms": ["Nike"]},
+    )
+
+    assert session.latest_patch["preference_terms"] == {
+        "Clothing": ["Nike"],
+        "Sports & Outdoors": ["Nike"],
+    }
+
+
+def test_apply_record_preference_does_not_duplicate_ignore_terms_across_categories():
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+
+    apply_record_preference(session, {"shopping_categories": ["Clothing"], "ignore_terms": ["polyester"]})
+    apply_record_preference(session, {"shopping_categories": ["Home Decor"], "ignore_terms": ["polyester", "plastic"]})
+
+    assert session.latest_patch["ignore_terms"] == {
+        "Clothing": ["polyester"],
+        "Home Decor": ["plastic"],
+    }
 
 
 def test_apply_ready_to_finalize_packages_existing_latest_patch():

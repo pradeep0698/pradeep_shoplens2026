@@ -173,7 +173,12 @@ SYSTEM_PROMPT_TEMPLATE = (
     "record_preference call must include shopping_categories set to whichever "
     "category the preference or exclusion you're recording belongs to, even "
     "if you already stated that category in an earlier call — never omit it "
-    "just because it hasn't changed since last time. Trust your "
+    "just because it hasn't changed since last time. Only include the "
+    "category or categories that this specific new preference or exclusion "
+    "actually belongs to — never carry over a category from an earlier, "
+    "different topic just because it was mentioned before, and never call "
+    "record_preference again just to restate something you already recorded; "
+    "call it only for genuinely new information. Trust your "
     "own understanding of their speech over the caption shown on screen, "
     "which can sometimes be wrong even when you understood correctly — never "
     "read the caption back, just record what you actually heard. Never "
@@ -1024,6 +1029,19 @@ def _bucket_keys_for_call(categories: list[str], fallback_categories: list[str] 
     return categories or fallback_categories or [profile_store.GENERAL_BUCKET]
 
 
+def _terms_used_in_other_buckets(categorized: dict[str, list[str]], bucket: str) -> set[str]:
+    """Case-insensitive set of terms already recorded under any bucket OTHER
+    than [bucket] — mirrors merge_categorized's "a term recorded under one
+    category never spills into another's bucket" invariant, which the live
+    in-session accumulation below didn't previously enforce."""
+    return {
+        term.lower()
+        for other_bucket, terms in categorized.items()
+        if other_bucket != bucket
+        for term in terms
+    }
+
+
 def apply_record_preference(session: SessionState, args: dict) -> dict:
     # Uses Gemini's own real-time audio understanding, not the separately
     # transcribed caption — see RECORD_PREFERENCE's description. Same
@@ -1036,15 +1054,34 @@ def apply_record_preference(session: SessionState, args: dict) -> dict:
     buckets = _bucket_keys_for_call(categories, session.last_categories)
     new_preferences = [str(t) for t in (args.get("preference_terms") or [])]
     new_ignores = [str(t) for t in (args.get("ignore_terms") or [])]
+
+    # Snapshotted once, before this call's own writes below — a brand can
+    # legitimately apply to more than one category in a single call (e.g.
+    # "Nike" for both Clothing and Sports & Outdoors named together), so terms
+    # written by THIS call must still be allowed into every one of its own
+    # buckets. What this guards against is a term already attributed to a
+    # DIFFERENT category from an earlier, separate call (or a stale
+    # last_categories fallback) getting duplicated into a new one now —
+    # e.g. recording "Nike"/"Adidas" under Clothing, then later moving on to
+    # Electronics, should never also tag Nike/Adidas onto Electronics.
+    preferences_before = dict(session.latest_patch["preference_terms"])
+    ignores_before = dict(session.latest_patch["ignore_terms"])
+
     for bucket in buckets:
         if new_preferences:
-            session.latest_patch["preference_terms"][bucket] = profile_store._dedup_case_insensitive(
-                session.latest_patch["preference_terms"].get(bucket, []), new_preferences
-            )
+            used_elsewhere = _terms_used_in_other_buckets(preferences_before, bucket)
+            filtered = [t for t in new_preferences if t.lower() not in used_elsewhere]
+            if filtered:
+                session.latest_patch["preference_terms"][bucket] = profile_store._dedup_case_insensitive(
+                    session.latest_patch["preference_terms"].get(bucket, []), filtered
+                )
         if new_ignores:
-            session.latest_patch["ignore_terms"][bucket] = profile_store._dedup_case_insensitive(
-                session.latest_patch["ignore_terms"].get(bucket, []), new_ignores
-            )
+            used_elsewhere = _terms_used_in_other_buckets(ignores_before, bucket)
+            filtered = [t for t in new_ignores if t.lower() not in used_elsewhere]
+            if filtered:
+                session.latest_patch["ignore_terms"][bucket] = profile_store._dedup_case_insensitive(
+                    session.latest_patch["ignore_terms"].get(bucket, []), filtered
+                )
 
     normalized = profile_store.normalize_reviewed_patch(session.latest_patch)
     session.latest_patch = {

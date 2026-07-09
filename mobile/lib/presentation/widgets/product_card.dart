@@ -19,14 +19,20 @@ class ProductCard extends StatelessWidget {
     super.key,
     required this.product,
     required this.shoppingCategories,
+    this.preferenceTerms = const [],
   });
 
   final Product      product;
   final List<String> shoppingCategories;
+  // Saved brand/style/material terms (e.g. "Nike", "Apple") — a product
+  // matching one of these is "Preferred" even if its category isn't one the
+  // user follows, or its category field is missing/unset.
+  final List<String> preferenceTerms;
 
   @override
   Widget build(BuildContext context) {
-    final preferred = isPreferred(product, shoppingCategories);
+    final preferred = isPreferred(product, shoppingCategories) ||
+        matchesPreferenceTerms(product, preferenceTerms);
     final hasBuyLink = product.purchaseUrl != null && product.purchaseUrl!.isNotEmpty;
 
     return Container(

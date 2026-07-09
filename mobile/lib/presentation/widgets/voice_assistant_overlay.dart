@@ -377,6 +377,7 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> w
               _PinnedSearchSection(
                 searchResults: state.searchResults,
                 shoppingCategories: state.patch.shoppingCategories,
+                preferenceTerms: state.patch.preferenceTerms,
               ),
             const SizedBox(height: 8),
           ],
@@ -743,10 +744,15 @@ class _PreferencePreview extends StatelessWidget {
 /// a later, successful one. [searchResults] must already be newest-first
 /// (see VoiceAssistantNotifier._handleControlFrame's insert-at-front logic).
 class _PinnedSearchSection extends StatefulWidget {
-  const _PinnedSearchSection({required this.searchResults, required this.shoppingCategories});
+  const _PinnedSearchSection({
+    required this.searchResults,
+    required this.shoppingCategories,
+    this.preferenceTerms = const [],
+  });
 
   final List<VoiceSearchResult> searchResults;
   final List<String> shoppingCategories;
+  final List<String> preferenceTerms;
 
   @override
   State<_PinnedSearchSection> createState() => _PinnedSearchSectionState();
@@ -828,7 +834,11 @@ class _PinnedSearchSectionState extends State<_PinnedSearchSection> {
               )
             else
               ...result.products.map(
-                (p) => ProductCard(product: p, shoppingCategories: widget.shoppingCategories),
+                (p) => ProductCard(
+                  product: p,
+                  shoppingCategories: widget.shoppingCategories,
+                  preferenceTerms: widget.preferenceTerms,
+                ),
               ),
           ],
         ),

@@ -36,6 +36,24 @@ void main() {
     });
   });
 
+  group('matchesPreferenceTerms', () {
+    test('matches a brand term against the product name case-insensitively', () {
+      final product = _product(name: 'Nike Air Max Sneakers', category: 'Clothing');
+      expect(matchesPreferenceTerms(product, ['nike']), isTrue);
+      expect(matchesPreferenceTerms(product, ['Adidas']), isFalse);
+    });
+
+    test('matches against seller as well as name', () {
+      final product = _product(name: 'Wireless Earbuds', seller: 'Apple Store');
+      expect(matchesPreferenceTerms(product, ['Apple']), isTrue);
+    });
+
+    test('returns false when preferenceTerms is empty', () {
+      final product = _product(name: 'Nike Air Max Sneakers');
+      expect(matchesPreferenceTerms(product, const []), isFalse);
+    });
+  });
+
   group('rankProducts — preferenceTerms boost', () {
     test('a product matching a preferenceTerms word ranks above a non-matching '
         'product within the same category bucket', () {

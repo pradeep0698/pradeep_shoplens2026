@@ -29,7 +29,12 @@ bool isPreferred(Product product, List<String> shoppingCategories) {
   return false;
 }
 
-bool _matchesPreferenceTerms(Product product, List<String> preferenceTerms) {
+/// Free-text style/brand/material words (e.g. "minimalist", "Nike") don't map
+/// to the 8 fixed categories, so this matches against product name and
+/// seller text directly, independent of [isPreferred]'s category logic. Also
+/// used by ProductCard to upgrade a search result's badge from "Matched" to
+/// "Preferred" when it matches one of the user's saved preference terms.
+bool matchesPreferenceTerms(Product product, List<String> preferenceTerms) {
   if (preferenceTerms.isEmpty) return false;
   final haystack = '${product.name} ${product.seller ?? ''}'.toLowerCase();
   return preferenceTerms.any((term) {
@@ -39,15 +44,13 @@ bool _matchesPreferenceTerms(Product product, List<String> preferenceTerms) {
 }
 
 /// Within [products], sinks nothing — just moves preference-term matches to
-/// the front. Free-text style/brand/material words (e.g. "minimalist", "Nike")
-/// don't map to the 8 fixed categories, so this matches against product name
-/// and seller text directly, independent of [isPreferred]'s category logic.
+/// the front.
 List<Product> _boostByPreferenceTerms(List<Product> products, List<String> preferenceTerms) {
   if (preferenceTerms.isEmpty) return products;
   final matched   = <Product>[];
   final unmatched = <Product>[];
   for (final product in products) {
-    _matchesPreferenceTerms(product, preferenceTerms)
+    matchesPreferenceTerms(product, preferenceTerms)
         ? matched.add(product)
         : unmatched.add(product);
   }

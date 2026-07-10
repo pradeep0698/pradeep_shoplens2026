@@ -183,6 +183,12 @@ void main() {
       );
     });
 
+    test('sets the reduced temperature and top_p for smoother native-audio output', () {
+      final setup = setupFor(mode: 'preferences');
+      expect(setup['generationConfig']['temperature'], kVoiceTemperature);
+      expect(setup['generationConfig']['topP'], kVoiceTopP);
+    });
+
     test('uses the supported Gemini native-audio model', () {
       final setup = setupFor(mode: 'preferences');
       expect(setup['model'], 'models/gemini-2.5-flash-native-audio-preview-12-2025');

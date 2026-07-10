@@ -1467,6 +1467,72 @@ async def test_pump_gemini_to_client_search_products_tool_call_sends_product_res
 
 
 @pytest.mark.asyncio
+async def test_pump_gemini_to_client_search_products_sends_trimmed_response_to_gemini(monkeypatch):
+    """Regression guard for a 1007 "invalid frame payload data" close observed
+    right after a voice search on the direct-connect transport: the raw
+    product list (image_url/purchase_url — sometimes large inline base64
+    data URIs from SerpAPI) must never be what's sent back to Gemini as the
+    tool's function response, even though the client-facing product_results
+    UI frame still needs the full data."""
+    # 20 results — more than the search ceiling would realistically ever
+    # return (15) — to exercise the cap itself, not just the field-stripping.
+    async def fake_search(query, max_results):
+        return [
+            {
+                "name": f"Product {i}",
+                "price": 9.99,
+                "seller": "Acme",
+                "image_url": "data:image/jpeg;base64," + ("A" * 5000),
+                "purchase_url": "https://example.com/buy",
+                "product_id": f"p{i}",
+            }
+            for i in range(20)
+        ], "google_shopping"
+
+    monkeypatch.setattr(live_session, "_search_shopping", fake_search)
+    ws = _FakeWebSocket([])
+    session = SessionState(
+        session_id="s1", uid="user-1", existing_profile={}, mode="search", assistant_turns_in_search_mode=2,
+    )
+    gemini = _FakeGeminiLiveSession([_tool_call_response("search_products", {"query": "gadgets"})])
+
+    with pytest.raises(_FakeSessionClosed):
+        await _pump_gemini_to_client(ws, gemini, session)
+
+    # UI frame keeps the full, untrimmed product list.
+    result_frames = [m for m in ws.sent_json if m.get("type") == "product_results"]
+    assert len(result_frames[0]["products"]) == 20
+    assert "image_url" in result_frames[0]["products"][0]
+
+    # What actually went to Gemini is capped at 15 and stripped of image/purchase URLs.
+    sent_response = gemini.tool_responses[0][0].response
+    assert live_session._MAX_PRODUCTS_FOR_MODEL == 15
+    assert len(sent_response["products"]) == 15
+    assert sent_response["products"][0] == {"name": "Product 0", "price": 9.99, "seller": "Acme"}
+    assert "image_url" not in sent_response["products"][0]
+    assert "purchase_url" not in sent_response["products"][0]
+
+
+def test_search_result_for_model_trims_and_caps_products():
+    result = {
+        "status": "found",
+        "query": "gadgets",
+        "provider": "google_shopping",
+        "products": [
+            {"name": f"Product {i}", "price": 1.0, "seller": "Acme", "image_url": "x" * 1000, "purchase_url": "y"}
+            for i in range(20)
+        ],
+    }
+
+    trimmed = live_session._search_result_for_model(result)
+
+    assert trimmed["status"] == "found"
+    assert trimmed["query"] == "gadgets"
+    assert len(trimmed["products"]) == 15
+    assert trimmed["products"][0] == {"name": "Product 0", "price": 1.0, "seller": "Acme"}
+
+
+@pytest.mark.asyncio
 async def test_pump_gemini_to_client_relays_a_second_turn_after_the_first_completes():
     """Regression guard: gemini_session.receive() ends after each turn_complete
     by SDK design (see _FakeGeminiLiveSession docstring) — _pump_gemini_to_client

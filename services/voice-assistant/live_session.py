@@ -937,6 +937,32 @@ async def _search_shopping(query: str, max_results: int) -> tuple[list[dict], st
         return [], "error"
 
 
+# Cap on how many products go into the function response Gemini actually
+# reads — matches _MAX_SEARCH_RESULTS_CEILING, i.e. no truncation beyond what
+# a search can return anyway; the actual payload-size fix is stripping
+# image_url/purchase_url below, not limiting the count.
+_MAX_PRODUCTS_FOR_MODEL = 15
+
+
+def _search_result_for_model(result: dict) -> dict:
+    """Trimmed view of a search_products result for Gemini's function
+    response — mirrors gemini_live_socket_client.dart's
+    searchResultForModel (the direct-connect transport's equivalent). Real
+    scraped listing data (SerpAPI) can carry image_url as a large inline
+    base64 data URI rather than a plain link, and the model has no use for
+    image/purchase URLs in a spoken conversation anyway — sending the full
+    raw list back as this tool's response risked a single message
+    large/malformed enough to break the connection. The client's
+    product_results UI frame (built separately, right below this call site)
+    still gets the full, untrimmed result."""
+    products = result.get("products") or []
+    trimmed = [
+        {"name": p.get("name", ""), "price": p.get("price", 0), "seller": p.get("seller", "")}
+        for p in products[:_MAX_PRODUCTS_FOR_MODEL]
+    ]
+    return {**result, "products": trimmed}
+
+
 async def apply_search_products(session: SessionState, query: str, category: str | None = None) -> dict:
     query = query.strip()
     if not query:
@@ -1384,7 +1410,7 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
                         types.FunctionResponse(
                             id=call.id,
                             name=call.name,
-                            response=result,
+                            response=_search_result_for_model(result) if call.name == "search_products" else result,
                             # record_preference is NON_BLOCKING (see its
                             # FunctionDeclaration) — SILENT scheduling adds the
                             # result to context without resuming generation, so

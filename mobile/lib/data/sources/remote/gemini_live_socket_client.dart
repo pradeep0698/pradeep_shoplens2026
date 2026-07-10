@@ -49,6 +49,37 @@ Map<String, dynamic> recordPreferenceArgsWithCategoryFallback(
   return args;
 }
 
+// Cap on how many products go into the function response Gemini actually
+// reads — matches the backend's search_products result ceiling (see
+// live_session.py's _MAX_SEARCH_RESULTS_CEILING/_MAX_PRODUCTS_FOR_MODEL),
+// i.e. no truncation beyond what a search can return anyway; the actual
+// payload-size fix is stripping image_url/purchase_url below, not limiting
+// the count.
+const _kMaxProductsForModel = 15;
+
+/// Trimmed view of a search_products result for Gemini's function response —
+/// mirrors live_session.py's _search_result_for_model. Real scraped listing
+/// data (SerpAPI) can carry image_url as a large inline base64 data URI
+/// rather than a plain link, and the model has no use for image/purchase
+/// URLs in a spoken conversation anyway — sending the full raw list back as
+/// this tool's response risked a single WebSocket text frame large/malformed
+/// enough for Gemini's raw Live API to reject the connection outright (a
+/// 1007 "invalid frame payload data" close observed right after a search).
+/// The on-screen product cards still get the full, untrimmed data separately
+/// via the product_results control frame built alongside this.
+Map<String, dynamic> searchResultForModel(Map<String, dynamic> result) {
+  final products = (result['products'] as List?) ?? const [];
+  final trimmed = products.take(_kMaxProductsForModel).map((p) {
+    final map = p as Map<String, dynamic>;
+    return {
+      'name': map['name'] ?? '',
+      'price': map['price'] ?? 0,
+      'seller': map['seller'] ?? '',
+    };
+  }).toList();
+  return {...result, 'products': trimmed};
+}
+
 /// Direct client -> Gemini Live WebSocket transport (native platforms only —
 /// dart:io's WebSocket.connect supports the custom auth headers ephemeral
 /// tokens require; browsers cannot set custom headers on a WS handshake, so
@@ -429,7 +460,7 @@ class GeminiLiveSocketClient implements VoiceTransport {
       functionResponses.add({
         'id': id,
         'name': name,
-        'response': result,
+        'response': name == 'search_products' ? searchResultForModel(result) : result,
         // Matches record_preference's 'behavior': 'NON_BLOCKING' in
         // gemini_live_setup_builder.dart — SILENT scheduling adds the result
         // to context without resuming generation, so it can't produce a

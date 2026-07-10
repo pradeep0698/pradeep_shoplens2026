@@ -46,6 +46,12 @@ _EXTRACTION_MODEL = os.environ.get("EXTRACTION_MODEL", "gemini-2.5-flash")
 # Aoede, Leda, Orus, Zephyr) — Puck is also Gemini Live's own default, but set
 # it explicitly so the choice is intentional and swappable via env var alone.
 _VOICE_NAME = os.environ.get("VOICE_NAME", "Puck")
+# Lower than the native-audio model's own default (close to 1.0) — this model
+# generates audio tokens directly rather than text-to-speech over a separate
+# vocoder, so sampling randomness affects the audio waveform itself, not just
+# word choice; reducing it is an experiment to smooth out choppy/garbled audio.
+_VOICE_TEMPERATURE = float(os.environ.get("VOICE_TEMPERATURE", "0.7"))
+_VOICE_TOP_P = float(os.environ.get("VOICE_TOP_P", "0.9"))
 # Pure cost/runaway-session backstop now — decoupled from the nudge/auto-save
 # logic below, which is driven by genuine inactivity instead, so a real,
 # actively-engaged conversation should essentially never hit this.
@@ -624,6 +630,8 @@ def _live_config(
 ) -> types.LiveConnectConfig:
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
+        temperature=_VOICE_TEMPERATURE,
+        top_p=_VOICE_TOP_P,
         tools=_tools_for_mode(mode),
         system_instruction=types.Content(
             parts=[types.Part(text=_system_prompt(existing_profile, mode, language, resume_transcript))]

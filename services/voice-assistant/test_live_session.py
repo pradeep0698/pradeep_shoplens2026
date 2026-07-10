@@ -467,6 +467,24 @@ def test_live_config_respects_voice_name_env_override(monkeypatch):
     assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Kore"
 
 
+def test_live_config_defaults_to_reduced_temperature_and_top_p():
+    config = _live_config(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
+    )
+    assert config.temperature == 0.7
+    assert config.top_p == 0.9
+
+
+def test_live_config_respects_temperature_and_top_p_env_overrides(monkeypatch):
+    monkeypatch.setattr(live_session, "_VOICE_TEMPERATURE", 0.4)
+    monkeypatch.setattr(live_session, "_VOICE_TOP_P", 0.85)
+    config = _live_config(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
+    )
+    assert config.temperature == 0.4
+    assert config.top_p == 0.85
+
+
 def test_live_config_disables_automatic_activity_detection():
     """Turn boundaries are now driven by the client's hold-to-talk button
     (speech_start/speech_end -> activity_start/activity_end), not Gemini's

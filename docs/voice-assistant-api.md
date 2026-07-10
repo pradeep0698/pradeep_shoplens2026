@@ -126,6 +126,8 @@ Defined in [live_session.py](../services/voice-assistant/live_session.py).
 | `VOICE_MODEL` | `gemini-live-2.5-flash-native-audio` | Gemini Live model |
 | `EXTRACTION_MODEL` | `gemini-2.5-flash` | cheap text model for structured preference extraction |
 | `VOICE_NAME` | `Puck` | one of Gemini Live's 8 prebuilt voices |
+| `VOICE_TEMPERATURE` | `0.7` | sampling temperature — this native-audio model generates audio tokens directly, so this affects waveform smoothness, not just word choice |
+| `VOICE_TOP_P` | `0.9` | nucleus sampling top_p, same rationale as `VOICE_TEMPERATURE` |
 | `SESSION_MAX_SECONDS` | `600` | hard session cutoff (cost/runaway backstop) |
 | `SESSION_CONTEXT_WINDOW_TOKENS` | `32000` | triggers context-window compression |
 | `INACTIVITY_NUDGE_SECONDS` | `45` | silence before the model is nudged to check in |

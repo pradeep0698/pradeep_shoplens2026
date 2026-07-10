@@ -568,11 +568,13 @@ async def test_dispatch_record_preference_accumulates_and_dedupes_across_calls()
     await _dispatch_tool_call("record_preference", {"shopping_categories": ["Clothing"], "preference_terms": ["nike", "Adidas"]}, session)
 
     assert session.latest_patch["shopping_categories"] == ["Clothing"]
-    # First call had no category, so "Nike" landed in the general bucket;
-    # the second call's terms land in Clothing instead — "nike" is only
-    # deduped case-insensitively against terms already in the SAME bucket, so
-    # it appears in both (matching the call-time category each was recorded under).
-    assert session.latest_patch["preference_terms"] == {"_general": ["Nike"], "Clothing": ["nike", "Adidas"]}
+    # First call had no category, so "Nike" landed in the general bucket.
+    # The second call's "nike" is the same term (case-insensitive) already
+    # recorded in a different bucket, so it's NOT also duplicated into
+    # Clothing — only the genuinely new "Adidas" lands there (see
+    # _terms_used_in_other_buckets: a term recorded under one bucket never
+    # spills into another).
+    assert session.latest_patch["preference_terms"] == {"_general": ["Nike"], "Clothing": ["Adidas"]}
 
 
 @pytest.mark.asyncio
@@ -855,6 +857,57 @@ def test_apply_record_preference_merges_into_latest_patch():
     assert result["status"] == "recorded"
     assert result["patch"] == session.latest_patch
     assert session.latest_patch["preference_terms"] == {"Clothing": ["Nike"]}
+
+
+def test_apply_record_preference_does_not_duplicate_a_term_into_a_new_category():
+    """Regression guard: a brand recorded under one category earlier in the
+    conversation must not also get tagged onto a different category later —
+    e.g. "I like Adidas and Nike" under Clothing, then moving on to
+    Electronics, must never also attribute Adidas/Nike to Electronics (the
+    reported real-world bug this guards against)."""
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+
+    apply_record_preference(
+        session, {"shopping_categories": ["Clothing"], "preference_terms": ["Adidas", "Nike"]}
+    )
+    apply_record_preference(
+        session, {"shopping_categories": ["Electronics"], "preference_terms": ["Adidas", "Nike", "Apple", "LG"]}
+    )
+
+    assert session.latest_patch["preference_terms"] == {
+        "Clothing": ["Adidas", "Nike"],
+        "Electronics": ["Apple", "LG"],
+    }
+
+
+def test_apply_record_preference_allows_same_call_multi_category_attribution():
+    """A single call naming multiple categories together for the same brand
+    (e.g. "Nike, for both my sneakers and my gym clothes") is a genuine
+    multi-category preference, not a stale restatement — it must still land
+    in every category named in THAT call."""
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+
+    apply_record_preference(
+        session,
+        {"shopping_categories": ["Clothing", "Sports & Outdoors"], "preference_terms": ["Nike"]},
+    )
+
+    assert session.latest_patch["preference_terms"] == {
+        "Clothing": ["Nike"],
+        "Sports & Outdoors": ["Nike"],
+    }
+
+
+def test_apply_record_preference_does_not_duplicate_ignore_terms_across_categories():
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+
+    apply_record_preference(session, {"shopping_categories": ["Clothing"], "ignore_terms": ["polyester"]})
+    apply_record_preference(session, {"shopping_categories": ["Home Decor"], "ignore_terms": ["polyester", "plastic"]})
+
+    assert session.latest_patch["ignore_terms"] == {
+        "Clothing": ["polyester"],
+        "Home Decor": ["plastic"],
+    }
 
 
 def test_apply_ready_to_finalize_packages_existing_latest_patch():
@@ -1411,6 +1464,72 @@ async def test_pump_gemini_to_client_search_products_tool_call_sends_product_res
     # search_started must arrive before product_results — it's the
     # deterministic loading-state signal that must not lag behind the result.
     assert ws.sent_json.index(started_frames[0]) < ws.sent_json.index(result_frames[0])
+
+
+@pytest.mark.asyncio
+async def test_pump_gemini_to_client_search_products_sends_trimmed_response_to_gemini(monkeypatch):
+    """Regression guard for a 1007 "invalid frame payload data" close observed
+    right after a voice search on the direct-connect transport: the raw
+    product list (image_url/purchase_url — sometimes large inline base64
+    data URIs from SerpAPI) must never be what's sent back to Gemini as the
+    tool's function response, even though the client-facing product_results
+    UI frame still needs the full data."""
+    # 20 results — more than the search ceiling would realistically ever
+    # return (15) — to exercise the cap itself, not just the field-stripping.
+    async def fake_search(query, max_results):
+        return [
+            {
+                "name": f"Product {i}",
+                "price": 9.99,
+                "seller": "Acme",
+                "image_url": "data:image/jpeg;base64," + ("A" * 5000),
+                "purchase_url": "https://example.com/buy",
+                "product_id": f"p{i}",
+            }
+            for i in range(20)
+        ], "google_shopping"
+
+    monkeypatch.setattr(live_session, "_search_shopping", fake_search)
+    ws = _FakeWebSocket([])
+    session = SessionState(
+        session_id="s1", uid="user-1", existing_profile={}, mode="search", assistant_turns_in_search_mode=2,
+    )
+    gemini = _FakeGeminiLiveSession([_tool_call_response("search_products", {"query": "gadgets"})])
+
+    with pytest.raises(_FakeSessionClosed):
+        await _pump_gemini_to_client(ws, gemini, session)
+
+    # UI frame keeps the full, untrimmed product list.
+    result_frames = [m for m in ws.sent_json if m.get("type") == "product_results"]
+    assert len(result_frames[0]["products"]) == 20
+    assert "image_url" in result_frames[0]["products"][0]
+
+    # What actually went to Gemini is capped at 15 and stripped of image/purchase URLs.
+    sent_response = gemini.tool_responses[0][0].response
+    assert live_session._MAX_PRODUCTS_FOR_MODEL == 15
+    assert len(sent_response["products"]) == 15
+    assert sent_response["products"][0] == {"name": "Product 0", "price": 9.99, "seller": "Acme"}
+    assert "image_url" not in sent_response["products"][0]
+    assert "purchase_url" not in sent_response["products"][0]
+
+
+def test_search_result_for_model_trims_and_caps_products():
+    result = {
+        "status": "found",
+        "query": "gadgets",
+        "provider": "google_shopping",
+        "products": [
+            {"name": f"Product {i}", "price": 1.0, "seller": "Acme", "image_url": "x" * 1000, "purchase_url": "y"}
+            for i in range(20)
+        ],
+    }
+
+    trimmed = live_session._search_result_for_model(result)
+
+    assert trimmed["status"] == "found"
+    assert trimmed["query"] == "gadgets"
+    assert len(trimmed["products"]) == 15
+    assert trimmed["products"][0] == {"name": "Product 0", "price": 1.0, "seller": "Acme"}
 
 
 @pytest.mark.asyncio

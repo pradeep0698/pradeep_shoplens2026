@@ -173,7 +173,12 @@ SYSTEM_PROMPT_TEMPLATE = (
     "record_preference call must include shopping_categories set to whichever "
     "category the preference or exclusion you're recording belongs to, even "
     "if you already stated that category in an earlier call — never omit it "
-    "just because it hasn't changed since last time. Trust your "
+    "just because it hasn't changed since last time. Only include the "
+    "category or categories that this specific new preference or exclusion "
+    "actually belongs to — never carry over a category from an earlier, "
+    "different topic just because it was mentioned before, and never call "
+    "record_preference again just to restate something you already recorded; "
+    "call it only for genuinely new information. Trust your "
     "own understanding of their speech over the caption shown on screen, "
     "which can sometimes be wrong even when you understood correctly — never "
     "read the caption back, just record what you actually heard. Never "
@@ -932,6 +937,32 @@ async def _search_shopping(query: str, max_results: int) -> tuple[list[dict], st
         return [], "error"
 
 
+# Cap on how many products go into the function response Gemini actually
+# reads — matches _MAX_SEARCH_RESULTS_CEILING, i.e. no truncation beyond what
+# a search can return anyway; the actual payload-size fix is stripping
+# image_url/purchase_url below, not limiting the count.
+_MAX_PRODUCTS_FOR_MODEL = 15
+
+
+def _search_result_for_model(result: dict) -> dict:
+    """Trimmed view of a search_products result for Gemini's function
+    response — mirrors gemini_live_socket_client.dart's
+    searchResultForModel (the direct-connect transport's equivalent). Real
+    scraped listing data (SerpAPI) can carry image_url as a large inline
+    base64 data URI rather than a plain link, and the model has no use for
+    image/purchase URLs in a spoken conversation anyway — sending the full
+    raw list back as this tool's response risked a single message
+    large/malformed enough to break the connection. The client's
+    product_results UI frame (built separately, right below this call site)
+    still gets the full, untrimmed result."""
+    products = result.get("products") or []
+    trimmed = [
+        {"name": p.get("name", ""), "price": p.get("price", 0), "seller": p.get("seller", "")}
+        for p in products[:_MAX_PRODUCTS_FOR_MODEL]
+    ]
+    return {**result, "products": trimmed}
+
+
 async def apply_search_products(session: SessionState, query: str, category: str | None = None) -> dict:
     query = query.strip()
     if not query:
@@ -1024,6 +1055,19 @@ def _bucket_keys_for_call(categories: list[str], fallback_categories: list[str] 
     return categories or fallback_categories or [profile_store.GENERAL_BUCKET]
 
 
+def _terms_used_in_other_buckets(categorized: dict[str, list[str]], bucket: str) -> set[str]:
+    """Case-insensitive set of terms already recorded under any bucket OTHER
+    than [bucket] — mirrors merge_categorized's "a term recorded under one
+    category never spills into another's bucket" invariant, which the live
+    in-session accumulation below didn't previously enforce."""
+    return {
+        term.lower()
+        for other_bucket, terms in categorized.items()
+        if other_bucket != bucket
+        for term in terms
+    }
+
+
 def apply_record_preference(session: SessionState, args: dict) -> dict:
     # Uses Gemini's own real-time audio understanding, not the separately
     # transcribed caption — see RECORD_PREFERENCE's description. Same
@@ -1036,15 +1080,34 @@ def apply_record_preference(session: SessionState, args: dict) -> dict:
     buckets = _bucket_keys_for_call(categories, session.last_categories)
     new_preferences = [str(t) for t in (args.get("preference_terms") or [])]
     new_ignores = [str(t) for t in (args.get("ignore_terms") or [])]
+
+    # Snapshotted once, before this call's own writes below — a brand can
+    # legitimately apply to more than one category in a single call (e.g.
+    # "Nike" for both Clothing and Sports & Outdoors named together), so terms
+    # written by THIS call must still be allowed into every one of its own
+    # buckets. What this guards against is a term already attributed to a
+    # DIFFERENT category from an earlier, separate call (or a stale
+    # last_categories fallback) getting duplicated into a new one now —
+    # e.g. recording "Nike"/"Adidas" under Clothing, then later moving on to
+    # Electronics, should never also tag Nike/Adidas onto Electronics.
+    preferences_before = dict(session.latest_patch["preference_terms"])
+    ignores_before = dict(session.latest_patch["ignore_terms"])
+
     for bucket in buckets:
         if new_preferences:
-            session.latest_patch["preference_terms"][bucket] = profile_store._dedup_case_insensitive(
-                session.latest_patch["preference_terms"].get(bucket, []), new_preferences
-            )
+            used_elsewhere = _terms_used_in_other_buckets(preferences_before, bucket)
+            filtered = [t for t in new_preferences if t.lower() not in used_elsewhere]
+            if filtered:
+                session.latest_patch["preference_terms"][bucket] = profile_store._dedup_case_insensitive(
+                    session.latest_patch["preference_terms"].get(bucket, []), filtered
+                )
         if new_ignores:
-            session.latest_patch["ignore_terms"][bucket] = profile_store._dedup_case_insensitive(
-                session.latest_patch["ignore_terms"].get(bucket, []), new_ignores
-            )
+            used_elsewhere = _terms_used_in_other_buckets(ignores_before, bucket)
+            filtered = [t for t in new_ignores if t.lower() not in used_elsewhere]
+            if filtered:
+                session.latest_patch["ignore_terms"][bucket] = profile_store._dedup_case_insensitive(
+                    session.latest_patch["ignore_terms"].get(bucket, []), filtered
+                )
 
     normalized = profile_store.normalize_reviewed_patch(session.latest_patch)
     session.latest_patch = {
@@ -1347,7 +1410,7 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
                         types.FunctionResponse(
                             id=call.id,
                             name=call.name,
-                            response=result,
+                            response=_search_result_for_model(result) if call.name == "search_products" else result,
                             # record_preference is NON_BLOCKING (see its
                             # FunctionDeclaration) — SILENT scheduling adds the
                             # result to context without resuming generation, so

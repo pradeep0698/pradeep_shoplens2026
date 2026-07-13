@@ -20,13 +20,15 @@ import '../../models/voice_session.dart';
 const kVoiceModel = 'models/gemini-2.5-flash-native-audio-preview-12-2025';
 const kVoiceName = 'Puck';
 const kContextWindowTriggerTokens = 32000;
-// Lower than the native-audio model's own default (close to 1.0) — this model
-// generates audio tokens directly rather than text-to-speech over a separate
-// vocoder, so sampling randomness affects the audio waveform itself, not just
-// word choice; reducing it is an experiment to smooth out choppy/garbled audio.
-// Must match live_session.py's VOICE_TEMPERATURE/VOICE_TOP_P defaults.
-const kVoiceTemperature = 0.7;
-const kVoiceTopP = 0.9;
+// Real-device testing with a reduced temperature/top_p produced NEW
+// static/glitch artifacts in the audio itself — this model generates audio
+// tokens directly rather than text-to-speech over a separate vocoder, so
+// over-constraining nucleus/temperature sampling over that discrete
+// audio-token vocabulary appears to cut off valid continuations rather than
+// smoothing anything out. temperature/top_p are left at the API default
+// (omitted below); top_k is a gentler alternative knob for the same
+// "reduce randomness" goal. Must match live_session.py's VOICE_TOP_K default.
+const kVoiceTopK = 40;
 
 // Must match live_session.py's VOICE_CATEGORIES and
 // profile_form.dart's checkboxes — a 3-way sync point with no shared
@@ -235,8 +237,7 @@ Map<String, dynamic> buildSetupJson({
     'model': kVoiceModel,
     'generationConfig': {
       'responseModalities': ['AUDIO'],
-      'temperature': kVoiceTemperature,
-      'topP': kVoiceTopP,
+      'topK': kVoiceTopK,
       'speechConfig': {
         'voiceConfig': {
           'prebuiltVoiceConfig': {'voiceName': kVoiceName},

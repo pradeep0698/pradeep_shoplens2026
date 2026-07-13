@@ -46,12 +46,18 @@ _EXTRACTION_MODEL = os.environ.get("EXTRACTION_MODEL", "gemini-2.5-flash")
 # Aoede, Leda, Orus, Zephyr) — Puck is also Gemini Live's own default, but set
 # it explicitly so the choice is intentional and swappable via env var alone.
 _VOICE_NAME = os.environ.get("VOICE_NAME", "Puck")
-# Lower than the native-audio model's own default (close to 1.0) — this model
+# Real-device testing with temperature 0.7 / top_p 0.9 (a deliberate
+# reduction from the native-audio model's own default, close to 1.0)
+# produced NEW static/glitch artifacts in the audio itself — this model
 # generates audio tokens directly rather than text-to-speech over a separate
-# vocoder, so sampling randomness affects the audio waveform itself, not just
-# word choice; reducing it is an experiment to smooth out choppy/garbled audio.
-_VOICE_TEMPERATURE = float(os.environ.get("VOICE_TEMPERATURE", "0.7"))
-_VOICE_TOP_P = float(os.environ.get("VOICE_TOP_P", "0.9"))
+# vocoder, so over-constraining nucleus/temperature sampling over that
+# discrete audio-token vocabulary appears to cut off valid continuations
+# rather than smoothing anything out. Left unset (None) here so the API's
+# own default applies unless explicitly overridden via env var; top_k below
+# is a gentler alternative knob for the same "reduce randomness" goal.
+_VOICE_TEMPERATURE = float(os.environ["VOICE_TEMPERATURE"]) if os.environ.get("VOICE_TEMPERATURE") else None
+_VOICE_TOP_P = float(os.environ["VOICE_TOP_P"]) if os.environ.get("VOICE_TOP_P") else None
+_VOICE_TOP_K = float(os.environ.get("VOICE_TOP_K", "40"))
 # Pure cost/runaway-session backstop now — decoupled from the nudge/auto-save
 # logic below, which is driven by genuine inactivity instead, so a real,
 # actively-engaged conversation should essentially never hit this.
@@ -632,6 +638,7 @@ def _live_config(
         response_modalities=["AUDIO"],
         temperature=_VOICE_TEMPERATURE,
         top_p=_VOICE_TOP_P,
+        top_k=_VOICE_TOP_K,
         tools=_tools_for_mode(mode),
         system_instruction=types.Content(
             parts=[types.Part(text=_system_prompt(existing_profile, mode, language, resume_transcript))]

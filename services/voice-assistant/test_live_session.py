@@ -467,12 +467,16 @@ def test_live_config_respects_voice_name_env_override(monkeypatch):
     assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Kore"
 
 
-def test_live_config_defaults_to_reduced_temperature_and_top_p():
+def test_live_config_leaves_temperature_and_top_p_at_the_api_default_unless_overridden():
+    # Real-device testing with an explicit temperature/top_p reduction
+    # produced new static/glitch artifacts in the audio itself, so these are
+    # left unset (None, i.e. the API's own default) unless an operator
+    # explicitly opts in via env var.
     config = _live_config(
         {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
     )
-    assert config.temperature == 0.7
-    assert config.top_p == 0.9
+    assert config.temperature is None
+    assert config.top_p is None
 
 
 def test_live_config_respects_temperature_and_top_p_env_overrides(monkeypatch):
@@ -483,6 +487,21 @@ def test_live_config_respects_temperature_and_top_p_env_overrides(monkeypatch):
     )
     assert config.temperature == 0.4
     assert config.top_p == 0.85
+
+
+def test_live_config_defaults_top_k_to_40():
+    config = _live_config(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
+    )
+    assert config.top_k == 40
+
+
+def test_live_config_respects_top_k_env_override(monkeypatch):
+    monkeypatch.setattr(live_session, "_VOICE_TOP_K", 20.0)
+    config = _live_config(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
+    )
+    assert config.top_k == 20
 
 
 def test_live_config_disables_automatic_activity_detection():

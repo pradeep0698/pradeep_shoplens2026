@@ -183,10 +183,11 @@ void main() {
       );
     });
 
-    test('sets the reduced temperature and top_p for smoother native-audio output', () {
+    test('sets top_k but leaves temperature/top_p at the API default', () {
       final setup = setupFor(mode: 'preferences');
-      expect(setup['generationConfig']['temperature'], kVoiceTemperature);
-      expect(setup['generationConfig']['topP'], kVoiceTopP);
+      expect(setup['generationConfig']['topK'], kVoiceTopK);
+      expect(setup['generationConfig'].containsKey('temperature'), isFalse);
+      expect(setup['generationConfig'].containsKey('topP'), isFalse);
     });
 
     test('uses the supported Gemini native-audio model', () {

@@ -590,19 +590,19 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       case VoiceControlFrame(json: final json):
         _handleControlFrame(json);
       case VoiceSocketClosed(:final code, :final reason):
-        // Surface the underlying close code/reason when the transport has
-        // one (dart:io's WebSocket exposes these once closed) — the
-        // direct-connect transport in particular bypasses the backend
-        // entirely, so this in-app message is often the only diagnostic
-        // signal available at all, without a device console attached.
-        final detail = reason != null && reason.isNotEmpty
-            ? ' (${code != null ? '$code: ' : ''}$reason)'
-            : '';
+        // The underlying close code/reason (e.g. dart:io's WebSocket 1007)
+        // is only useful as a diagnostic signal — the direct-connect
+        // transport in particular bypasses the backend entirely, so
+        // _diagEvent below is often the only place this detail is captured
+        // at all, without a device console attached. It's deliberately kept
+        // out of the user-facing message: a raw close code reads as an
+        // alarming, unactionable error, when reconnecting is all the user
+        // actually needs to do.
         _diagEvent('socket_closed', {'code': code, 'reason': reason});
         _flushDiagnostics();
         state = state.copyWith(
           status: VoiceStatus.error,
-          errorMessage: 'Connection lost — tap Reconnect to keep talking.$detail',
+          errorMessage: "Hmm, something interrupted our conversation — press Reconnect to continue your chat.",
           isHandsFreeActive: false,
           isRecording: false,
         );
@@ -768,7 +768,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
     _flushDiagnostics();
     state = state.copyWith(
       status: VoiceStatus.error,
-      errorMessage: _displayVoiceError(error),
+      errorMessage: "Hmm, something interrupted our conversation — press Reconnect to continue your chat.",
       isHandsFreeActive: false,
       isRecording: false,
     );

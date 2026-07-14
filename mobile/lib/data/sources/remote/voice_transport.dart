@@ -52,11 +52,15 @@ abstract class VoiceTransport {
   /// [sessionId] is always passed too since the direct-connect transport
   /// needs it to call the tool REST endpoints; the proxy transport ignores it.
   ///
-  /// [existingProfile]/[mode]/[language]/[resumeTranscript] are only consumed
-  /// by the direct-connect transport, which builds its own `setup` JSON
-  /// client-side (see gemini_live_setup_builder.dart) instead of fetching one
-  /// from the backend — the proxy transport ignores them, mirroring the
-  /// existing precedent where the direct client already ignores [wsUrl].
+  /// [existingProfile]/[mode]/[language] are unused by both transports today
+  /// (the direct-connect transport now gets its `setup` JSON, already built
+  /// from this same data, from the backend's ephemeral-token mint response —
+  /// see gemini_live_socket_client.dart) but are kept in the shared interface
+  /// in case a future transport needs to build one client-side again.
+  /// [resumeTranscript] is still consumed by the direct-connect transport
+  /// (to decide whether the post-setup greeting cue should say "welcome
+  /// back") — the proxy transport ignores it, mirroring the existing
+  /// precedent where the direct client already ignores [wsUrl].
   Future<void> connect({
     required String sessionId,
     required String wsUrl,

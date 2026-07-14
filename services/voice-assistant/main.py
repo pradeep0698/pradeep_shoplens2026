@@ -80,13 +80,26 @@ app = FastAPI(
 _CORS = {"Access-Control-Allow-Origin": "*"}
 
 
+def _resolved_live_provider_and_model() -> tuple[str, str]:
+    """Cheap, side-effect-free (no client construction) lookup of which
+    provider/model the live session will actually connect with — mirrors
+    live_session._live_connect_target's selection logic for logging/health
+    purposes only."""
+    provider = os.environ.get("VOICE_LIVE_PROVIDER", "vertex").lower()
+    if provider == "dev_api":
+        return provider, os.environ.get("VOICE_MODEL_DEV_API", "models/gemini-2.5-flash-native-audio-latest")
+    return provider, os.environ.get("VOICE_MODEL", "gemini-live-2.5-flash-native-audio")
+
+
 @app.on_event("startup")
 async def _log_startup_config() -> None:
+    provider, model = _resolved_live_provider_and_model()
     logger.info(
-        "voice-assistant starting | project_id=%s location=%s model=%s session_max_seconds=%s",
+        "voice-assistant starting | project_id=%s location=%s live_provider=%s model=%s session_max_seconds=%s",
         os.environ.get("PROJECT_ID") or "(unset)",
         os.environ.get("LOCATION", "us-central1"),
-        os.environ.get("VOICE_MODEL", "gemini-live-2.5-flash"),
+        provider,
+        model,
         _SESSION_MAX_SECONDS,
     )
 
@@ -465,7 +478,7 @@ async def mint_session_token(request: SessionTokenRequest, http_request: Request
     start = time.monotonic()
     try:
         token_data = await asyncio.to_thread(
-            mint_ephemeral_token, session.existing_profile, session.mode, session.language
+            mint_ephemeral_token, session.existing_profile, session.mode, session.language, session.transcript
         )
     except Exception as exc:
         logger.exception("token mint failed for session %s: %s", request.session_id, exc)
@@ -594,10 +607,12 @@ async def voice_stream(websocket: WebSocket, session_id: str) -> None:
     response_description="Service liveness and active Gemini model",
 )
 async def health():
+    provider, model = _resolved_live_provider_and_model()
     return {
         "status": "ok",
         "project_id_set": bool(os.environ.get("PROJECT_ID")),
-        "voice_model": os.environ.get("VOICE_MODEL", "gemini-live-2.5-flash"),
+        "voice_live_provider": provider,
+        "voice_model": model,
     }
 
 

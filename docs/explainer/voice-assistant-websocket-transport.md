@@ -30,14 +30,15 @@ production users yet.**
   the direct-connect transport keeps talking to Gemini uninterrupted for session setup — only the
   side-effect calls (saving preferences, searching products) would be affected, not the conversation
   itself.
-- **Tradeoff being made deliberately, not accidentally**: the direct path authenticates with a static
-  API key embedded in the mobile build (`ApiConstants.aiStudioApiKey`,
-  `mobile/lib/core/constants/api_constants.dart:47-52`) instead of the short-lived, config-locked
-  ephemeral token the backend already knows how to mint (`mint_ephemeral_token`,
-  `services/voice-assistant/live_session.py:654`). The code's own comment
-  (`gemini_live_socket_client.dart:33-36`) states this outright: a decompiled build exposes this key
-  with no expiry, "an accepted tradeoff" for shipping something simpler first. This is a real security
-  posture decision a stakeholder should be aware of, not a bug — see §7.
+- **Update**: the direct path originally authenticated with a static API key embedded in the mobile
+  build instead of the short-lived, config-locked ephemeral token the backend already knew how to mint
+  (`mint_ephemeral_token`, `services/voice-assistant/live_session.py`) — the code's own comment called
+  this out explicitly as "an accepted tradeoff" for shipping something simpler first. This has since
+  been fixed: `GeminiLiveSocketClient` now calls `POST /voice/session/token` and connects via the
+  token-locked WS endpoint, with no static key embedded in the mobile build at all — see §4 and §6.
+  This was done proactively, while the feature was still disabled in production, alongside a migration
+  to `gemini-3.1-flash-live-preview` (which is Developer-API-only, not available on Vertex AI) that
+  needed the same Developer-API client machinery anyway.
 - **Staged rollout, not a flip of a switch**: two independent gates (a mobile build-time flag and a
   server-side flag) mean this can be turned on gradually and killed instantly fleet-wide if it
   misbehaves in production, without an app-store release. That's a meaningful de-risking of what is
@@ -89,35 +90,33 @@ transport-specific branching anywhere in the provider; the abstraction fully abs
   instant, fleet-wide kill switch — no app release needed to shut it off.
 - Web (`voice_transport_selector_web.dart`) ignores both inputs and always returns the proxy transport.
 
-**Where audio actually goes on the direct path.** `GeminiLiveSocketClient` opens a raw WebSocket
-straight to Google's public endpoint:
+**Where audio actually goes on the direct path (updated).** `GeminiLiveSocketClient` first calls
+`POST /voice/session/token` (`VoiceApi.mintToken`) to obtain a short-lived, model/config-locked
+ephemeral auth token, then opens a WebSocket to the token-locked Gemini Live endpoint:
 ```
-wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent
+wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained?access_token={token}
 ```
-(`gemini_live_socket_client.dart:63-64`), authenticated via header `x-goog-api-key` with the static
-`aiStudioApiKey` (lines 67, 124), using `dart:io`'s `WebSocket.connect(..., headers: {...})` — the very
-capability web lacks. It builds its own session-setup JSON client-side
-(`gemini_live_setup_builder.dart`), explicitly ported from the backend's equivalent
-(`live_session.py`'s `_build_setup_json`) so a direct-connect session doesn't need a backend call to
-start at all. Tool-call *side effects* — `record_preference`, `search_products`, `ready_to_finalize` —
-still go through backend REST endpoints via `VoiceApi` (`voice_api.dart:69-94`), because Firestore
-writes and the Shopping/Amazon search must stay server-side. Only the audio/transcript/session-setup
-relay moved off the backend.
+using `dart:io`'s `WebSocket.connect(...)` — no static API key embedded in the mobile build. The
+`setup` JSON is no longer built client-side either: the mint response already carries the exact
+wire-format JSON the backend built server-side (locked to the token via `live_connect_constraints`),
+sent verbatim as the first frame. `gemini_live_setup_builder.dart` now only holds the greeting-cue
+text (a separate post-setup `realtimeInput` message, not part of `setup`) — its former
+`buildSetupJson`/`systemPrompt`/tool-schema port of `live_session.py` was deleted, since the backend
+is now the sole source of truth for session setup on both transports. Tool-call *side effects* —
+`record_preference`, `search_products`, `ready_to_finalize` — still go through backend REST endpoints
+via `VoiceApi` (`voice_api.dart`), because Firestore writes and the Shopping/Amazon search must stay
+server-side. Only the audio/transcript/session-setup relay is direct.
 
-**The backend's matching half.** `_get_dev_api_client()` (`live_session.py:597`) is a *second*,
-separate Gemini client from the one used for the proxy path (`_get_client()`, line 557, Vertex
+**The backend's matching half.** `_get_dev_api_client()` (`live_session.py`) is a *second*,
+separate Gemini client from the one used for the proxy path by default (`_get_client()`, Vertex
 AI-backed) — ephemeral-token minting (`client.auth_tokens.create`) unconditionally raises `ValueError`
 on a Vertex AI client, so a distinct Developer-API client, authenticated with `AI_STUDIO_API_KEY` and
-pinned to `api_version="v1alpha"` (tokens are experimental/v1alpha-only), had to be added
-(`live_session.py:597-609`). `mint_ephemeral_token` (line 654) and the `/voice/session/token` endpoint
-(`main.py:408-425`) implement this — **but `GeminiLiveSocketClient` never calls it.** A grep across
-`mobile/` confirms zero call sites for `VoiceApi.mintToken()`. The code's own doc comment
-(`gemini_live_socket_client.dart:29-39`) says as much: "no backend call, no ephemeral token." This
-looks like an earlier planned design (ephemeral, backend-minted, config-locked tokens) that was
-superseded mid-build by the simpler static-key approach, leaving the mint endpoint as unused
-scaffolding on the mobile side. **Worth a direct question to whoever's driving this feature**: is
-`/voice/session/token` meant to be wired up before this reaches real users, or intentionally deferred?
-Given the security tradeoff called out in §2, this isn't cosmetic.
+pinned to `api_version="v1alpha"` (tokens are experimental/v1alpha-only), was added. `mint_ephemeral_token`
+and the `/voice/session/token` endpoint (`main.py`) implement token minting for the direct-connect
+transport — **`GeminiLiveSocketClient` now calls it** (previously it didn't; see §6 for that history).
+The same Developer-API client is also reused, via `_live_connect_target()` and the `VOICE_LIVE_PROVIDER`
+env var, for the *proxy* path's own live session — needed because `gemini-3.1-flash-live-preview` is
+Developer-API-only, not available on Vertex AI at all.
 
 `_build_setup_json` also reaches into a **private** SDK module (`google.genai._live_converters`) to
 produce the exact wire format the mobile client replays — `google-genai` is pinned to exactly `2.9.0`
@@ -137,18 +136,19 @@ upgrade.
   marker and can be prefix-repeats, exact repeats, or true continuations. It checks prefix/suffix
   containment and splices past the longest overlap, falling back to plain concatenation.
 
-**Config knobs added:**
+**Config knobs (updated):**
 | Var | Where | Default | Purpose |
 |---|---|---|---|
 | `VOICE_DIRECT_CONNECT_ENABLED` | backend `.env.example` | `false` | Server-side kill switch, returned to client as `direct_connect_allowed` |
-| `AI_STUDIO_API_KEY` | backend `.env.example` + mobile dart-define | — | Developer-API key: backend uses it to mint ephemeral tokens (unused path, see above); mobile uses it directly as the static auth key |
-| `VOICE_MODEL_DEV_API` | backend `.env.example` | `models/gemini-2.5-flash-native-audio-latest` | Developer-API model id (different id format than the Vertex AI `VOICE_MODEL`) |
-| `VOICE_DIRECT_CONNECT_ENABLED` (dart-define) | mobile build | `false` | Compile-time gate, `api_constants.dart:44-45` |
+| `AI_STUDIO_API_KEY` | backend `.env.example` only | — | Developer-API key: mints ephemeral tokens for direct-connect, and powers the proxy path's own live session when `VOICE_LIVE_PROVIDER=dev_api`. No longer needed on the mobile build at all — the app only calls the backend's `mintToken()` over HTTPS |
+| `VOICE_LIVE_PROVIDER` | backend `.env.example` | `vertex` | `vertex` or `dev_api` — which client/model the proxy path's live session connects with (added for the `gemini-3.1-flash-live-preview` migration, which is Developer-API-only) |
+| `VOICE_MODEL_DEV_API` | backend `.env.example` | `models/gemini-2.5-flash-native-audio-latest` | Developer-API model id — dual-purpose: locks direct-connect tokens, and used by the proxy path when `VOICE_LIVE_PROVIDER=dev_api` |
+| `VOICE_DIRECT_CONNECT_ENABLED` (dart-define) | mobile build | `false` | Compile-time gate, `api_constants.dart` |
 
-`codemagic.yaml` now passes both `VOICE_DIRECT_CONNECT_ENABLED` and `AI_STUDIO_API_KEY` as build-time
-dart-defines for iOS/Android CI builds, with the Codemagic variable group renamed
-`firebase-cookshop` → `firebase-2026` and hard `${VAR:?ERROR}` guards that fail the build fast if
-either is missing.
+`codemagic.yaml` passes `VOICE_DIRECT_CONNECT_ENABLED` as a build-time dart-define for iOS/Android CI
+builds (Codemagic variable group `firebase-2026`). It previously also passed `AI_STUDIO_API_KEY` as a
+dart-define with a hard `${VAR:?ERROR}` guard — both were removed once the mobile client stopped using
+a static key.
 
 **A real bug fixed in this same window** (`main.py:279-284`, commit `1e5d92f`): resuming a session
 previously reset `language` to `"English"` unconditionally on every `/voice/session/start` call —
@@ -161,18 +161,19 @@ Two parallel paths, converging on the same backend for tool-call side effects an
 bookkeeping:
 
 - **Proxy path (default, live in production today):** mobile `VoiceSocketClient` → our
-  `voice-assistant` Cloud Run WebSocket (`main.py:516 voice_stream`) → `run_voice_session`
-  (`live_session.py:1475`) opens a Vertex AI Gemini Live session and pumps both directions
+  `voice-assistant` Cloud Run WebSocket (`main.py`'s `voice_stream`) → `run_voice_session`
+  (`live_session.py`) picks a client/model via `_live_connect_target()` (Vertex AI by default, or the
+  Developer API when `VOICE_LIVE_PROVIDER=dev_api`) and pumps both directions
   (`_pump_client_to_gemini`/`_pump_gemini_to_client`) → tool calls dispatch through shared `apply_*`
-  functions (`live_session.py:859-947`) → `product-matcher` for `search_products` → Firestore on
-  finalize.
+  functions → `product-matcher` for `search_products` → Firestore on finalize.
 - **Direct-connect path (built, not yet enabled for real traffic):** mobile
-  `GeminiLiveSocketClient` → straight to Google's public Gemini Live WS endpoint (Developer API,
-  static key auth) for audio/transcript/setup. Tool-call side effects still route to the same backend
-  REST endpoints (`/voice/tool/record_preference`, `/voice/tool/search_products`,
+  `GeminiLiveSocketClient` first calls `POST /voice/session/token` for an ephemeral, config-locked
+  token, then connects straight to Gemini Live's token-locked WS endpoint (Developer API) for
+  audio/transcript — no static key, no client-built setup JSON. Tool-call side effects still route to
+  the same backend REST endpoints (`/voice/tool/record_preference`, `/voice/tool/search_products`,
   `/voice/tool/ready_to_finalize`) and the same `apply_*` functions — so side-effect logic has exactly
   one implementation regardless of transport (explicit design intent per `_dispatch_tool_call`'s
-  docstring, `live_session.py:950-955`).
+  docstring).
 
 Both paths share the same in-memory `SessionRegistry` (`live_session.py:512`, no Firestore
 persistence, `SESSION_MAX_SECONDS=600s` cap, `DISCONNECT_GRACE_SECONDS=120s` for resume) and the same
@@ -185,28 +186,29 @@ flowchart TD
         SEL["createVoiceTransport()\nvoice_transport_selector_native/web.dart"]
         PROXY_C["VoiceSocketClient\n(proxy transport)"]
         DIRECT_C["GeminiLiveSocketClient\n(direct transport, native only)"]
-        SETUP["gemini_live_setup_builder.dart\nbuilds setup JSON client-side"]
+        GREET["gemini_live_setup_builder.dart\ngreeting-cue text only"]
         AGC["pcm16_agc.dart\nplayback gain smoothing"]
         MERGE["transcript_fragment_merger.dart"]
-        API["VoiceApi\nREST: record_preference,\nsearch_products, ready_to_finalize"]
+        API["VoiceApi\nREST: mintToken, record_preference,\nsearch_products, ready_to_finalize"]
     end
 
     subgraph Backend["voice-assistant service (Cloud Run)"]
-        WS["WS /voice/stream\nmain.py:516"]
-        RUN["run_voice_session\nlive_session.py:1475"]
+        WS["WS /voice/stream\nmain.py"]
+        RUN["run_voice_session\nlive_session.py"]
         PUMPI["_pump_client_to_gemini"]
         PUMPO["_pump_gemini_to_client"]
         WATCH["_watch_inactivity\nnudge 45s / close 20s"]
         DISPATCH["_dispatch_tool_call → apply_*\n(shared by both transports)"]
         TOOLREST["/voice/tool/record_preference\n/voice/tool/search_products\n/voice/tool/ready_to_finalize"]
-        MINT["/voice/session/token\nmint_ephemeral_token\n(built, unused by mobile today)"]
+        MINT["/voice/session/token\nmint_ephemeral_token"]
+        TARGET["_live_connect_target()\nVOICE_LIVE_PROVIDER switch"]
         VCLIENT["_get_client()\nVertex AI Gemini Live"]
         DCLIENT["_get_dev_api_client()\nAI Studio Developer API\napi_version=v1alpha"]
     end
 
     subgraph External["External"]
         GEMINI_VERTEX["Gemini Live\n(Vertex AI)"]
-        GEMINI_DIRECT["Gemini Live\nwss://generativelanguage.googleapis.com\n(public Developer API)"]
+        GEMINI_DIRECT["Gemini Live\nwss://generativelanguage.googleapis.com\n(public Developer API, token-locked\nfor direct-connect, plain for proxy)"]
         MATCHER["product-matcher\nPOST /search"]
         FS["Firestore\n(finalize only)"]
     end
@@ -214,14 +216,16 @@ flowchart TD
     PROV --> SEL
     SEL -->|"flag off / web"| PROXY_C
     SEL -->|"both flags on, native"| DIRECT_C
-    DIRECT_C --> SETUP
+    DIRECT_C -->|"mintToken()"| API --> MINT --> DCLIENT
+    MINT -->|"token + server-built setup"| DIRECT_C
+    DIRECT_C --> GREET
     PROXY_C -->|"WS"| WS
     WS --> RUN --> PUMPI & PUMPO
-    PUMPI --> VCLIENT --> GEMINI_VERTEX
-    GEMINI_VERTEX --> VCLIENT --> PUMPO
+    RUN --> TARGET --> VCLIENT & DCLIENT
+    VCLIENT --> GEMINI_VERTEX
+    DCLIENT --> GEMINI_DIRECT
     RUN --> WATCH
-    DIRECT_C -->|"WS, static API key"| GEMINI_DIRECT
-    DCLIENT -.->|"mints token (unused path)"| MINT
+    DIRECT_C -->|"WS, access_token= (ephemeral)"| GEMINI_DIRECT
     DIRECT_C --> API --> TOOLREST --> DISPATCH
     PUMPO --> DISPATCH
     DISPATCH -->|"search_products"| MATCHER
@@ -246,16 +250,20 @@ flowchart TD
 - **`docs/diagrams/voice-diagrams.md` is now stale** — it documents only the original single-transport,
   backend-proxied design and has zero mention of direct-connect, the two-gate flag, or ephemeral
   tokens. Anyone onboarding from that doc alone would miss this entire rework.
-- **Unverified in production**: the direct-connect endpoint itself
-  (`gemini_live_socket_client.dart:60-64`) is annotated "not yet spike-tested live — verify on first
-  real connection," and a Phase-0 spike comment in `live_session.py:75-81` says whether
-  `_TOKEN_EXPIRE_SECONDS` bounds session lifetime vs. just connection-opening is unverified against a
-  live session (blocked on an AI Studio billing issue at the time). Both flags are consistent with the
-  server kill switch defaulting to `false` — this looks like code that's built and unit-tested but not
-  yet exercised against real Gemini traffic.
-- **Ephemeral-token endpoint appears unused by mobile** (§4) — flag this explicitly to the feature
-  owner before enabling `VOICE_DIRECT_CONNECT_ENABLED` in any real environment, since it changes the
-  security posture described in §2 from "planned" to "shipped as-is."
+- **Still unverified in production**: whether `_TOKEN_EXPIRE_SECONDS` bounds the live session's total
+  duration vs. just how long the client has to open the connection is still unverified against a real
+  live session (previously blocked on an AI Studio billing issue). This must be checked before
+  `VOICE_DIRECT_CONNECT_ENABLED` is ever flipped in a real environment — if it turns out to only bound
+  the connect window, the direct-connect transport has no equivalent of the proxy path's hard
+  `SESSION_MAX_SECONDS` backstop today (the backend never sees the live session on this transport) and
+  would need a client-side hard-cutoff timer added. Same for the token-locked WS endpoint itself
+  (`BidiGenerateContentConstrained`) and `gemini-3.1-flash-live-preview` on the proxy path — both are
+  new code paths, unit-tested but not yet exercised against real Gemini traffic; both are gated (the
+  server kill switch, and `VOICE_LIVE_PROVIDER` defaulting to `vertex`) specifically so they can be
+  verified in `shoplens2026-dev` before reaching real users.
+- **Resolved**: the ephemeral-token endpoint being unused by mobile (previously flagged here) has been
+  fixed — `GeminiLiveSocketClient` now calls `POST /voice/session/token` instead of using a static key.
+  See §2 and §4 for the updated flow.
 - **Known, pre-existing drift not fixed here**: `_CLOSING_PHRASES` (`live_session.py:1206`) is
   duplicated by hand in `voice_assistant_provider.dart`'s `_isClosingPhrase` — no shared source of
   truth. A dead `if False and ...` branch also remains in `_watch_inactivity`

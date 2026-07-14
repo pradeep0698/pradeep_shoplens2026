@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import '../../../core/constants/api_constants.dart';
 import '../../models/voice_session.dart';
 import 'gemini_live_setup_builder.dart';
 import 'voice_api.dart';
@@ -81,18 +80,22 @@ Map<String, dynamic> searchResultForModel(Map<String, dynamic> result) {
 }
 
 /// Direct client -> Gemini Live WebSocket transport (native platforms only —
-/// dart:io's WebSocket.connect supports the custom auth headers ephemeral
-/// tokens require; browsers cannot set custom headers on a WS handshake, so
-/// this is never used on web — see voice_transport_selector.dart).
+/// dart:io's WebSocket.connect supports the custom auth headers/URLs
+/// ephemeral tokens require; browsers cannot set custom headers on a WS
+/// handshake, so this is never used on web — see voice_transport_selector.dart).
 ///
-/// Bypasses the backend entirely for session start: opens a WebSocket
-/// straight to Google's Gemini Live endpoint using a static AI Studio API
-/// key (ApiConstants.aiStudioApiKey) and builds its own `setup` JSON
-/// client-side (see gemini_live_setup_builder.dart) — no backend call, no
-/// ephemeral token. This trades away the ephemeral-token model's short-lived,
-/// config-locked security properties for simplicity/backend-independence; a
-/// decompiled build exposes this key with no expiry or lock, an accepted
-/// tradeoff. Tool-call side effects (record_preference, search_products,
+/// Bypasses the backend for the live audio/transcript relay only: session
+/// start calls POST /voice/session/token (VoiceApi.mintToken, see
+/// services/voice-assistant's mint_ephemeral_token/main.py's
+/// /voice/session/token) to obtain a short-lived, model/config-locked
+/// ephemeral auth token, then opens a WebSocket straight to Google's
+/// Gemini Live endpoint using that token — no static API key embedded in
+/// the mobile build. The mint response also carries the exact wire-format
+/// `setup` JSON the backend already built server-side (locked to the
+/// token via live_connect_constraints), sent verbatim as the first frame
+/// instead of being rebuilt client-side — see gemini_live_setup_builder.dart
+/// for what's left there (just the greeting-cue text, which isn't part of
+/// `setup`). Tool-call side effects (record_preference, search_products,
 /// ready_to_finalize) still route through backend REST calls (see VoiceApi)
 /// since that logic (Firestore writes, the Google Shopping+Amazon combined
 /// search) must stay server-side — only the audio/transcript relay and
@@ -110,21 +113,22 @@ Map<String, dynamic> searchResultForModel(Map<String, dynamic> result) {
 /// Note: services/voice-assistant's VOICE_ASSISTANT_MOCK_GEMINI dev/test
 /// mode has no equivalent here — it only exists in the WS-proxy path
 /// (_run_mock_session in live_session.py), since this transport requires a
-/// real AI Studio key/model with no mock. This is one reason the transport
+/// real ephemeral token/model with no mock. This is one reason the transport
 /// selector (voice_transport_selector.dart) defaults to the proxy unless a
 /// build explicitly opts in via the VOICE_DIRECT_CONNECT_ENABLED dart-define.
 class GeminiLiveSocketClient implements VoiceTransport {
   GeminiLiveSocketClient(this._voiceApi);
 
-  // v1beta/BidiGenerateContent (not the token-locked "Constrained" variant,
-  // which requires an ephemeral auth token — not applicable with a static
-  // key) is the stable, publicly documented Gemini Live endpoint. Not yet
+  // v1alpha/BidiGenerateContentConstrained — the token-locked variant
+  // ephemeral auth tokens require (as opposed to v1beta/BidiGenerateContent,
+  // the plain endpoint a static API key would use). The token itself travels
+  // via the access_token query param (see connect() below), per
+  // https://ai.google.dev/gemini-api/docs/ephemeral-tokens. Not yet
   // spike-tested live — verify on first real connection.
   static const _wsUri =
-      'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
+      'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained';
 
   final VoiceApi _voiceApi;
-  final String _apiKey = ApiConstants.aiStudioApiKey;
   WebSocket? _socket;
   StreamSubscription? _subscription;
   final _frames = StreamController<VoiceSocketFrame>.broadcast();
@@ -175,25 +179,20 @@ class GeminiLiveSocketClient implements VoiceTransport {
     required String language,
     required List<VoiceTranscriptTurn> resumeTranscript,
   }) async {
-    if (_apiKey.isEmpty) {
-      throw StateError('AI_STUDIO_API_KEY not set — direct-connect transport requires it');
-    }
     _sessionId = sessionId;
-    final setup = buildSetupJson(
-      existingProfile: existingProfile,
-      mode: mode,
-      language: language,
-      resumeTranscript: resumeTranscript,
-    );
+
+    late final VoiceSessionTokenResponse tokenResponse;
+    try {
+      tokenResponse = await _voiceApi.mintToken(sessionId);
+    } on Object {
+      // Keep low-level handshake/HTTP details out of the user-visible error text.
+      throw StateError('Could not obtain a Gemini Live session token.');
+    }
 
     late final WebSocket socket;
     try {
-      socket = await WebSocket.connect(
-        _wsUri,
-        headers: {'x-goog-api-key': _apiKey},
-      );
+      socket = await WebSocket.connect('$_wsUri?access_token=${tokenResponse.token}');
     } on Object {
-      // Keep low-level handshake details out of the user-visible error text.
       throw StateError('Could not connect to Gemini Live.');
     }
     _socket = socket;
@@ -246,7 +245,7 @@ class GeminiLiveSocketClient implements VoiceTransport {
       },
     );
 
-    socket.add(jsonEncode({'setup': setup}));
+    socket.add(jsonEncode({'setup': tokenResponse.setup}));
     try {
       await setupCompleter.future.timeout(const Duration(seconds: 15));
     } on TimeoutException {

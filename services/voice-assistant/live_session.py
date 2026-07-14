@@ -39,6 +39,15 @@ _PROJECT = os.environ.get("PROJECT_ID", "")
 # policy-violation close on connect.
 _LOCATION = os.environ.get("LOCATION", "us-central1")
 _VOICE_MODEL = os.environ.get("VOICE_MODEL", "gemini-live-2.5-flash-native-audio")
+# Which Gemini client/model the WS-proxy path's live session (run_voice_session)
+# connects with — "vertex" (default, _VOICE_MODEL above) or "dev_api" (Developer
+# API / AI Studio, _VOICE_MODEL_DEV_API below, e.g. for gemini-3.1-flash-live-preview,
+# which is not available on Vertex AI at all as of this writing). Deliberately a
+# separate lever from VOICE_MODEL_DEV_API itself, which is also used by
+# mint_ephemeral_token — see _live_connect_target for the actual selection.
+# Env-var controlled specifically so a model migration can be tested in one
+# environment and reverted instantly without a redeploy.
+_VOICE_LIVE_PROVIDER = os.environ.get("VOICE_LIVE_PROVIDER", "vertex").lower()
 # Cheap text-only model for the separate structured-extraction call (see
 # _extract_patch_from_transcript) — deliberately not the Live model.
 _EXTRACTION_MODEL = os.environ.get("EXTRACTION_MODEL", "gemini-2.5-flash")
@@ -46,18 +55,6 @@ _EXTRACTION_MODEL = os.environ.get("EXTRACTION_MODEL", "gemini-2.5-flash")
 # Aoede, Leda, Orus, Zephyr) — Puck is also Gemini Live's own default, but set
 # it explicitly so the choice is intentional and swappable via env var alone.
 _VOICE_NAME = os.environ.get("VOICE_NAME", "Puck")
-# Real-device testing with temperature 0.7 / top_p 0.9 (a deliberate
-# reduction from the native-audio model's own default, close to 1.0)
-# produced NEW static/glitch artifacts in the audio itself — this model
-# generates audio tokens directly rather than text-to-speech over a separate
-# vocoder, so over-constraining nucleus/temperature sampling over that
-# discrete audio-token vocabulary appears to cut off valid continuations
-# rather than smoothing anything out. Left unset (None) here so the API's
-# own default applies unless explicitly overridden via env var; top_k below
-# is a gentler alternative knob for the same "reduce randomness" goal.
-_VOICE_TEMPERATURE = float(os.environ["VOICE_TEMPERATURE"]) if os.environ.get("VOICE_TEMPERATURE") else None
-_VOICE_TOP_P = float(os.environ["VOICE_TOP_P"]) if os.environ.get("VOICE_TOP_P") else None
-_VOICE_TOP_K = float(os.environ.get("VOICE_TOP_K", "40"))
 # Pure cost/runaway-session backstop now — decoupled from the nudge/auto-save
 # logic below, which is driven by genuine inactivity instead, so a real,
 # actively-engaged conversation should essentially never hit this.
@@ -631,14 +628,45 @@ def _get_client() -> genai.Client:
     return _genai_client
 
 
+# Models confirmed (via a live spike — see docs/explainer/voice-assistant-websocket-transport.md)
+# to reject the manual hold-to-talk mechanism the rest of this app relies on: sending
+# activity_start/activity_end while automatic_activity_detection.disabled=True closes
+# the connection with "1007 Precondition check failed" on the very first realtime-input
+# turn. Each half works fine alone (disabled=True with no markers; markers with auto
+# detection left on) — it's specifically the combination these models reject. For any
+# model in this set, _live_config leaves automatic_activity_detection at its default
+# (enabled) instead, so Gemini's own activity detection drives turn boundaries —
+# untested against real microphone audio as of this writing; the client's hold-to-talk
+# button still sends speech_start/speech_end (see _pump_client_to_gemini), which is
+# harmless but redundant once Gemini is doing its own detection.
+_AUTO_ACTIVITY_DETECTION_ONLY_MODELS = frozenset({
+    "gemini-3.1-flash-live-preview",
+    "models/gemini-3.1-flash-live-preview",
+})
+
+
 def _live_config(
-    existing_profile: dict, mode: str, language: str, resume_transcript: list[dict] | None = None
+    existing_profile: dict,
+    mode: str,
+    language: str,
+    resume_transcript: list[dict] | None = None,
+    voice_model: str = _VOICE_MODEL,
 ) -> types.LiveConnectConfig:
+    # Server-side VAD was unreliable over the resampled/web-captured mic
+    # audio — the client normally drives turn boundaries explicitly via a
+    # hold-to-talk button (speech_start/speech_end frames -> activity_start/
+    # activity_end below), so Gemini's own activity detection is disabled —
+    # except for models in _AUTO_ACTIVITY_DETECTION_ONLY_MODELS, which reject
+    # that combination outright (see its docstring above).
+    realtime_input_config = (
+        None
+        if voice_model in _AUTO_ACTIVITY_DETECTION_ONLY_MODELS
+        else types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
+        )
+    )
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
-        temperature=_VOICE_TEMPERATURE,
-        top_p=_VOICE_TOP_P,
-        top_k=_VOICE_TOP_K,
         tools=_tools_for_mode(mode),
         system_instruction=types.Content(
             parts=[types.Part(text=_system_prompt(existing_profile, mode, language, resume_transcript))]
@@ -650,13 +678,7 @@ def _live_config(
         ),
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
-        # Server-side VAD was unreliable over the resampled/web-captured mic
-        # audio — the client now drives turn boundaries explicitly via a
-        # hold-to-talk button (speech_start/speech_end frames -> activity_start/
-        # activity_end below), so disable Gemini's own activity detection.
-        realtime_input_config=types.RealtimeInputConfig(
-            automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
-        ),
+        realtime_input_config=realtime_input_config,
         context_window_compression=types.ContextWindowCompressionConfig(
             trigger_tokens=_SESSION_CONTEXT_WINDOW_TOKENS,
             sliding_window=types.SlidingWindow(),
@@ -668,20 +690,40 @@ _genai_dev_client: Optional[genai.Client] = None
 
 
 def _get_dev_api_client() -> genai.Client:
-    """Separate Developer-API (AI Studio key) client, used only for minting
-    ephemeral auth tokens for the mobile app's direct-connect transport — see
-    _AI_STUDIO_API_KEY above for why this can't be the same client as
-    _get_client()'s Vertex AI one. v1alpha is required: ephemeral token
-    support is marked experimental/v1alpha-only in the installed SDK."""
+    """Separate Developer-API (AI Studio key) client — see _AI_STUDIO_API_KEY
+    above for why this can't be the same client as _get_client()'s Vertex AI
+    one. v1alpha is required: ephemeral token support is marked experimental/
+    v1alpha-only in the installed SDK. Used for minting ephemeral auth tokens
+    for the mobile app's direct-connect transport (mint_ephemeral_token), and
+    also, when VOICE_LIVE_PROVIDER=dev_api, for the WS-proxy path's own live
+    session — see _live_connect_target."""
     global _genai_dev_client
     if _genai_dev_client is None:
         if not _AI_STUDIO_API_KEY:
-            raise RuntimeError("AI_STUDIO_API_KEY not set — cannot mint ephemeral Gemini Live tokens")
+            raise RuntimeError("AI_STUDIO_API_KEY not set — cannot use the Developer API client")
         _genai_dev_client = genai.Client(
             api_key=_AI_STUDIO_API_KEY,
             http_options=types.HttpOptions(api_version="v1alpha"),
         )
     return _genai_dev_client
+
+
+def _live_connect_target() -> tuple[genai.Client, str]:
+    """Which client+model the WS-proxy path's live session (run_voice_session)
+    connects with — NOT used by _extract_patch_from_transcript, which stays on
+    _get_client() (Vertex AI) regardless of VOICE_LIVE_PROVIDER; that call is
+    an unrelated cheap text-extraction request, not part of the Live session.
+
+    VOICE_MODEL_DEV_API is deliberately dual-purpose: it's also the model
+    mint_ephemeral_token locks direct-connect tokens to. Bumping it alone
+    moves both the proxy-when-dev_api path and direct-connect together once
+    VOICE_LIVE_PROVIDER=dev_api is also set — useful independently during
+    testing (e.g. exercise a new model on direct-connect while proxy traffic
+    stays on the Vertex default), but the two should be moved in lockstep for
+    any real cutover."""
+    if _VOICE_LIVE_PROVIDER == "dev_api":
+        return _get_dev_api_client(), _VOICE_MODEL_DEV_API
+    return _get_client(), _VOICE_MODEL
 
 
 def _json_safe(value):
@@ -724,15 +766,23 @@ def _build_setup_json(model: str, config: types.LiveConnectConfig, client: genai
     return _json_safe(request_dict.get("setup", request_dict))
 
 
-def mint_ephemeral_token(existing_profile: dict, mode: str, language: str = "English") -> dict:
+def mint_ephemeral_token(
+    existing_profile: dict, mode: str, language: str = "English", resume_transcript: list[dict] | None = None
+) -> dict:
     """Mints a v1alpha ephemeral auth token constrained to the exact
     LiveConnectConfig _live_config() would build for this profile/mode —
     lock_additional_fields=[] locks every field actually set in `config`, so
     a client holding the token cannot override system prompt/tools/voice
     even if it tried. Synchronous (matches the SDK's sync auth_tokens.create)
-    — callers must run this via asyncio.to_thread."""
+    — callers must run this via asyncio.to_thread.
+
+    resume_transcript mirrors run_voice_session's handling for the proxy
+    path (see its own resume_transcript local) — without it, a reconnect on
+    the direct-connect transport would mint a token whose locked system
+    prompt has no _resume_note, silently dropping all prior-conversation
+    context on resume."""
     client = _get_dev_api_client()
-    live_config = _live_config(existing_profile, mode, language)
+    live_config = _live_config(existing_profile, mode, language, resume_transcript, voice_model=_VOICE_MODEL_DEV_API)
     now = datetime.now(timezone.utc)
     auth_token = client.auth_tokens.create(
         config=types.CreateAuthTokenConfig(
@@ -1773,15 +1823,17 @@ async def run_voice_session(websocket: WebSocket, session: SessionState) -> None
             session.disconnected_at = time.monotonic()
         return
 
-    client = _get_client()
+    client, voice_model = _live_connect_target()
     hard_remaining = max(0.0, _SESSION_MAX_SECONDS - (time.monotonic() - session.created_at))
     resume_transcript = list(session.transcript)
     connect_start = time.monotonic()
 
     try:
         async with client.aio.live.connect(
-            model=_VOICE_MODEL,
-            config=_live_config(session.existing_profile, session.mode, session.language, resume_transcript),
+            model=voice_model,
+            config=_live_config(
+                session.existing_profile, session.mode, session.language, resume_transcript, voice_model=voice_model
+            ),
         ) as gemini_session:
             _trace(session.session_id, "gemini_connected", ms=round((time.monotonic() - connect_start) * 1000))
             await _send_greeting_trigger(gemini_session, resumed=bool(resume_transcript))

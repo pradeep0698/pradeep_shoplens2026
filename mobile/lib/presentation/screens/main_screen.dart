@@ -13,6 +13,7 @@ import '../../data/models/user_profile.dart';
 import '../../data/repositories/profile_repository.dart';
 import '../../data/repositories/recent_searches_repository.dart';
 import '../../domain/usecases/video_analyze_usecase.dart';
+import 'scan_review_screen.dart' show ScanReviewArgs;
 import 'video_player_screen.dart';
 import '../providers/admin_provider.dart';
 import '../providers/auth_provider.dart';
@@ -273,7 +274,13 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                                   if (tap != null && tap.hasSelection) {
                                     await tap.analyzeSelection();
                                   } else if (!pipeline.fromLiveScan) {
-                                    ref.read(pipelineProvider.notifier).analyzeLoaded();
+                                    // Detect every object first (Gemini, no search yet), let
+                                    // the user pick which ones to search, then run them in
+                                    // parallel — mirrors live-scan's Scan All review flow.
+                                    context.push('/gallery-scan', extra: ScanReviewArgs(
+                                      imageBytes: pipeline.imageBytes!,
+                                      mime: _mimeType ?? 'image/jpeg',
+                                    ));
                                   }
                                 },
                           icon: const Icon(Icons.auto_awesome, size: 18),

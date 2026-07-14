@@ -6,6 +6,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'presentation/screens/about_screen.dart';
 import 'presentation/screens/admin_screen.dart';
+import 'presentation/screens/gallery_scan_results_screen.dart';
+import 'presentation/screens/gallery_scan_screen.dart';
 import 'presentation/screens/live_scan_screen.dart';
 import 'presentation/screens/login_screen.dart';
 import 'presentation/screens/main_screen.dart';
@@ -73,6 +75,11 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/scan-review',
         builder: (_, state) => ScanReviewScreen(args: state.extra as ScanReviewArgs),
       ),
+      GoRoute(
+        path: '/gallery-scan',
+        builder: (_, state) => GalleryScanScreen(args: state.extra as ScanReviewArgs),
+      ),
+      GoRoute(path: '/gallery-scan-results', builder: (_, __) => const GalleryScanResultsScreen()),
       GoRoute(path: '/about',            builder: (_, __) => const AboutScreen()),
     ],
   );

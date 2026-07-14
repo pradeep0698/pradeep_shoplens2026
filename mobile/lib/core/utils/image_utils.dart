@@ -116,6 +116,16 @@ Future<Uint8List?> cropToMlKitBox(
   }
 }
 
+/// Converts Gemini's `[y_min, x_min, y_max, x_max]` box on a 0-1000 scale to
+/// a normalized `[0,1]` Rect, for use with [ObjectGlowOverlay]'s
+/// `normalizedToWidget` BoxFit-aware mapping.
+Rect geminiBoxToNormalizedRect(List<int> box) => Rect.fromLTRB(
+      box[1] / 1000.0,
+      box[0] / 1000.0,
+      box[3] / 1000.0,
+      box[2] / 1000.0,
+    );
+
 /// Crops [imageBytes] to the region defined by [box] — Gemini's
 /// `[y_min, x_min, y_max, x_max]` on a 0-1000 scale, normalized to whatever
 /// image was sent to /detect. Since the scale is a fraction of the image's

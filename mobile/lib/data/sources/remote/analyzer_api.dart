@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../models/analyze_request.dart';
 import '../../models/analyze_response.dart';
 import '../../models/analyzer_error.dart';
+import '../../models/detect_response.dart';
 import 'dio_client.dart';
 
 class AnalyzerApi {
@@ -49,6 +50,18 @@ class AnalyzerApi {
     await for (final line in lines) {
       if (line.trim().isEmpty) continue;
       yield jsonDecode(line) as Map<String, dynamic>;
+    }
+  }
+
+  // Calls POST /detect — Gemini detection only, no crop/GCS/SerpAPI search.
+  // Used by the Scan All review flow: show every detected item, let the user
+  // pick which ones to search, then call identifyCrop() per selection.
+  Future<DetectResponse> detectItems(AnalyzeRequest request) async {
+    try {
+      final response = await _dio.post('/detect', data: request.toJson());
+      return DetectResponse.fromJson(response.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw AnalyzerException.fromDioException(e);
     }
   }
 

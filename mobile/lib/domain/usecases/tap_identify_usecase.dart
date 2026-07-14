@@ -15,8 +15,9 @@ class TapIdentifyUseCase {
 
   /// Sends [croppedBytes] to the analyzer, gets visual product matches,
   /// then appends them to the existing session (load → merge → save).
-  /// Returns the first matched product name, or null if nothing matched.
-  Future<String?> identify({
+  /// Returns the ranked products matched for this call specifically (not the
+  /// full merged session), or an empty list if nothing matched.
+  Future<List<Product>> identify({
     required Uint8List         croppedBytes,
     required String            sessionId,
     required List<String>      ignoreTerms,
@@ -44,7 +45,7 @@ class TapIdentifyUseCase {
       mlkitContext:       mlkitContext,
     ));
 
-    if (analyzeResponse.products.isEmpty) return null;
+    if (analyzeResponse.products.isEmpty) return const [];
 
     // No client-side cap here — the server already limits result count via
     // MAX_RESULTS_PER_ITEM (a single tap is always a single-object search, so
@@ -58,7 +59,7 @@ class TapIdentifyUseCase {
     final existing = await _session.loadSession(sessionId);
     final merged = _mergeProducts(existing, ranked);
     await _session.saveProducts(sessionId, merged);
-    return ranked.first.name;
+    return ranked;
   }
 
   /// Combines [existing] with [newProducts], deduping by productId. New

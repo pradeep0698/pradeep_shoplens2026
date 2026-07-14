@@ -3,7 +3,12 @@ import 'package:google_mlkit_object_detection/google_mlkit_object_detection.dart
 
 import '../../core/services/vision_service.dart';
 
-// ── Still-image glow overlay (GCP Vision normalized bounding boxes) ───────────
+// ── Still-image glow overlay (normalized bounding boxes, multi-select) ────────
+//
+// Used by the gallery Scan All flow: one glowing dot per Gemini-detected
+// object (via /detect), positioned over the still image. Tapping a dot
+// toggles its selection (checkmark + brighter glow) rather than triggering
+// an immediate single-object identify.
 
 class ObjectGlowOverlay extends StatefulWidget {
   const ObjectGlowOverlay({
@@ -12,6 +17,7 @@ class ObjectGlowOverlay extends StatefulWidget {
     required this.imageSize,
     required this.widgetSize,
     required this.boxFit,
+    this.selectedIndices = const {},
     this.onObjectTap,
   });
 
@@ -19,7 +25,8 @@ class ObjectGlowOverlay extends StatefulWidget {
   final Size imageSize;
   final Size widgetSize;
   final BoxFit boxFit;
-  final void Function(VisionLabel)? onObjectTap;
+  final Set<int> selectedIndices;
+  final void Function(int index)? onObjectTap;
 
   @override
   State<ObjectGlowOverlay> createState() => _ObjectGlowOverlayState();
@@ -50,11 +57,12 @@ class _ObjectGlowOverlayState extends State<ObjectGlowOverlay>
       animation: _pulse,
       builder: (_, __) => CustomPaint(
         painter: _GlowPainter(
-          objects:    widget.objects,
-          imageSize:  widget.imageSize,
-          widgetSize: widget.widgetSize,
-          boxFit:     widget.boxFit,
-          pulseValue: _pulse.value,
+          objects:         widget.objects,
+          imageSize:       widget.imageSize,
+          widgetSize:      widget.widgetSize,
+          boxFit:          widget.boxFit,
+          selectedIndices: widget.selectedIndices,
+          pulseValue:      _pulse.value,
         ),
         child: _tapLayer(),
       ),
@@ -63,23 +71,25 @@ class _ObjectGlowOverlayState extends State<ObjectGlowOverlay>
 
   Widget _tapLayer() {
     if (widget.onObjectTap == null) return const SizedBox.expand();
-    return Stack(
-      children: widget.objects
-          .where((o) => o.boundingBox != null)
-          .map((o) {
-            final r = normalizedToWidget(
-                o.boundingBox!, widget.imageSize, widget.widgetSize, widget.boxFit);
-            return Positioned(
-              left: r.left, top: r.top, width: r.width, height: r.height,
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => widget.onObjectTap!(o),
-                child: Container(color: Colors.transparent),
-              ),
-            );
-          })
-          .toList(),
-    );
+    const tapSize = 44.0; // comfortable touch target around the small dot
+    final children = <Widget>[];
+    for (var i = 0; i < widget.objects.length; i++) {
+      final box = widget.objects[i].boundingBox;
+      if (box == null) continue;
+      final center = normalizedToWidget(box, widget.imageSize, widget.widgetSize, widget.boxFit).center;
+      children.add(Positioned(
+        left:   center.dx - tapSize / 2,
+        top:    center.dy - tapSize / 2,
+        width:  tapSize,
+        height: tapSize,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => widget.onObjectTap!(i),
+          child: Container(color: Colors.transparent),
+        ),
+      ));
+    }
+    return Stack(children: children);
   }
 }
 
@@ -89,6 +99,7 @@ class _GlowPainter extends CustomPainter {
     required this.imageSize,
     required this.widgetSize,
     required this.boxFit,
+    required this.selectedIndices,
     required this.pulseValue,
   });
 
@@ -96,66 +107,95 @@ class _GlowPainter extends CustomPainter {
   final Size imageSize;
   final Size widgetSize;
   final BoxFit boxFit;
+  final Set<int> selectedIndices;
   final double pulseValue;
 
   static const _kGreen = Color(0xFF34D399);
+  static const _kDotRadius = 8.0;
 
   @override
   void paint(Canvas canvas, Size size) {
-    for (final obj in objects) {
-      if (obj.boundingBox == null) continue;
-      final r = normalizedToWidget(obj.boundingBox!, imageSize, widgetSize, boxFit);
-      _drawGlow(canvas, r);
-      _drawBorder(canvas, r);
-      _drawLabel(canvas, r, obj.description, obj.score);
+    for (var i = 0; i < objects.length; i++) {
+      final box = objects[i].boundingBox;
+      if (box == null) continue;
+      final center = normalizedToWidget(box, imageSize, widgetSize, boxFit).center;
+      final selected = selectedIndices.contains(i);
+      _drawGlow(canvas, center, selected);
+      _drawDot(canvas, center, selected);
+      _drawLabel(canvas, center, objects[i].description, selected);
     }
   }
 
-  void _drawGlow(Canvas canvas, Rect r) {
+  void _drawGlow(Canvas canvas, Offset center, bool selected) {
     for (int i = 3; i >= 1; i--) {
-      final expand  = i * 6.0 + pulseValue * 4;
-      final opacity = (0.12 - i * 0.02) * (0.6 + pulseValue * 0.4);
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(r.inflate(expand), Radius.circular(10 + expand)),
+      final radius  = _kDotRadius + i * 5.0 + pulseValue * 3;
+      final opacity = (0.20 - i * 0.04) * (0.6 + pulseValue * 0.4) * (selected ? 1.6 : 1.0);
+      canvas.drawCircle(
+        center, radius,
         Paint()
-          ..color      = _kGreen.withValues(alpha: opacity)
+          ..color      = _kGreen.withValues(alpha: opacity.clamp(0.0, 1.0))
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8),
       );
     }
   }
 
-  void _drawBorder(Canvas canvas, Rect r) {
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(r, const Radius.circular(6)),
-      Paint()
-        ..color       = _kGreen.withValues(alpha: 0.7 + pulseValue * 0.3)
-        ..style       = PaintingStyle.stroke
-        ..strokeWidth = 2.0,
+  void _drawDot(Canvas canvas, Offset center, bool selected) {
+    final radius = selected ? _kDotRadius * 1.3 : _kDotRadius * (0.9 + pulseValue * 0.15);
+    canvas.drawCircle(
+      center, radius,
+      Paint()..color = selected ? _kGreen : _kGreen.withValues(alpha: 0.85 + pulseValue * 0.15),
     );
+    canvas.drawCircle(
+      center, radius,
+      Paint()
+        ..color       = Colors.white.withValues(alpha: 0.9)
+        ..style       = PaintingStyle.stroke
+        ..strokeWidth = selected ? 2.5 : 1.5,
+    );
+    if (selected) {
+      final check = Path()
+        ..moveTo(center.dx - radius * 0.45, center.dy)
+        ..lineTo(center.dx - radius * 0.05, center.dy + radius * 0.4)
+        ..lineTo(center.dx + radius * 0.5, center.dy - radius * 0.35);
+      canvas.drawPath(
+        check,
+        Paint()
+          ..color       = Colors.white
+          ..style       = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..strokeCap   = StrokeCap.round
+          ..strokeJoin  = StrokeJoin.round,
+      );
+    }
   }
 
-  void _drawLabel(Canvas canvas, Rect r, String label, double score) {
-    final text = '$label ${(score * 100).round()}%';
+  void _drawLabel(Canvas canvas, Offset center, String text, bool selected) {
     final span = TextSpan(
       text: text,
       style: const TextStyle(
         color: Color(0xFF34D399), fontSize: 11, fontWeight: FontWeight.w600,
       ),
     );
-    final tp = TextPainter(text: span, textDirection: TextDirection.ltr)
-      ..layout(maxWidth: r.width);
+    final tp = TextPainter(text: span, textDirection: TextDirection.ltr)..layout();
 
-    final bgRect = Rect.fromLTWH(r.left, r.top - 20, tp.width + 10, 18);
+    final bgRect = Rect.fromLTWH(
+      center.dx - tp.width / 2 - 5,
+      center.dy - _kDotRadius - 24,
+      tp.width + 10,
+      18,
+    );
     canvas.drawRRect(
       RRect.fromRectAndRadius(bgRect, const Radius.circular(4)),
       Paint()..color = const Color(0xFF0F172A).withValues(alpha: 0.85),
     );
-    tp.paint(canvas, Offset(r.left + 5, r.top - 19));
+    tp.paint(canvas, Offset(bgRect.left + 5, bgRect.top + 1));
   }
 
   @override
   bool shouldRepaint(_GlowPainter old) =>
-      old.pulseValue != pulseValue || old.objects != objects;
+      old.pulseValue != pulseValue ||
+      old.objects != objects ||
+      old.selectedIndices != selectedIndices;
 }
 
 /// Converts a normalized [0,1] GCP Vision bounding rect to widget pixel coords,

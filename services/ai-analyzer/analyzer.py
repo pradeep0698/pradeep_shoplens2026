@@ -1139,6 +1139,55 @@ def identify_crop(
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def detect_items(
+    *,
+    image_url: str | None = None,
+    image_data: str | None = None,
+    image_mime_type: str | None = None,
+    ignore_terms: list[str] | None = None,
+    country: str = "us",
+    preference_terms: list[str] | None = None,
+    shopping_categories: list[str] | None = None,
+) -> list[dict]:
+    """Runs Gemini detection only — no crop, GCS upload, or SerpAPI search.
+
+    Returns every detected item as {"name": ..., "box": [y_min,x_min,y_max,x_max] | None},
+    unfiltered and untruncated, so the caller can let the user pick which ones to search.
+    """
+    _t_start = time.monotonic()
+    country = normalize_country(country)
+    client = _get_client()
+    text_part = _PROMPT.format(
+        ignore_block=_build_ignore_block(ignore_terms),
+        preference_block=_build_preference_block(preference_terms, shopping_categories),
+    )
+    media_part = _load_image_part(
+        image_url=image_url,
+        image_data=image_data,
+        image_mime_type=image_mime_type,
+        max_dimension=1280,
+    )
+    response = client.models.generate_content(
+        model=_active_model,
+        contents=[media_part, text_part],
+        config=types.GenerateContentConfig(
+            safety_settings=_SAFETY,
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        ),
+    )
+    try:
+        items_raw = _parse_items_with_boxes(response.text)
+    except Exception as exc:
+        logger.warning("Gemini parse failed: %s | raw=%s", exc, response.text)
+        items_raw = []
+
+    logger.info(
+        "detect_items detected %d item(s) in %.2fs: %s",
+        len(items_raw), time.monotonic() - _t_start, [r["name"] for r in items_raw],
+    )
+    return [{"name": r["name"], "box": r.get("box")} for r in items_raw]
+
+
 def analyze_media(
     *,
     gcs_video_uri: str | None = None,

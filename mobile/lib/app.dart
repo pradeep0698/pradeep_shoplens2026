@@ -6,10 +6,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'presentation/screens/about_screen.dart';
 import 'presentation/screens/admin_screen.dart';
+import 'presentation/screens/gallery_scan_results_screen.dart';
+import 'presentation/screens/gallery_scan_screen.dart';
 import 'presentation/screens/live_scan_screen.dart';
 import 'presentation/screens/login_screen.dart';
 import 'presentation/screens/main_screen.dart';
 import 'presentation/screens/profile_screen.dart';
+import 'presentation/screens/scan_review_screen.dart';
 import 'presentation/screens/signup_screen.dart';
 import 'presentation/screens/splash_screen.dart';
 import 'presentation/screens/forgot_password_screen.dart';
@@ -68,6 +71,15 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/profile',          builder: (_, __) => const ProfileScreen()),
       GoRoute(path: '/admin',            builder: (_, __) => const AdminScreen()),
       GoRoute(path: '/live-scan',        builder: (_, __) => const LiveScanScreen()),
+      GoRoute(
+        path: '/scan-review',
+        builder: (_, state) => ScanReviewScreen(args: state.extra as ScanReviewArgs),
+      ),
+      GoRoute(
+        path: '/gallery-scan',
+        builder: (_, state) => GalleryScanScreen(args: state.extra as ScanReviewArgs),
+      ),
+      GoRoute(path: '/gallery-scan-results', builder: (_, __) => const GalleryScanResultsScreen()),
       GoRoute(path: '/about',            builder: (_, __) => const AboutScreen()),
     ],
   );

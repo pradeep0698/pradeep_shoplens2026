@@ -10,6 +10,7 @@ import 'package:google_mlkit_object_detection/google_mlkit_object_detection.dart
 import '../../core/services/mlkit_detector_service.dart';
 import '../../core/utils/image_utils.dart';
 import '../providers/pipeline_provider.dart';
+import 'scan_review_screen.dart';
 import '../widgets/info_tooltip_icon.dart';
 import '../widgets/object_glow_overlay.dart';
 import '../widgets/zoom_slider.dart';
@@ -238,42 +239,50 @@ class _LiveScanScreenState extends ConsumerState<LiveScanScreen>
           imageBytes = cropped;
           mime       = 'image/jpeg';
         }
-      }
 
-      await ref.read(pipelineProvider.notifier).setImage(imageBytes, mime, fromLiveScan: true);
-      if (mounted) context.go('/main');
+        await ref.read(pipelineProvider.notifier).setImage(imageBytes, mime, fromLiveScan: true);
+        if (mounted) context.go('/main');
 
-      // Auto-start analysis so the user doesn't need to press Scan Image.
-      // Any tap goes directly to /identify with the ML Kit crop — Gemini
-      // re-describes the crop regardless, so ML Kit's confidence label is
-      // irrelevant to the identify path. Only "Scan All" needs the full
-      // /analyze pass (no pre-selected bounding box to crop from).
-      final confidence = _topConfidence(tappedObject);
-      final route = tappedObject != null ? 'identify' : 'analyze';
-
-      // Context forwarded to the backend so logs show exactly what ML Kit
-      // saw on-device for every request — confidence, labels, object count,
-      // and the routing decision — without needing a debuggable APK.
-      final mlkitContext = <String, dynamic>{
-        'from_live_scan': true,
-        'trigger': tappedObject != null ? 'tap' : 'scan_all',
-        'route': route,
-        'on_device_confidence': confidence,
-        'detected_objects_count': _liveObjects.length,
-        if (tappedObject != null)
+        // Any tap goes directly to /identify with the ML Kit crop — Gemini
+        // re-describes the crop regardless, so ML Kit's confidence label is
+        // irrelevant to the identify path.
+        final confidence = _topConfidence(tappedObject);
+        final mlkitContext = <String, dynamic>{
+          'from_live_scan': true,
+          'trigger': 'tap',
+          'route': 'identify',
+          'on_device_confidence': confidence,
+          'detected_objects_count': _liveObjects.length,
           'detected_labels': tappedObject.labels
               .map((l) => {'text': l.text, 'confidence': l.confidence})
               .toList(),
-      };
-
-      if (route == 'identify') {
+        };
         debugPrint('[MLKit] tap -> /identify (confidence=${confidence?.toStringAsFixed(2) ?? "none"}, '
-            'labels=${tappedObject!.labels.map((l) => l.text).toList()})');
+            'labels=${tappedObject.labels.map((l) => l.text).toList()})');
         ref.read(pipelineProvider.notifier).identifyTappedObject(imageBytes, mlkitContext: mlkitContext);
-      } else {
-        debugPrint('[MLKit] scan_all -> /analyze (full cloud detection)');
-        ref.read(pipelineProvider.notifier).analyzeLoaded(mlkitContext: mlkitContext);
+        return;
       }
+
+      // Scan All: detect every object first (Gemini, no search yet), then let
+      // the user pick which ones to search on the review screen. Stays on
+      // this screen (pushed on top) rather than navigating to /main, so the
+      // camera can resume once the user comes back.
+      final mlkitContext = <String, dynamic>{
+        'from_live_scan': true,
+        'trigger': 'scan_all',
+        'route': 'detect',
+        'detected_objects_count': _liveObjects.length,
+      };
+      debugPrint('[MLKit] scan_all -> /detect (Gemini detection, no search yet)');
+      if (mounted) {
+        await context.push('/scan-review', extra: ScanReviewArgs(
+          imageBytes: imageBytes,
+          mime: mime,
+          mlkitContext: mlkitContext,
+        ));
+      }
+      _identifying = false;
+      if (mounted) cam.startImageStream(_onFrame);
     } catch (e) {
       _identifying = false;
       if (mounted) {

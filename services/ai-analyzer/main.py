@@ -18,6 +18,7 @@ from analyzer import (
     analyze_media_stream,
     classify_exception,
     currency_for_country,
+    detect_items,
     identify_crop,
     normalize_country,
     get_active_model,
@@ -206,6 +207,19 @@ class ProductItem(BaseModel):
     purchase_url: str | None
     seller: str | None
     category: str | None
+
+
+class DetectedItem(BaseModel):
+    name: str = Field(..., description="Gemini-detected item name")
+    box: list[int] | None = Field(
+        None, description="Bounding box [y_min,x_min,y_max,x_max] on a 0-1000 scale, or null if Gemini omitted one",
+    )
+
+
+class DetectResponse(BaseModel):
+    items: list[DetectedItem] = Field(..., description="Every item Gemini detected, unfiltered — no product search has run yet")
+    country: str = Field(..., description="Normalized country used for this request (defaults to 'us')")
+    currency: str = Field(..., description="Currency derived from `country`")
 
 
 class AnalyzeResponse(BaseModel):
@@ -437,6 +451,87 @@ async def analyze_stream(request: AnalyzeRequest) -> StreamingResponse:
         _event_stream(),
         media_type="application/x-ndjson",
         headers={"X-Request-Id": req_id, **_CORS},
+    )
+
+
+@app.post(
+    "/detect",
+    tags=["Analysis"],
+    summary="Detect items only — no product search",
+    description=(
+        "Runs Gemini detection on the provided image and returns every detected item "
+        "with its bounding box, but does NOT crop, upload to GCS, or run any SerpAPI search. "
+        "Intended for a select-then-search flow: the client shows the detected items, "
+        "the user picks which ones to search, then calls `POST /identify` once per "
+        "selected item (cropped client-side from the returned box).\n\n"
+        "Unlike `/analyze`, results are not truncated to `max_searches` or prioritized — "
+        "every detected item is returned so the user can choose.\n\n"
+        "Requires `image_url` or `image_data`."
+    ),
+    responses={
+        200: {"description": "Detection succeeded"},
+        400: {"description": "No image input provided"},
+        500: {"description": "Gemini error"},
+    },
+)
+async def detect(request: AnalyzeRequest) -> JSONResponse:
+    req_id = uuid.uuid4().hex[:8]
+    _request_id_ctx.set(req_id)
+    start = time.monotonic()
+
+    if not request.image_url and not request.image_data:
+        logger.warning("Rejecting /detect: neither image_url nor image_data provided")
+        return JSONResponse(
+            content={"detail": "Provide image_url or image_data.", "error_code": "INVALID_REQUEST"},
+            status_code=400,
+            headers={"X-Request-Id": req_id},
+        )
+
+    country = normalize_country(request.country)
+    logger.info(
+        "detect start | image_url=%s image_data_b64_len=%d ignore_terms=%d country=%s currency=%s "
+        "preference_terms=%d shopping_categories=%d",
+        request.image_url,
+        len(request.image_data) if request.image_data else 0,
+        len(request.ignore_terms),
+        country,
+        currency_for_country(country),
+        len(request.preference_terms),
+        len(request.shopping_categories),
+    )
+    try:
+        items = await asyncio.to_thread(
+            detect_items,
+            image_url=request.image_url,
+            image_data=request.image_data,
+            image_mime_type=request.image_mime_type,
+            ignore_terms=request.ignore_terms,
+            country=country,
+            preference_terms=request.preference_terms,
+            shopping_categories=request.shopping_categories,
+        )
+    except Exception as exc:
+        elapsed = time.monotonic() - start
+        status_code, error_code = classify_exception(exc)
+        logger.exception(
+            "detect FAILED after %.2fs | %s: %s | error_code=%s status=%d",
+            elapsed, type(exc).__name__, exc, error_code, status_code,
+        )
+        return JSONResponse(
+            content={"detail": str(exc), "error_code": error_code},
+            status_code=status_code,
+            headers={"X-Request-Id": req_id},
+        )
+
+    elapsed = time.monotonic() - start
+    logger.info("detect done in %.2fs | items=%d", elapsed, len(items))
+    return JSONResponse(
+        content={
+            "items": items,
+            "country": country,
+            "currency": currency_for_country(country),
+        },
+        headers={"X-Request-Id": req_id},
     )
 
 

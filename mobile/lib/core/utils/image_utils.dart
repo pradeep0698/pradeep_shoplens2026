@@ -115,3 +115,54 @@ Future<Uint8List?> cropToMlKitBox(
     srcImage.dispose();
   }
 }
+
+/// Crops [imageBytes] to the region defined by [box] — Gemini's
+/// `[y_min, x_min, y_max, x_max]` on a 0-1000 scale, normalized to whatever
+/// image was sent to /detect. Since the scale is a fraction of the image's
+/// own dimensions, it applies directly to the full-res bytes with no
+/// portrait/landscape conversion needed (unlike [cropToMlKitBox], whose box
+/// is in camera-preview pixel coords).
+///
+/// Mirrors the backend's `_crop_product` (analyzer.py) padding convention so
+/// client-cropped previews match what the server would have cropped.
+///
+/// Returns JPEG bytes (accepted by /identify).
+Future<Uint8List?> cropToGeminiBox(
+  Uint8List imageBytes,
+  List<int> box, {
+  double padFraction = 0.05,
+}) async {
+  if (box.length != 4) return null;
+  final codec = await ui.instantiateImageCodec(imageBytes);
+  final frame = await codec.getNextFrame();
+  final srcImage = frame.image;
+
+  try {
+    final imgW = srcImage.width.toDouble();
+    final imgH = srcImage.height.toDouble();
+    final y1 = box[0] / 1000.0, x1 = box[1] / 1000.0;
+    final y2 = box[2] / 1000.0, x2 = box[3] / 1000.0;
+
+    final srcX1 = ((x1 - padFraction) * imgW).clamp(0.0, imgW);
+    final srcY1 = ((y1 - padFraction) * imgH).clamp(0.0, imgH);
+    final srcX2 = ((x2 + padFraction) * imgW).clamp(0.0, imgW);
+    final srcY2 = ((y2 + padFraction) * imgH).clamp(0.0, imgH);
+
+    final cw = (srcX2 - srcX1).clamp(1.0, imgW);
+    final ch = (srcY2 - srcY1).clamp(1.0, imgH);
+
+    final recorder = ui.PictureRecorder();
+    Canvas(recorder, Rect.fromLTWH(0, 0, cw, ch)).drawImageRect(
+      srcImage,
+      Rect.fromLTWH(srcX1, srcY1, cw, ch),
+      Rect.fromLTWH(0, 0, cw, ch),
+      Paint(),
+    );
+    final cropped = await recorder.endRecording().toImage(cw.round(), ch.round());
+    final jpeg = await encodeUiImageToJpeg(cropped);
+    cropped.dispose();
+    return jpeg;
+  } finally {
+    srcImage.dispose();
+  }
+}

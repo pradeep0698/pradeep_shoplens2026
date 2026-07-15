@@ -19,6 +19,7 @@ class ObjectGlowOverlay extends StatefulWidget {
     required this.boxFit,
     this.selectedIndices = const {},
     this.onObjectTap,
+    this.showLabels = true,
   });
 
   final List<VisionLabel> objects;
@@ -27,6 +28,11 @@ class ObjectGlowOverlay extends StatefulWidget {
   final BoxFit boxFit;
   final Set<int> selectedIndices;
   final void Function(int index)? onObjectTap;
+  /// Whether to draw each object's name above its dot. Off for the
+  /// ML Kit-powered gallery flow, whose on-device labels are coarse
+  /// ("Home good", etc.) and not worth surfacing — dots alone are enough
+  /// to pick objects; the real name comes back from /identify after search.
+  final bool showLabels;
 
   @override
   State<ObjectGlowOverlay> createState() => _ObjectGlowOverlayState();
@@ -63,6 +69,7 @@ class _ObjectGlowOverlayState extends State<ObjectGlowOverlay>
           boxFit:          widget.boxFit,
           selectedIndices: widget.selectedIndices,
           pulseValue:      _pulse.value,
+          showLabels:      widget.showLabels,
         ),
         child: _tapLayer(),
       ),
@@ -101,6 +108,7 @@ class _GlowPainter extends CustomPainter {
     required this.boxFit,
     required this.selectedIndices,
     required this.pulseValue,
+    this.showLabels = true,
   });
 
   final List<VisionLabel> objects;
@@ -109,6 +117,7 @@ class _GlowPainter extends CustomPainter {
   final BoxFit boxFit;
   final Set<int> selectedIndices;
   final double pulseValue;
+  final bool showLabels;
 
   static const _kGreen = Color(0xFF34D399);
   static const _kDotRadius = 8.0;
@@ -122,7 +131,7 @@ class _GlowPainter extends CustomPainter {
       final selected = selectedIndices.contains(i);
       _drawGlow(canvas, center, selected);
       _drawDot(canvas, center, selected);
-      _drawLabel(canvas, center, objects[i].description, selected);
+      if (showLabels) _drawLabel(canvas, center, objects[i].description, selected);
     }
   }
 

@@ -42,3 +42,22 @@ class MlKitDetectorService {
 
   void dispose() => _detector.close();
 }
+
+/// One-shot on-device object detection for a still image (e.g. a gallery
+/// pick), as opposed to [MlKitDetectorService]'s per-frame camera stream.
+/// Uses [DetectionMode.single], which ML Kit tunes for a single standalone
+/// image rather than frame-to-frame tracking.
+class MlKitStaticDetectorService {
+  final _detector = ObjectDetector(
+    options: ObjectDetectorOptions(
+      mode: DetectionMode.single,
+      classifyObjects: true,
+      multipleObjects: true,
+    ),
+  );
+
+  Future<List<DetectedObject>> detectFromFilePath(String path) =>
+      _detector.processImage(InputImage.fromFilePath(path));
+
+  void dispose() => _detector.close();
+}

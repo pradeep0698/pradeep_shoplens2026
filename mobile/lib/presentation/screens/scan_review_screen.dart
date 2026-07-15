@@ -13,8 +13,17 @@ class ScanReviewArgs {
   final Uint8List imageBytes;
   final String mime;
   final Map<String, dynamic>? mlkitContext;
+  /// File path of the picked/captured image, if available. Required for
+  /// [GalleryScanScreen]'s on-device ML Kit detection ([InputImage.fromFilePath]);
+  /// unused by the Gemini-backed `/scan-review` (live-camera) flow.
+  final String? imagePath;
 
-  const ScanReviewArgs({required this.imageBytes, required this.mime, this.mlkitContext});
+  const ScanReviewArgs({
+    required this.imageBytes,
+    required this.mime,
+    this.mlkitContext,
+    this.imagePath,
+  });
 }
 
 /// Scan All's review step: shows every object Gemini detected in the frame

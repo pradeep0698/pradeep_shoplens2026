@@ -1,5 +1,7 @@
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/services/mlkit_detector_service.dart';
 import '../../core/utils/image_utils.dart';
 import '../../core/utils/session_id.dart';
 import '../../data/models/analyze_request.dart';
@@ -19,6 +21,11 @@ class DetectedItem {
   final ItemSearchStatus status;
   final List<Product> products;
   final String? errorMessage;
+  /// False for ML Kit-sourced items (coarse on-device labels, or a
+  /// positional "Item N" placeholder) — [name] isn't descriptive enough to
+  /// pass as a search query, so /identify's own Gemini call should describe
+  /// the crop from scratch instead, same as live-camera's tap-to-identify.
+  final bool nameIsDescriptive;
 
   const DetectedItem({
     required this.name,
@@ -27,6 +34,7 @@ class DetectedItem {
     this.status = ItemSearchStatus.idle,
     this.products = const [],
     this.errorMessage,
+    this.nameIsDescriptive = true,
   });
 
   DetectedItem copyWith({
@@ -41,6 +49,7 @@ class DetectedItem {
         status: status ?? this.status,
         products: products ?? this.products,
         errorMessage: errorMessage,
+        nameIsDescriptive: nameIsDescriptive,
       );
 }
 
@@ -122,6 +131,46 @@ class ScanReviewNotifier extends AutoDisposeNotifier<ScanReviewState> {
     }
   }
 
+  /// Gallery Scan All's detection step: runs ML Kit's on-device object
+  /// detector against the still image directly (no network call, no Gemini)
+  /// — the same technology the live-camera preview uses for its real-time
+  /// dots, just in single-image mode instead of per-frame stream mode.
+  /// Boxes are converted to Gemini's `[y_min,x_min,y_max,x_max]` 0-1000
+  /// scale so the rest of the pipeline (crop, overlay) is unchanged.
+  Future<void> detectOnDevice(Uint8List imageBytes, String imagePath) async {
+    state = const ScanReviewState(phase: ScanReviewPhase.detecting);
+
+    final detector = MlKitStaticDetectorService();
+    try {
+      final codec = await ui.instantiateImageCodec(imageBytes);
+      final frame = await codec.getNextFrame();
+      final imageSize = ui.Size(frame.image.width.toDouble(), frame.image.height.toDouble());
+      frame.image.dispose();
+
+      final objects = await detector.detectFromFilePath(imagePath);
+      final boxes = [
+        for (final o in objects) mlkitBoxToGeminiScale(o.boundingBox, imageSize),
+      ];
+      final crops = await Future.wait(boxes.map((box) => cropToGeminiBox(imageBytes, box)));
+
+      final items = [
+        for (var i = 0; i < objects.length; i++)
+          DetectedItem(
+            name: objects[i].labels.isNotEmpty ? objects[i].labels.first.text : 'Item ${i + 1}',
+            box: boxes[i],
+            cropBytes: crops[i] ?? imageBytes,
+            nameIsDescriptive: false,
+          ),
+      ];
+
+      state = ScanReviewState(phase: ScanReviewPhase.ready, items: items);
+    } catch (e) {
+      state = ScanReviewState(phase: ScanReviewPhase.error, errorMessage: e.toString());
+    } finally {
+      detector.dispose();
+    }
+  }
+
   void toggleSelect(int index) {
     final selected = {...state.selected};
     if (!selected.add(index)) selected.remove(index);
@@ -166,7 +215,7 @@ class ScanReviewNotifier extends AutoDisposeNotifier<ScanReviewState> {
             shoppingCategories: profile.shoppingCategories,
             country:            profile.country.isEmpty ? null : profile.country,
             maxSearches:        profile.maxSearchesPerRun,
-            query:              item.name,
+            query:              item.nameIsDescriptive ? item.name : null,
           );
       _setItem(index, (it) => it.copyWith(status: ItemSearchStatus.done, products: products));
     } catch (e) {

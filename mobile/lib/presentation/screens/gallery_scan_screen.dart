@@ -31,10 +31,9 @@ class _GalleryScanScreenState extends ConsumerState<GalleryScanScreen> {
   void initState() {
     super.initState();
     _loadImageSize();
-    Future.microtask(() => ref.read(scanReviewProvider.notifier).detect(
+    Future.microtask(() => ref.read(scanReviewProvider.notifier).detectOnDevice(
           widget.args.imageBytes,
-          widget.args.mime,
-          mlkitContext: widget.args.mlkitContext,
+          widget.args.imagePath!,
         ));
   }
 
@@ -156,6 +155,7 @@ class _ReadyBody extends ConsumerWidget {
                         boxFit:          BoxFit.contain,
                         selectedIndices: state.selected,
                         onObjectTap:     (i) => ref.read(scanReviewProvider.notifier).toggleSelect(i),
+                        showLabels:      false,
                       ),
                     ],
                   );

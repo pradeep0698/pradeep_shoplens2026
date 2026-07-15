@@ -274,12 +274,13 @@ class _MainScreenState extends ConsumerState<MainScreen> {
                                   if (tap != null && tap.hasSelection) {
                                     await tap.analyzeSelection();
                                   } else if (!pipeline.fromLiveScan) {
-                                    // Detect every object first (Gemini, no search yet), let
-                                    // the user pick which ones to search, then run them in
-                                    // parallel — mirrors live-scan's Scan All review flow.
+                                    // Manual re-entry (e.g. after backing out of the dots
+                                    // screen without scanning) — picking normally jumps here
+                                    // automatically now that detection is on-device ML Kit.
                                     context.push('/gallery-scan', extra: ScanReviewArgs(
                                       imageBytes: pipeline.imageBytes!,
                                       mime: _mimeType ?? 'image/jpeg',
+                                      imagePath: _imagePath,
                                     ));
                                   }
                                 },
@@ -445,6 +446,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   }
 
   String? _mimeType;
+  String? _imagePath;
 
   Widget _buildVideoSection(VideoState video) {
     final thumbnail = switch (video) {
@@ -610,7 +612,19 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     ref.read(videoProvider.notifier).reset();
     final bytes = await file.readAsBytes();
     _mimeType   = getMimeType(file.path);
+    _imagePath  = file.path;
     await ref.read(pipelineProvider.notifier).setImage(bytes, _mimeType!);
+
+    // Gallery pick only (this is the only call site) — detection is now
+    // on-device ML Kit, so there's no reason to make the user tap "Scan
+    // Image" first; jump straight to the dots screen the instant the image
+    // is loaded.
+    if (!mounted) return;
+    context.push('/gallery-scan', extra: ScanReviewArgs(
+      imageBytes: bytes,
+      mime: _mimeType!,
+      imagePath: _imagePath,
+    ));
   }
 
   Future<void> _pickVideo() async {

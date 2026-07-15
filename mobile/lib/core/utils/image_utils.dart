@@ -126,6 +126,17 @@ Rect geminiBoxToNormalizedRect(List<int> box) => Rect.fromLTRB(
       box[2] / 1000.0,
     );
 
+/// Converts an ML Kit [Rect] (raw pixel coords in [imageSize]'s own space)
+/// to Gemini's `[y_min, x_min, y_max, x_max]` 0-1000 scale, so on-device
+/// detections can flow through the same box format as Gemini's `/detect` —
+/// no changes needed to [geminiBoxToNormalizedRect] or crop utilities.
+List<int> mlkitBoxToGeminiScale(Rect box, Size imageSize) => [
+      (box.top    / imageSize.height * 1000).round().clamp(0, 1000),
+      (box.left   / imageSize.width  * 1000).round().clamp(0, 1000),
+      (box.bottom / imageSize.height * 1000).round().clamp(0, 1000),
+      (box.right  / imageSize.width  * 1000).round().clamp(0, 1000),
+    ];
+
 /// Crops [imageBytes] to the region defined by [box] — Gemini's
 /// `[y_min, x_min, y_max, x_max]` on a 0-1000 scale, normalized to whatever
 /// image was sent to /detect. Since the scale is a fraction of the image's

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 class AboutScreen extends StatelessWidget {
   const AboutScreen({super.key});
@@ -27,9 +28,18 @@ class AboutScreen extends StatelessWidget {
             Image.asset('assets/shoplens-logo-nobckg.png', height: 120),
             const SizedBox(height: 24),
             const SizedBox(height: 8),
-            const Text(
-              'Version 1.32.4',
-              style: TextStyle(color: Color(0xFF94A3B8), fontSize: 15),
+            FutureBuilder<PackageInfo>(
+              future: PackageInfo.fromPlatform(),
+              builder: (context, snapshot) {
+                final info = snapshot.data;
+                final label = info == null
+                    ? ' '
+                    : 'Version ${info.version} (${info.buildNumber})';
+                return Text(
+                  label,
+                  style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 15),
+                );
+              },
             ),
           ],
         ),

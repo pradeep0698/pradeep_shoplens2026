@@ -86,6 +86,16 @@ _INACTIVITY_CLOSE_GRACE_SECONDS = int(os.environ.get("INACTIVITY_CLOSE_GRACE_SEC
 # Internal poll granularity for the inactivity watchdog — not worth exposing
 # as an env var.
 _INACTIVITY_POLL_SECONDS = 1.0
+# How long to wait, after record_preference's SILENT-scheduled function
+# response (see its call site in _pump_gemini_to_client) leaves the model's
+# turn with nothing spoken, before nudging it to actually say something.
+# Deliberately much shorter than _INACTIVITY_NUDGE_SECONDS above — that one
+# is for a genuinely distracted/quiet user; this is for the assistant itself
+# going quiet right after silently recording something, which reads as
+# broken in a matter of seconds, not tens of seconds. See
+# SessionState.pending_silent_ack_since and _watch_silent_tool_calls.
+_SILENT_ACK_NUDGE_SECONDS = float(os.environ.get("SILENT_ACK_NUDGE_SECONDS", "3"))
+_SILENT_ACK_POLL_SECONDS = 0.5
 # Backend for the search_products tool (non-onboarding sessions) — see
 # services/product-matcher/main.py's POST /search.
 _PRODUCT_MATCHER_URL = os.environ.get("PRODUCT_MATCHER_URL", "")
@@ -577,6 +587,15 @@ class SessionState:
     # _pump_gemini_to_client), giving a time-to-first-response measurement
     # per turn. None means "no turn currently awaiting a response".
     turn_requested_at: Optional[float] = None
+    # Set right after sending a SILENT-scheduled record_preference function
+    # response (see its call site in _pump_gemini_to_client) — SILENT
+    # deliberately keeps Gemini from resuming generation on its own (avoids a
+    # repeated "got it!" for every call in one compound utterance), but that
+    # means when record_preference was the model's *entire* turn, nothing
+    # nudges it to actually speak. Cleared the moment real spoken output
+    # arrives (_flush_pending_output) or the user starts a new turn. None
+    # means "nothing pending". See _watch_silent_tool_calls.
+    pending_silent_ack_since: Optional[float] = None
     # Categories from the most recent record_preference call that actually
     # named one — carried forward so a later call reporting only preference/
     # ignore terms (the model rarely repeats shopping_categories once it's
@@ -1315,6 +1334,7 @@ async def _pump_client_to_gemini(websocket: WebSocket, gemini_session, session: 
                     # another turn the model responds to naturally.
                     if session.mode == "preferences" and _is_closing_phrase(text):
                         session.last_activity_at = time.monotonic()
+                        session.pending_silent_ack_since = None
                         await _on_user_turn(websocket, session, text)
                         await _send_finalize_proposal(websocket, session)
                         continue
@@ -1326,6 +1346,7 @@ async def _pump_client_to_gemini(websocket: WebSocket, gemini_session, session: 
                     await gemini_session.send_realtime_input(activity_end=types.ActivityEnd())
                     session.last_activity_at = time.monotonic()
                     session.turn_requested_at = time.monotonic()
+                    session.pending_silent_ack_since = None
                     await _on_user_turn(websocket, session, text)
                     if session.mode == "preferences":
                         # Typed text is verbatim (no STT step), unlike voice
@@ -1378,6 +1399,7 @@ async def _pump_client_to_gemini(websocket: WebSocket, gemini_session, session: 
                 # Marks the start of a manual (hold-to-talk) turn — required
                 # since automatic_activity_detection is disabled in _live_config.
                 session.last_activity_at = time.monotonic()
+                session.pending_silent_ack_since = None
                 await gemini_session.send_realtime_input(activity_start=types.ActivityStart())
             elif frame.get("type") == "speech_end":
                 await gemini_session.send_realtime_input(activity_end=types.ActivityEnd())
@@ -1392,6 +1414,7 @@ async def _flush_pending_input(websocket: WebSocket, session: SessionState) -> N
     text = session.pending_input_transcript
     session.pending_input_transcript = ""
     session.last_activity_at = time.monotonic()
+    session.pending_silent_ack_since = None
     # Voice path — text sent via send_realtime_input(text=...) is recorded in
     # _on_user_turn instead, since this event never fires for that case.
     await _on_user_turn(websocket, session, text)
@@ -1405,6 +1428,7 @@ async def _flush_pending_output(websocket: WebSocket, session: SessionState) -> 
     text = session.pending_output_transcript
     session.pending_output_transcript = ""
     session.last_activity_at = time.monotonic()
+    session.pending_silent_ack_since = None
     session.transcript.append({"role": "model", "text": text})
     if session.mode == "search":
         session.assistant_turns_in_search_mode += 1
@@ -1536,6 +1560,16 @@ async def _pump_gemini_to_client(websocket: WebSocket, gemini_session, session: 
                             }
                         )
                 await gemini_session.send_tool_response(function_responses=function_responses)
+                # record_preference's SILENT scheduling above means Gemini won't
+                # resume speaking on its own once this response is sent — if
+                # nothing else prompts it to talk within _SILENT_ACK_NUDGE_
+                # SECONDS, _watch_silent_tool_calls nudges it. Skip if the
+                # conversation already wrapped up (ready_to_finalize) — a nudge
+                # to "say something" makes no sense once it's moved to review.
+                if session.finalize_proposal is None and any(
+                    call.name == "record_preference" for call in (tool_call.function_calls or [])
+                ):
+                    session.pending_silent_ack_since = time.monotonic()
 
 
 # --- Mock-only heuristics (VOICE_ASSISTANT_MOCK_GEMINI=true path) -----------
@@ -1836,14 +1870,58 @@ async def _watch_inactivity(websocket: WebSocket, gemini_session, session: Sessi
             return
 
 
+async def _send_silent_ack_nudge(gemini_session) -> None:
+    """Sent when SessionState.pending_silent_ack_since has sat unset for
+    _SILENT_ACK_NUDGE_SECONDS (see _watch_silent_tool_calls) — record_
+    preference's SILENT function-response scheduling deliberately keeps
+    Gemini from resuming generation on its own, so when it was the model's
+    entire turn, this is the only thing that gets it talking again. Same
+    activity_start -> text -> activity_end shape as _send_timeout_nudge/
+    _send_greeting_trigger, for the same reason (see _send_greeting_trigger's
+    docstring)."""
+    await gemini_session.send_realtime_input(activity_start=types.ActivityStart())
+    await gemini_session.send_realtime_input(
+        text=(
+            "(You just silently recorded a preference without saying anything out "
+            "loud. Briefly acknowledge what you understood now, then continue with "
+            "your next question.)"
+        )
+    )
+    await gemini_session.send_realtime_input(activity_end=types.ActivityEnd())
+
+
+async def _watch_silent_tool_calls(gemini_session, session: SessionState) -> None:
+    """Runs for the whole session alongside the relay pumps and _watch_
+    inactivity. See _send_silent_ack_nudge for why this exists. Distinct from
+    _watch_inactivity's much longer INACTIVITY_NUDGE_SECONDS window — that one
+    is for a genuinely quiet/distracted user; this is for the assistant
+    itself going quiet right after silently recording something, which reads
+    as broken within a few seconds, not tens of seconds."""
+    while True:
+        await asyncio.sleep(_SILENT_ACK_POLL_SECONDS)
+        pending_since = session.pending_silent_ack_since
+        if pending_since is None or session.finalize_proposal is not None:
+            continue
+        if time.monotonic() - pending_since < _SILENT_ACK_NUDGE_SECONDS:
+            continue
+        session.pending_silent_ack_since = None
+        logger.info("voice session %s silent after record_preference — nudging", session.session_id)
+        try:
+            await _send_silent_ack_nudge(gemini_session)
+        except Exception:
+            logger.exception("voice session %s silent-ack nudge failed", session.session_id)
+
+
 async def run_voice_session(websocket: WebSocket, session: SessionState) -> None:
     """Open a Gemini Live API session and relay audio/text/tool-call traffic
     between it and the client WebSocket until the session ends. Races two
     concurrent watchers: _run_pumps (stops as soon as the client disconnects,
-    or as an absolute last resort at the hard SESSION_MAX_SECONDS backstop)
-    and _watch_inactivity (nudges then auto-saves on genuine silence,
-    regardless of total conversation length). Whichever finishes first wins;
-    the other is cancelled."""
+    or as an absolute last resort at the hard SESSION_MAX_SECONDS backstop),
+    _watch_inactivity (nudges then auto-saves on genuine silence, regardless
+    of total conversation length), and _watch_silent_tool_calls (nudges much
+    sooner when record_preference's SILENT scheduling left the model's turn
+    with nothing spoken at all). Whichever of the three finishes first wins;
+    the others are cancelled."""
     if _MOCK_GEMINI:
         try:
             await _run_mock_session(websocket, session)
@@ -1874,7 +1952,8 @@ async def run_voice_session(websocket: WebSocket, session: SessionState) -> None
 
             pumps_task = asyncio.ensure_future(_run_pumps(websocket, gemini_session, session, hard_remaining))
             watchdog_task = asyncio.ensure_future(_watch_inactivity(websocket, gemini_session, session))
-            tasks = {pumps_task, watchdog_task}
+            silent_ack_task = asyncio.ensure_future(_watch_silent_tool_calls(gemini_session, session))
+            tasks = {pumps_task, watchdog_task, silent_ack_task}
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in pending:
                 task.cancel()

@@ -33,11 +33,13 @@ from live_session import (
     run_voice_session,
     _sanitize_exclusion_term,
     _send_greeting_trigger,
+    _send_silent_ack_nudge,
     _send_timeout_nudge,
     _split_clauses,
     _strip_filler,
     _system_prompt,
     _watch_inactivity,
+    _watch_silent_tool_calls,
     apply_ready_to_finalize,
     apply_record_preference,
     apply_search_products,
@@ -1601,6 +1603,44 @@ async def test_pump_gemini_to_client_record_preference_tool_call_sends_patch():
     assert len(patch_frames) == 1
     assert patch_frames[0]["patch"]["preference_terms"] == ["Nike"]
 
+    # SILENT scheduling (see the call site) keeps Gemini from resuming
+    # speech on its own — pending_silent_ack_since must get set so
+    # _watch_silent_tool_calls can nudge it if nothing else makes it talk.
+    assert session.pending_silent_ack_since is not None
+    assert live_session.types.FunctionResponseScheduling.SILENT == gemini.tool_responses[-1][0].scheduling
+
+
+@pytest.mark.asyncio
+async def test_pump_gemini_to_client_record_preference_does_not_arm_silent_ack_after_finalize():
+    """Once the conversation has already moved to review (ready_to_finalize
+    called), a stray record_preference nudge to "say something" would be
+    nonsensical — must not arm pending_silent_ack_since in that state."""
+    ws = _FakeWebSocket([])
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+    session.finalize_proposal = {"shopping_categories": [], "preference_terms": [], "ignore_terms": [], "summary": "x"}
+    gemini = _FakeGeminiLiveSession([_tool_call_response("record_preference", {"preference_terms": ["Nike"]})])
+
+    with pytest.raises(_FakeSessionClosed):
+        await _pump_gemini_to_client(ws, gemini, session)
+
+    assert session.pending_silent_ack_since is None
+
+
+@pytest.mark.asyncio
+async def test_pump_gemini_to_client_output_speech_clears_pending_silent_ack():
+    """If the model does speak in the same or a later turn, the pending nudge
+    marker must clear — otherwise _watch_silent_tool_calls could fire a stale
+    nudge well after the model already responded."""
+    ws = _FakeWebSocket([])
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+    session.pending_silent_ack_since = time.monotonic()
+    gemini = _FakeGeminiLiveSession([_server_content_response(output_text="Got it, noted.")])
+
+    with pytest.raises(_FakeSessionClosed):
+        await _pump_gemini_to_client(ws, gemini, session)
+
+    assert session.pending_silent_ack_since is None
+
 
 @pytest.mark.asyncio
 async def test_pump_gemini_to_client_search_products_tool_call_sends_product_results(monkeypatch):
@@ -2084,3 +2124,103 @@ async def test_watch_inactivity_saves_immediately_when_proposal_already_confirme
     assert session.auto_saved is True
     assert len(calls) == 1
     assert ws.sent_json[-1]["type"] == "auto_saved"
+
+
+# --- _watch_silent_tool_calls --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_silent_ack_nudge_sends_activity_bracketed_text():
+    gemini = _FakeGeminiSession()
+
+    await _send_silent_ack_nudge(gemini)
+
+    assert gemini.activity_calls == ["start", "end"]
+    assert len(gemini.text_calls) == 1
+    assert "silently recorded" in gemini.text_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_watch_silent_tool_calls_nudges_once_after_threshold(monkeypatch):
+    """Regression guard: record_preference's SILENT function-response
+    scheduling can leave the model's turn with nothing spoken at all — this
+    watcher is the only thing that nudges it to continue in that case, and it
+    must do so much sooner than the general inactivity nudge."""
+    monkeypatch.setattr(live_session, "_SILENT_ACK_NUDGE_SECONDS", 0.05)
+    monkeypatch.setattr(live_session, "_SILENT_ACK_POLL_SECONDS", 0.01)
+    gemini = _FakeGeminiSession()
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+    session.pending_silent_ack_since = time.monotonic()
+
+    task = asyncio.ensure_future(_watch_silent_tool_calls(gemini, session))
+    try:
+        await asyncio.sleep(0.15)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert gemini.activity_calls == ["start", "end"]
+    assert len(gemini.text_calls) == 1
+    assert session.pending_silent_ack_since is None
+
+
+@pytest.mark.asyncio
+async def test_watch_silent_tool_calls_does_not_nudge_when_nothing_pending(monkeypatch):
+    monkeypatch.setattr(live_session, "_SILENT_ACK_NUDGE_SECONDS", 0.05)
+    monkeypatch.setattr(live_session, "_SILENT_ACK_POLL_SECONDS", 0.01)
+    gemini = _FakeGeminiSession()
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+
+    task = asyncio.ensure_future(_watch_silent_tool_calls(gemini, session))
+    try:
+        await asyncio.sleep(0.15)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert gemini.activity_calls == []
+
+
+@pytest.mark.asyncio
+async def test_watch_silent_tool_calls_does_not_nudge_when_cleared_before_threshold(monkeypatch):
+    """If the model does speak (or the user starts a new turn) before the
+    threshold elapses, pending_silent_ack_since is cleared elsewhere — this
+    watcher must not have already fired a stale nudge in that gap."""
+    monkeypatch.setattr(live_session, "_SILENT_ACK_NUDGE_SECONDS", 0.1)
+    monkeypatch.setattr(live_session, "_SILENT_ACK_POLL_SECONDS", 0.01)
+    gemini = _FakeGeminiSession()
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+    session.pending_silent_ack_since = time.monotonic()
+
+    task = asyncio.ensure_future(_watch_silent_tool_calls(gemini, session))
+    try:
+        await asyncio.sleep(0.03)
+        session.pending_silent_ack_since = None
+        await asyncio.sleep(0.15)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert gemini.activity_calls == []
+
+
+@pytest.mark.asyncio
+async def test_watch_silent_tool_calls_skips_once_finalized(monkeypatch):
+    """Once the conversation has moved to review (finalize_proposal set), a
+    "say something" nudge would be nonsensical even if something left
+    pending_silent_ack_since set — must not fire."""
+    monkeypatch.setattr(live_session, "_SILENT_ACK_NUDGE_SECONDS", 0.05)
+    monkeypatch.setattr(live_session, "_SILENT_ACK_POLL_SECONDS", 0.01)
+    gemini = _FakeGeminiSession()
+    session = SessionState(session_id="s1", uid="user-1", existing_profile={})
+    session.pending_silent_ack_since = time.monotonic()
+    session.finalize_proposal = {"shopping_categories": [], "preference_terms": [], "ignore_terms": [], "summary": "x"}
+
+    task = asyncio.ensure_future(_watch_silent_tool_calls(gemini, session))
+    try:
+        await asyncio.sleep(0.15)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert gemini.activity_calls == []

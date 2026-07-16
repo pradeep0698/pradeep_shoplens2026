@@ -5,6 +5,12 @@ Three diagrams covering different views of the voice assistant system:
 - [Control Flow](#control-flow) — session lifecycle and state transitions
 - [Prompt Flow](#prompt-flow) — how the Gemini system prompt is assembled
 
+**Scope note:** these diagrams cover the WS-proxy transport only (the one live in production
+today). They predate the direct-connect transport (mobile talking straight to Gemini Live via an
+ephemeral token) and the `VOICE_LIVE_PROVIDER` model switch — see
+[voice-assistant-websocket-transport.md](../explainer/voice-assistant-websocket-transport.md) for
+that architecture, including its own mermaid diagram covering both transports.
+
 ---
 
 ## Data Flow
@@ -34,7 +40,7 @@ flowchart TD
     end
 
     subgraph External["External Services"]
-        GEMINI["Gemini Live API\ngemini-live-2.5-flash-native-audio\nVertex AI us-central1"]
+        GEMINI["Gemini Live API\nVertex AI (default) or Developer API\nmodel/provider set by VOICE_LIVE_PROVIDER"]
         MATCHER["product-matcher\nPOST /search"]
         SERP["SerpAPI\nGoogle Shopping"]
         FS["Firestore\nUserProfiles collection"]
@@ -241,7 +247,7 @@ flowchart TD
     MODE --> TOOLS
     TOOLS --> Config
 
-    Config -->|"client.aio.live.connect(\n  model=gemini-live-2.5-flash-native-audio,\n  config=...)"| Connect
+    Config -->|"client.aio.live.connect(\n  model=<selected by VOICE_LIVE_PROVIDER>,\n  config=...)"| Connect
     Connect --> GREET
 ```
 

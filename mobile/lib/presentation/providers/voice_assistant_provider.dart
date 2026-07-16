@@ -352,10 +352,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   /// while the assistant is talking (status == speaking) — the gate keeps
   /// running continuously so the user can barge in just by talking, same as
   /// ChatGPT's voice mode. That only works because echoCancel/noiseSuppress/
-  /// autoGain are turned on below (plus AndroidAudioSource.voiceCommunication
-  /// on Android) so the mic doesn't simply pick the assistant's own voice
-  /// back up — see the listener's `started` handling for how a detected
-  /// barge-in flushes playback immediately.
+  /// autoGain are turned on below so the mic doesn't simply pick the
+  /// assistant's own voice back up — see the listener's `started` handling
+  /// for how a detected barge-in flushes playback immediately.
   Future<void> startHandsFree() async {
     if (state.isHandsFreeActive || _recorder == null) return;
     final generation = _generation;
@@ -363,10 +362,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
     _speechStarted = false;
     // isHandsFreeActive is only flipped on AFTER startStream() actually
     // succeeds (previously it was set optimistically before the await —
-    // if startStream() throws, e.g. AndroidAudioSource.voiceCommunication
-    // failing to open on some Android OEM/emulator builds, the UI showed
-    // "Listening" forever with a mic that was never actually capturing
-    // anything, and no error surfaced at all).
+    // if startStream() throws, the UI showed "Listening" forever with a mic
+    // that was never actually capturing anything, and no error surfaced at
+    // all).
     final recorderStartBegin = DateTime.now();
     final Stream<Uint8List> stream;
     try {
@@ -377,7 +375,17 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         echoCancel: true,
         noiseSuppress: true,
         autoGain: true,
-        androidConfig: const AndroidRecordConfig(audioSource: AndroidAudioSource.voiceCommunication),
+        // voiceCommunication (Android's telephony-tuned source, chosen for
+        // its OS-level AEC so the mic doesn't pick the assistant's own
+        // playback back up) turned out to over-suppress real speech on real
+        // devices outside of an active call — production traces showed mic
+        // chunks arriving but every one at an RMS too low to ever cross
+        // Pcm16SpeechGate's threshold, so zero audio ever reached Gemini.
+        // voiceRecognition applies far less aggressive processing at the
+        // cost of weaker echo rejection (echoCancel/noiseSuppress above are
+        // the plugin-level fallback for that) — trading barge-in robustness
+        // for audio actually going out at all.
+        androidConfig: const AndroidRecordConfig(audioSource: AndroidAudioSource.voiceRecognition),
       ));
     } catch (e) {
       _diagRecorderError = e.toString();
@@ -397,6 +405,21 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       if (outbound.isEmpty) return;
       _diagMicChunks++;
       _diagMicBytesReceived += outbound.length;
+      // Auto-VAD models (see VoiceTransport.usesAutoActivityDetection) need
+      // an unbroken audio stream to detect turn boundaries themselves —
+      // gating on our own RMS detector, as manual-control models require
+      // below, starves them of the silence either side of speech they need
+      // and leaves the turn hanging with no response (confirmed on real
+      // device audio — see docs/explainer/voice-assistant-gemini-live-model
+      // -switch.md §7). The gate still runs unconditionally below purely to
+      // drive local UI feedback (isRecording, optimistic barge-in flush);
+      // its .chunks are just never used for sending in this branch, so nothing
+      // here gets double-sent.
+      final autoActivityDetection = _socket?.usesAutoActivityDetection ?? false;
+      if (autoActivityDetection) {
+        _socket?.sendAudio(outbound);
+        _diagAudioBytesSent += outbound.length;
+      }
       final result = _speechGate?.add(outbound) ??
           const Pcm16SpeechGateCycleResult(event: Pcm16SpeechGateEvent.none, chunks: []);
       switch (result.event) {
@@ -427,27 +450,31 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           _diagEvent('gate_opened');
           _speechStarted = true;
           state = state.copyWith(isRecording: true);
-          _socket?.sendSpeechStart();
-          for (final c in result.chunks) {
-            if (c.isNotEmpty) {
-              _socket?.sendAudio(c);
-              _diagAudioBytesSent += c.length;
+          if (!autoActivityDetection) {
+            _socket?.sendSpeechStart();
+            for (final c in result.chunks) {
+              if (c.isNotEmpty) {
+                _socket?.sendAudio(c);
+                _diagAudioBytesSent += c.length;
+              }
             }
           }
         case Pcm16SpeechGateEvent.ended:
-          for (final c in result.chunks) {
-            if (c.isNotEmpty) {
-              _socket?.sendAudio(c);
-              _diagAudioBytesSent += c.length;
+          if (!autoActivityDetection) {
+            for (final c in result.chunks) {
+              if (c.isNotEmpty) {
+                _socket?.sendAudio(c);
+                _diagAudioBytesSent += c.length;
+              }
             }
+            _socket?.sendSpeechEnd();
           }
-          _socket?.sendSpeechEnd();
           _diagTurnRequestedAt = DateTime.now();
           _diagEvent('gate_closed');
           _speechStarted = false;
           state = state.copyWith(isRecording: false);
         case Pcm16SpeechGateEvent.none:
-          if (_speechStarted) {
+          if (!autoActivityDetection && _speechStarted) {
             for (final c in result.chunks) {
               if (c.isNotEmpty) {
                 _socket?.sendAudio(c);

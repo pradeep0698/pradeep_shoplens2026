@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:flutter_sound/flutter_sound.dart';
@@ -7,16 +6,19 @@ import 'package:flutter_sound/flutter_sound.dart';
 class VoiceAudioPlayer {
   static const outputSampleRate = 24000;
   static const outputChannelCount = 1;
-  // iOS's AVAudioEngine-backed stream player is more prone to buffer
-  // underflow than Android's, especially on the very first burst of a fresh
-  // player instance (see flutter_sound 9.30.0's "fixes the onBufferUnderflow
-  // bug" changelog entry) — a larger native ring buffer gives it more slack
-  // at the cost of a little latency.
-  static final int _bufferSize = Platform.isIOS ? 16384 : 8192;
-  // Brief pause after starting the native stream so the engine has time to
-  // stabilize before the first PCM chunk lands — targets the same first-burst
-  // underflow window as _bufferSize above. Only needed on iOS.
-  static const _iosWarmup = Duration(milliseconds: 180);
+  // Was iOS-only (16384 vs Android's 8192) because iOS's AVAudioEngine-backed
+  // stream player used to be the one more prone to buffer underflow on the
+  // first burst of a fresh player instance (flutter_sound 9.30.0's
+  // "onBufferUnderflow" fix). Testing against the dev backend
+  // (gemini-3.1-flash-live-preview, auto-VAD instead of manual hold-to-talk —
+  // see docs/explainer/voice-assistant-gemini-live-model-switch.md) surfaced
+  // static/glitches on Android specifically, not iOS — this model/pacing
+  // combination was never validated against real device audio before, so
+  // giving Android the same slack as an experiment to confirm/rule out
+  // underrun as the cause.
+  static const int _bufferSize = 16384;
+  // See _bufferSize above — same experiment, applied to both platforms now.
+  static const _startupWarmup = Duration(milliseconds: 180);
 
   FlutterSoundPlayer? _player;
   bool _ready = false;
@@ -33,9 +35,7 @@ class VoiceAudioPlayer {
       sampleRate: outputSampleRate,
       bufferSize: _bufferSize,
     );
-    if (Platform.isIOS) {
-      await Future<void>.delayed(_iosWarmup);
-    }
+    await Future<void>.delayed(_startupWarmup);
     _player = player;
     _ready = true;
   }
@@ -55,9 +55,7 @@ class VoiceAudioPlayer {
       sampleRate: outputSampleRate,
       bufferSize: _bufferSize,
     );
-    if (Platform.isIOS) {
-      await Future<void>.delayed(_iosWarmup);
-    }
+    await Future<void>.delayed(_startupWarmup);
   }
 
   Future<void> close() async {

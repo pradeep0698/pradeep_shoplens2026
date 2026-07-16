@@ -20,6 +20,7 @@ from live_session import (
     _filter_categories,
     _is_closing_phrase,
     _live_config,
+    _live_connect_target,
     _match_mock_category,
     _next_mock_prompt,
     _on_user_turn,
@@ -467,51 +468,55 @@ def test_live_config_respects_voice_name_env_override(monkeypatch):
     assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Kore"
 
 
-def test_live_config_leaves_temperature_and_top_p_at_the_api_default_unless_overridden():
-    # Real-device testing with an explicit temperature/top_p reduction
-    # produced new static/glitch artifacts in the audio itself, so these are
-    # left unset (None, i.e. the API's own default) unless an operator
-    # explicitly opts in via env var.
+def test_live_config_leaves_sampling_params_at_the_api_default():
+    # temperature/top_p/top_k were all tried (in that order) as an attempt to
+    # smooth out reported audio glitches — each real-device test made the
+    # glitching worse, not better, so none of them are set here.
     config = _live_config(
         {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
     )
     assert config.temperature is None
     assert config.top_p is None
-
-
-def test_live_config_respects_temperature_and_top_p_env_overrides(monkeypatch):
-    monkeypatch.setattr(live_session, "_VOICE_TEMPERATURE", 0.4)
-    monkeypatch.setattr(live_session, "_VOICE_TOP_P", 0.85)
-    config = _live_config(
-        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
-    )
-    assert config.temperature == 0.4
-    assert config.top_p == 0.85
-
-
-def test_live_config_defaults_top_k_to_40():
-    config = _live_config(
-        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
-    )
-    assert config.top_k == 40
-
-
-def test_live_config_respects_top_k_env_override(monkeypatch):
-    monkeypatch.setattr(live_session, "_VOICE_TOP_K", 20.0)
-    config = _live_config(
-        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
-    )
-    assert config.top_k == 20
+    assert config.top_k is None
 
 
 def test_live_config_disables_automatic_activity_detection():
     """Turn boundaries are now driven by the client's hold-to-talk button
     (speech_start/speech_end -> activity_start/activity_end), not Gemini's
-    own VAD over the resampled mic audio."""
+    own VAD over the resampled mic audio. Default voice_model (gemini-live-
+    2.5-flash-native-audio via _VOICE_MODEL) supports this combination."""
     config = _live_config(
         {"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "preferences", "English"
     )
     assert config.realtime_input_config.automatic_activity_detection.disabled is True
+
+
+def test_live_config_uses_automatic_detection_for_models_that_reject_manual_control(monkeypatch):
+    # Regression test for a live 1007 "Precondition check failed" close on the
+    # first realtime-input turn: gemini-3.1-flash-live-preview rejects the
+    # combination of automatic_activity_detection.disabled=True plus explicit
+    # activity_start/activity_end markers (confirmed via a live spike — each
+    # half works alone, only the combination fails). For any model in
+    # _AUTO_ACTIVITY_DETECTION_ONLY_MODELS, realtime_input_config must be left
+    # unset so Gemini's own activity detection drives turn boundaries instead.
+    config = _live_config(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []},
+        "preferences", "English",
+        voice_model="models/gemini-3.1-flash-live-preview",
+    )
+    assert config.realtime_input_config is None
+
+
+def test_live_config_bare_model_string_also_matches_auto_detection_set(monkeypatch):
+    # mint_ephemeral_token's _VOICE_MODEL_DEV_API can plausibly be set to
+    # either the bare or "models/"-prefixed form depending on the Developer
+    # API's naming convention for a given model -- both must be covered.
+    config = _live_config(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []},
+        "preferences", "English",
+        voice_model="gemini-3.1-flash-live-preview",
+    )
+    assert config.realtime_input_config is None
 
 
 def test_live_config_preferences_mode_uses_preference_tools():
@@ -980,6 +985,10 @@ def test_mint_ephemeral_token_uses_dev_api_client_and_locks_config(monkeypatch):
 
     monkeypatch.setattr(live_session, "_get_dev_api_client", lambda: _FakeDevClient())
     monkeypatch.setattr(live_session, "_build_setup_json", lambda model, config, client: {"model": model})
+    # Default _VOICE_MODEL_DEV_API (2.5) supports manual activity control --
+    # confirms mint_ephemeral_token threads voice_model into _live_config
+    # rather than leaving it at _live_config's own _VOICE_MODEL default.
+    monkeypatch.setattr(live_session, "_VOICE_MODEL_DEV_API", "models/gemini-2.5-flash-native-audio-latest")
 
     result = mint_ephemeral_token({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search")
 
@@ -989,6 +998,59 @@ def test_mint_ephemeral_token_uses_dev_api_client_and_locks_config(monkeypatch):
     assert captured["config"].uses == 1
     assert captured["config"].lock_additional_fields == []
     assert captured["config"].live_connect_constraints.model == live_session._VOICE_MODEL_DEV_API
+    locked_config = captured["config"].live_connect_constraints.config
+    assert locked_config.realtime_input_config.automatic_activity_detection.disabled is True
+
+
+def test_mint_ephemeral_token_uses_automatic_detection_when_dev_api_model_needs_it(monkeypatch):
+    captured = {}
+
+    class _FakeAuthTokens:
+        def create(self, config):
+            captured["config"] = config
+            return pytypes.SimpleNamespace(name="auth_tokens/fake123")
+
+    class _FakeDevClient:
+        auth_tokens = _FakeAuthTokens()
+
+    monkeypatch.setattr(live_session, "_get_dev_api_client", lambda: _FakeDevClient())
+    monkeypatch.setattr(live_session, "_build_setup_json", lambda model, config, client: {"model": model})
+    monkeypatch.setattr(live_session, "_VOICE_MODEL_DEV_API", "models/gemini-3.1-flash-live-preview")
+
+    mint_ephemeral_token({"shopping_categories": [], "preference_terms": [], "ignore_terms": []}, "search")
+
+    locked_config = captured["config"].live_connect_constraints.config
+    assert locked_config.realtime_input_config is None
+
+
+def test_mint_ephemeral_token_threads_resume_transcript_into_locked_config(monkeypatch):
+    # Regression test: mint_ephemeral_token used to silently drop
+    # resume_transcript, so a reconnect on the direct-connect transport would
+    # mint a token locked to a system prompt with no _resume_note — losing
+    # all prior-conversation context on resume (unlike the proxy path, which
+    # threads resume_transcript into _live_config via run_voice_session).
+    captured = {}
+
+    class _FakeAuthTokens:
+        def create(self, config):
+            captured["config"] = config
+            return pytypes.SimpleNamespace(name="auth_tokens/fake123")
+
+    class _FakeDevClient:
+        auth_tokens = _FakeAuthTokens()
+
+    monkeypatch.setattr(live_session, "_get_dev_api_client", lambda: _FakeDevClient())
+    monkeypatch.setattr(live_session, "_build_setup_json", lambda model, config, client: {"model": model})
+
+    mint_ephemeral_token(
+        {"shopping_categories": [], "preference_terms": [], "ignore_terms": []},
+        "preferences",
+        resume_transcript=[{"role": "user", "text": "I like minimalist furniture"}],
+    )
+
+    locked_prompt = captured["config"].live_connect_constraints.config.system_instruction.parts[0].text
+    assert "interrupted" in locked_prompt.lower()
+    assert "I like minimalist furniture" in locked_prompt
 
 
 def test_build_setup_json_output_is_json_serializable():
@@ -1024,6 +1086,57 @@ def test_get_dev_api_client_raises_without_api_key(monkeypatch):
 
     with pytest.raises(RuntimeError, match="AI_STUDIO_API_KEY"):
         live_session._get_dev_api_client()
+
+
+# --- _live_connect_target (VOICE_LIVE_PROVIDER switch for the WS-proxy
+# path's own live session) ----------------------------------------------------
+
+
+def test_live_connect_target_defaults_to_vertex(monkeypatch):
+    monkeypatch.setattr(live_session, "_VOICE_LIVE_PROVIDER", "vertex")
+    sentinel = object()
+    monkeypatch.setattr(live_session, "_get_client", lambda: sentinel)
+
+    client, model = _live_connect_target()
+
+    assert client is sentinel
+    assert model == live_session._VOICE_MODEL
+
+
+def test_live_connect_target_uses_dev_api_when_configured(monkeypatch):
+    monkeypatch.setattr(live_session, "_VOICE_LIVE_PROVIDER", "dev_api")
+    sentinel = object()
+    monkeypatch.setattr(live_session, "_get_dev_api_client", lambda: sentinel)
+
+    client, model = _live_connect_target()
+
+    assert client is sentinel
+    assert model == live_session._VOICE_MODEL_DEV_API
+
+
+def test_voice_live_provider_does_not_affect_extraction_client(monkeypatch):
+    # _extract_patch_from_transcript must stay pinned to Vertex AI (_get_client)
+    # regardless of VOICE_LIVE_PROVIDER — it's an unrelated cheap text call,
+    # not part of the Live session _live_connect_target selects for.
+    monkeypatch.setattr(live_session, "_VOICE_LIVE_PROVIDER", "dev_api")
+
+    class _FakeModels:
+        @staticmethod
+        def generate_content(**kwargs):
+            return pytypes.SimpleNamespace(
+                text=json.dumps({"shopping_categories": [], "preference_terms": [], "ignore_terms": []})
+            )
+
+    class _FakeVertexClient:
+        models = _FakeModels()
+
+    def _fail_if_called():
+        raise AssertionError("extraction must not use the dev_api client")
+
+    monkeypatch.setattr(live_session, "_get_client", lambda: _FakeVertexClient())
+    monkeypatch.setattr(live_session, "_get_dev_api_client", _fail_if_called)
+
+    _extract_patch_from_transcript([], {})  # must not raise
 
 
 @pytest.mark.asyncio

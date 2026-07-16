@@ -6,9 +6,10 @@
 # Prerequisites:
 # 1. Fill in the REPLACE_WITH_* values in .dart_define/cookshop-dev.json
 #    with the real keys from the cookshop-dev-prj-bd7e2 Firebase console.
-#    If testing the direct-connect voice transport, also add an
-#    AI_STUDIO_API_KEY entry (a static AI Studio key — see
-#    gemini_live_socket_client.dart) and VOICE_DIRECT_CONNECT_ENABLED: "true".
+#    If testing the direct-connect voice transport, also add a
+#    VOICE_DIRECT_CONNECT_ENABLED: "true" entry — it authenticates via an
+#    ephemeral token minted by the backend (POST /voice/session/token), not
+#    a key baked into the app, so no AI Studio key dart-define is needed here.
 # 2. Place the cookshop-dev google-services.json at:
 #    android/app/google-services.cookshop-dev.json
 #    (download from Firebase console > Project settings > Your apps > Android)

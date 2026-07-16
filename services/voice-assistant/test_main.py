@@ -383,7 +383,9 @@ def test_mint_session_token_returns_minted_token(client, monkeypatch):
     session_id = _start_session(client, monkeypatch, uid="user-1")
     monkeypatch.setattr(
         main, "mint_ephemeral_token",
-        lambda existing_profile, mode, language: {"token": "auth_tokens/fake", "model": "models/fake", "setup": {}},
+        lambda existing_profile, mode, language, resume_transcript: {
+            "token": "auth_tokens/fake", "model": "models/fake", "setup": {},
+        },
     )
     monkeypatch.setattr(profile_store, "verify_id_token", lambda header: "user-1")
 

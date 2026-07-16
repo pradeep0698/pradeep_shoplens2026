@@ -7,6 +7,7 @@ import '../../core/utils/session_id.dart';
 import '../../data/models/analyze_request.dart';
 import '../../data/models/product.dart';
 import '../../data/models/user_profile.dart';
+import '../../data/repositories/object_search_cache_repository.dart';
 import '../../data/sources/remote/analyzer_api.dart';
 import '../../domain/usecases/tap_identify_usecase.dart';
 import 'auth_provider.dart';
@@ -206,7 +207,16 @@ class ScanReviewNotifier extends AutoDisposeNotifier<ScanReviewState> {
 
   Future<void> _searchOne(int index, String sessionId, UserProfile profile) async {
     final item = state.items[index];
+    final cacheKey = objectSearchCacheRepository.keyFor(item.cropBytes!);
     try {
+      // Same object, same crop bytes (re-picking the same gallery image
+      // re-detects deterministically) — skip re-researching it.
+      final cached = await objectSearchCacheRepository.get(cacheKey);
+      if (cached != null) {
+        _setItem(index, (it) => it.copyWith(status: ItemSearchStatus.done, products: cached));
+        return;
+      }
+
       final products = await ref.read(tapIdentifyUseCaseProvider).identify(
             croppedBytes:       item.cropBytes!,
             sessionId:          sessionId,
@@ -218,6 +228,7 @@ class ScanReviewNotifier extends AutoDisposeNotifier<ScanReviewState> {
             query:              item.nameIsDescriptive ? item.name : null,
           );
       _setItem(index, (it) => it.copyWith(status: ItemSearchStatus.done, products: products));
+      await objectSearchCacheRepository.put(cacheKey, products);
     } catch (e) {
       _setItem(index, (it) => it.copyWith(status: ItemSearchStatus.error, errorMessage: e.toString()));
     }

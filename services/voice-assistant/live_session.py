@@ -55,6 +55,16 @@ _EXTRACTION_MODEL = os.environ.get("EXTRACTION_MODEL", "gemini-2.5-flash")
 # Aoede, Leda, Orus, Zephyr) — Puck is also Gemini Live's own default, but set
 # it explicitly so the choice is intentional and swappable via env var alone.
 _VOICE_NAME = os.environ.get("VOICE_NAME", "Puck")
+# A/B experiment knob for garbled/mushed word-endings on the native-audio
+# model (this model samples audio tokens directly, not text-to-speech over a
+# separate vocoder — see the removed _VOICE_TEMPERATURE/_VOICE_TOP_P in git
+# history, commits 1dd1cb5/c11283e). temperature/top_p reduction was tried
+# and reverted: it introduced NEW static/glitch artifacts instead of fixing
+# the garbling. top_k is a narrower knob — it caps the candidate-token pool
+# without otherwise reshaping the sampling distribution the way temperature/
+# top_p do — untried in isolation before. Left unset (None, the API default)
+# unless explicitly set via env var, so this is purely opt-in per environment.
+_VOICE_TOP_K = float(os.environ["VOICE_TOP_K"]) if os.environ.get("VOICE_TOP_K") else None
 # Pure cost/runaway-session backstop now — decoupled from the nudge/auto-save
 # logic below, which is driven by genuine inactivity instead, so a real,
 # actively-engaged conversation should essentially never hit this.
@@ -667,6 +677,7 @@ def _live_config(
     )
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
+        top_k=_VOICE_TOP_K,
         tools=_tools_for_mode(mode),
         system_instruction=types.Content(
             parts=[types.Part(text=_system_prompt(existing_profile, mode, language, resume_transcript))]
@@ -1835,7 +1846,10 @@ async def run_voice_session(websocket: WebSocket, session: SessionState) -> None
                 session.existing_profile, session.mode, session.language, resume_transcript, voice_model=voice_model
             ),
         ) as gemini_session:
-            _trace(session.session_id, "gemini_connected", ms=round((time.monotonic() - connect_start) * 1000))
+            _trace(
+                session.session_id, "gemini_connected",
+                ms=round((time.monotonic() - connect_start) * 1000), voice_model=voice_model,
+            )
             await _send_greeting_trigger(gemini_session, resumed=bool(resume_transcript))
             session.last_activity_at = time.monotonic()
 

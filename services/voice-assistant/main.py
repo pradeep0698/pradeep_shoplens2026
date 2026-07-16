@@ -484,7 +484,7 @@ async def mint_session_token(request: SessionTokenRequest, http_request: Request
         logger.exception("token mint failed for session %s: %s", request.session_id, exc)
         _trace(request.session_id, "token_mint_failed", ms=round((time.monotonic() - start) * 1000), error=f"{type(exc).__name__}: {exc}")
         raise HTTPException(status_code=502, detail="Failed to mint Gemini Live token")
-    _trace(request.session_id, "token_mint", ms=round((time.monotonic() - start) * 1000))
+    _trace(request.session_id, "token_mint", ms=round((time.monotonic() - start) * 1000), voice_model=token_data.get("model"))
     return JSONResponse(content=token_data, headers={"X-Request-Id": req_id})
 
 

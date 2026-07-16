@@ -162,24 +162,28 @@ class _ReadyBody extends ConsumerWidget {
                     children: [
                       Container(color: const Color(0xFF1E293B)),
                       Image.memory(imageBytes, fit: BoxFit.contain, width: double.infinity, height: double.infinity),
-                      // Below the dots in z-order (see hit-test note on
-                      // _ManualPointLayer) so an existing dot always wins a
-                      // tap over adding a new point on top of it.
-                      _ManualPointLayer(
-                        widgetSize: widgetSize,
-                        onPointAdded: (widgetRect) {
-                          final box = widgetRectToGeminiBox(widgetRect, imageSize, widgetSize, BoxFit.contain);
-                          ref.read(scanReviewProvider.notifier).addManualItem(box, imageBytes);
-                        },
-                      ),
                       ObjectGlowOverlay(
                         objects:         labels,
                         imageSize:       imageSize,
                         widgetSize:      widgetSize,
                         boxFit:          BoxFit.contain,
                         selectedIndices: state.selected,
-                        onObjectTap:     (i) => ref.read(scanReviewProvider.notifier).toggleSelect(i),
+                        // Purely visual here — tap handling for both dots and
+                        // empty-area points is centralized in
+                        // _InteractionLayer below, which owns the single
+                        // gesture detector covering the whole image.
+                        onObjectTap:     null,
                         showLabels:      false,
+                      ),
+                      _InteractionLayer(
+                        items:      state.items,
+                        imageSize:  imageSize,
+                        widgetSize: widgetSize,
+                        onToggleDot: (i) => ref.read(scanReviewProvider.notifier).toggleSelect(i),
+                        onAddPoint: (widgetRect) {
+                          final box = widgetRectToGeminiBox(widgetRect, imageSize, widgetSize, BoxFit.contain);
+                          ref.read(scanReviewProvider.notifier).addManualItem(box, imageBytes);
+                        },
                       ),
                     ],
                   );
@@ -223,46 +227,78 @@ class _ReadyBody extends ConsumerWidget {
   }
 }
 
-/// Always-on layer (no mode toggle) that turns a touch anywhere on the image
-/// into a new selectable point: a quick tap adds a fixed-size box centered on
-/// the tap; dragging a circle/lasso/line around an item adds its bounding
-/// box instead. Sits *below* [ObjectGlowOverlay] in the Stack — Flutter hit
-/// tests a Stack's children top-down and stops at the first one that claims
-/// the point, and ObjectGlowOverlay's dot targets only occupy small 44x44
-/// regions (so they return `false` everywhere else) — so an existing dot
-/// always intercepts its own taps first, and this layer only ever sees
-/// touches that missed every dot.
-class _ManualPointLayer extends StatefulWidget {
-  const _ManualPointLayer({required this.widgetSize, required this.onPointAdded});
+/// Single gesture layer covering the whole image, on top of everything else
+/// in the Stack — owns every touch instead of splitting tap-vs-empty-area
+/// handling across sibling widgets and hoping Flutter's Stack hit-test
+/// fallthrough sorts it out (that approach proved unreliable in practice).
+/// On pointer-down it decides, in plain code, whether the touch landed near
+/// an existing dot (toggle it) or not (track it as a candidate new point):
+/// a quick tap adds a fixed-size box centered on the tap; dragging a
+/// circle/lasso/line around an item adds its bounding box instead.
+class _InteractionLayer extends StatefulWidget {
+  const _InteractionLayer({
+    required this.items,
+    required this.imageSize,
+    required this.widgetSize,
+    required this.onToggleDot,
+    required this.onAddPoint,
+  });
+  final List<DetectedItem> items;
+  final Size imageSize;
   final Size widgetSize;
-  final void Function(Rect widgetRect) onPointAdded;
+  final void Function(int index) onToggleDot;
+  final void Function(Rect widgetRect) onAddPoint;
 
   @override
-  State<_ManualPointLayer> createState() => _ManualPointLayerState();
+  State<_InteractionLayer> createState() => _InteractionLayerState();
 }
 
-class _ManualPointLayerState extends State<_ManualPointLayer> {
+class _InteractionLayerState extends State<_InteractionLayer> {
   final List<Offset> _points = [];
+  int? _pendingDotIndex;
 
+  // Matches the ~44px comfortable touch target ObjectGlowOverlay's own
+  // (now-unused-for-taps) dot detectors used.
+  static const _dotTapRadius = 24.0;
   // A drag shorter than this in either dimension is treated as a plain tap
   // rather than a deliberately drawn area.
   static const _dragThreshold = 20.0;
 
   double get _tapBoxSize => (widget.widgetSize.shortestSide * 0.14).clamp(56.0, 130.0);
 
+  int? _dotNear(Offset point) {
+    for (var i = 0; i < widget.items.length; i++) {
+      final box = widget.items[i].box;
+      if (box == null) continue;
+      final center = normalizedToWidget(
+        geminiBoxToNormalizedRect(box), widget.imageSize, widget.widgetSize, BoxFit.contain,
+      ).center;
+      if ((center - point).distance <= _dotTapRadius) return i;
+    }
+    return null;
+  }
+
   // onPanDown (not onPanStart) fires on every pointer-down inside these
   // bounds, drag or not — it's the only callback guaranteed to fire for a
-  // plain tap that never moves past the pan gesture's touch-slop.
-  void _onPanDown(DragDownDetails d) => setState(() {
-        _points
-          ..clear()
-          ..add(d.localPosition);
-      });
+  // plain tap that never moves past the pan gesture's touch-slop. Deciding
+  // dot-vs-empty-area right here means the decision doesn't depend on how
+  // far (if at all) the finger later moves.
+  void _onPanDown(DragDownDetails d) {
+    _pendingDotIndex = _dotNear(d.localPosition);
+    setState(() {
+      _points
+        ..clear()
+        ..add(d.localPosition);
+    });
+  }
 
   void _onPanUpdate(DragUpdateDetails d) => setState(() => _points.add(d.localPosition));
 
   void _onPanEnd(DragEndDetails d) {
-    if (_points.isNotEmpty) {
+    final dotIndex = _pendingDotIndex;
+    if (dotIndex != null) {
+      widget.onToggleDot(dotIndex);
+    } else if (_points.isNotEmpty) {
       var minX = _points.first.dx, maxX = _points.first.dx;
       var minY = _points.first.dy, maxY = _points.first.dy;
       for (final p in _points) {
@@ -275,12 +311,16 @@ class _ManualPointLayerState extends State<_ManualPointLayer> {
       if (rect.width < _dragThreshold || rect.height < _dragThreshold) {
         rect = Rect.fromCenter(center: rect.center, width: _tapBoxSize, height: _tapBoxSize);
       }
-      widget.onPointAdded(rect);
+      widget.onAddPoint(rect);
     }
+    _pendingDotIndex = null;
     setState(() => _points.clear());
   }
 
-  void _onPanCancel() => setState(() => _points.clear());
+  void _onPanCancel() {
+    _pendingDotIndex = null;
+    setState(() => _points.clear());
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -292,7 +332,9 @@ class _ManualPointLayerState extends State<_ManualPointLayer> {
       onPanCancel: _onPanCancel,
       child: CustomPaint(
         size: Size.infinite,
-        painter: _DrawPathPainter(points: _points),
+        // No path preview while dragging out of an existing dot — that
+        // gesture just toggles selection, nothing to draw.
+        painter: _pendingDotIndex == null ? _DrawPathPainter(points: _points) : null,
       ),
     );
   }

@@ -84,6 +84,12 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> w
     // link), and must not be acted on here, or it reintroduces the bug
     // described in dispose() below.
     if (lifecycleState == AppLifecycleState.paused) {
+      // Silence TTS output immediately — unlike the full session teardown
+      // below, this can't wait out the debounce, or the assistant keeps
+      // audibly talking for up to _kPauseDebounce after the user presses
+      // Home. Doesn't touch the mic/socket/session, so it's harmless even if
+      // this turns out to be a brief Buy-link round trip.
+      ref.read(voiceAssistantProvider.notifier).muteForBackground();
       // Tapping a Buy link (launchUrl with LaunchMode.externalApplication)
       // triggers a real `paused` transition on real devices, not just
       // `inactive` — opening an external browser is a genuine app switch.
@@ -96,8 +102,12 @@ class _VoiceAssistantOverlayState extends ConsumerState<VoiceAssistantOverlay> w
         unawaited(ref.read(voiceAssistantProvider.notifier).pauseForBackground());
       });
     } else if (lifecycleState == AppLifecycleState.resumed) {
-      // Came back before the debounce elapsed — the live session was never
-      // touched, so there's nothing to resume, just cancel the pending pause.
+      if (_pauseDebounce != null) {
+        // Came back before the debounce elapsed — the live session was never
+        // torn down, just the audio muteForBackground() silenced above.
+        // Resume it in place; nothing else was touched.
+        ref.read(voiceAssistantProvider.notifier).unmuteForBackground();
+      }
       _pauseDebounce?.cancel();
       _pauseDebounce = null;
     }

@@ -58,6 +58,33 @@ class VoiceAudioPlayer {
     await Future<void>.delayed(_startupWarmup);
   }
 
+  // Immediately silences output without closing the player — unlike flush(),
+  // does not restart the stream, so playback stays off until resumePlayback()
+  // is called. Used to instantly cut audio when the app is backgrounded
+  // (AppLifecycleState.paused fires no matter how long the backgrounding
+  // lasts, but tearing the whole session down is debounced to survive a
+  // brief external-browser round trip — see voice_assistant_overlay.dart) —
+  // stopPlayer() is the only call that actually stops already-buffered
+  // audio from playing out; simply not feeding new chunks leaves whatever is
+  // already queued in the native stream buffer to keep playing.
+  Future<void> pausePlayback() async {
+    if (!_ready || _player == null) return;
+    try {
+      await _player!.stopPlayer();
+    } catch (_) {}
+  }
+
+  Future<void> resumePlayback() async {
+    if (!_ready || _player == null) return;
+    await _player!.startPlayerFromStream(
+      codec: Codec.pcm16,
+      interleaved: true,
+      numChannels: outputChannelCount,
+      sampleRate: outputSampleRate,
+      bufferSize: _bufferSize,
+    );
+  }
+
   Future<void> close() async {
     if (!_ready || _player == null) return;
     try {

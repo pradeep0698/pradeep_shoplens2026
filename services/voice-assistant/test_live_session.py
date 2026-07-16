@@ -317,14 +317,31 @@ def test_profile_note_carve_out_does_not_exempt_per_search_clarifying_questions(
     exactly the population most likely to trigger premature searching (a
     first-time user gets a different branch with no such carve-out). The
     note must explicitly reaffirm the per-search gather-first requirement
-    still applies."""
+    still applies. This carve-out is search-mode-specific — the "GATHER
+    FIRST" rule it references only exists in SEARCH_SYSTEM_PROMPT_TEMPLATE."""
     note = _profile_note({
         "shopping_categories": ["Clothing"],
         "preference_terms": ["Nike"],
         "ignore_terms": ["leather"],
-    })
+    }, mode="search")
     assert "don't" in note.lower() and "re-ask" in note.lower()
     assert "gather first" in note.lower()
+
+
+def test_profile_note_preferences_mode_tells_model_to_keep_talking():
+    """Regression guard: preferences (onboarding) mode has no "GATHER FIRST"
+    rule at all, so the search-mode carve-out text used to leave a dangling
+    reference to a rule the model was never given — which correlated with the
+    model reciting the profile summary and then going silent instead of
+    continuing the conversation. The preferences-mode note must instead tell
+    the model to keep talking after acknowledging known preferences."""
+    note = _profile_note({
+        "shopping_categories": ["Clothing"],
+        "preference_terms": ["Nike"],
+        "ignore_terms": ["leather"],
+    }, mode="preferences")
+    assert "gather first" not in note.lower()
+    assert "follow-up question" in note.lower()
 
 
 def test_profile_note_flattens_category_keyed_terms_instead_of_joining_dict_keys():

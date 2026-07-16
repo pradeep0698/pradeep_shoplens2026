@@ -114,6 +114,22 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   // still applies for genuine mid-utterance barge-in.
   DateTime? _speakingSince;
   static const _bargeInGraceMs = 400;
+  // Set the moment startHandsFree()'s mic stream actually starts capturing —
+  // mirrors _speakingSince's grace window but for the mic side: re-arming the
+  // mic while the assistant is already mid-speech (e.g. the user toggles
+  // hands-free off then straight back on) is exactly when echo leakage is
+  // most likely, since there's no assistant-turn-start grace period to fall
+  // back on at that point (_speakingSince reflects when the assistant's turn
+  // began, not when the mic (re)armed, so it can already be well outside
+  // _bargeInGraceMs). See the Pcm16SpeechGateEvent.started handler.
+  DateTime? _micArmedSince;
+  static const _micArmGraceMs = 500;
+  // Guards startHandsFree()/stopHandsFree() against overlapping calls (e.g. a
+  // fast off-then-on double tap) racing on the same _recorder/_micSubscription
+  // — both methods await platform calls before flipping isHandsFreeActive, so
+  // without this a second tap during that window could re-enter with stale
+  // state.
+  bool _handsFreeTransitionInFlight = false;
   // False until the assistant's first utterance on the current player
   // instance (almost always the opening greeting) has finished — the local
   // VAD flush is skipped entirely for that one turn (see the
@@ -280,6 +296,7 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       _agc = Pcm16Agc(sampleRateHz: VoiceAudioPlayer.outputSampleRate);
       _speakingSince = null;
       _hadFirstSpeakingTurn = false;
+      _micArmedSince = null;
 
       final socket = createVoiceTransport(
         directConnectAllowed: startResponse.directConnectAllowed,
@@ -356,50 +373,53 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   /// assistant's own voice back up — see the listener's `started` handling
   /// for how a detected barge-in flushes playback immediately.
   Future<void> startHandsFree() async {
-    if (state.isHandsFreeActive || _recorder == null) return;
-    final generation = _generation;
-    _speechGate = Pcm16ReArmableSpeechGate(sampleRate: _kInputSampleRate);
-    _speechStarted = false;
-    // isHandsFreeActive is only flipped on AFTER startStream() actually
-    // succeeds (previously it was set optimistically before the await —
-    // if startStream() throws, the UI showed "Listening" forever with a mic
-    // that was never actually capturing anything, and no error surfaced at
-    // all).
-    final recorderStartBegin = DateTime.now();
-    final Stream<Uint8List> stream;
+    if (state.isHandsFreeActive || _recorder == null || _handsFreeTransitionInFlight) return;
+    _handsFreeTransitionInFlight = true;
     try {
-      stream = await _recorder!.startStream(RecordConfig(
-        encoder: AudioEncoder.pcm16bits,
-        sampleRate: _captureSampleRate,
-        numChannels: 1,
-        echoCancel: true,
-        noiseSuppress: true,
-        autoGain: true,
-        // voiceCommunication (Android's telephony-tuned source, chosen for
-        // its OS-level AEC so the mic doesn't pick the assistant's own
-        // playback back up) turned out to over-suppress real speech on real
-        // devices outside of an active call — production traces showed mic
-        // chunks arriving but every one at an RMS too low to ever cross
-        // Pcm16SpeechGate's threshold, so zero audio ever reached Gemini.
-        // voiceRecognition applies far less aggressive processing at the
-        // cost of weaker echo rejection (echoCancel/noiseSuppress above are
-        // the plugin-level fallback for that) — trading barge-in robustness
-        // for audio actually going out at all.
-        androidConfig: const AndroidRecordConfig(audioSource: AndroidAudioSource.voiceRecognition),
-      ));
-    } catch (e) {
-      _diagRecorderError = e.toString();
-      _diagEvent('recorder_start_failed', {'error': e.toString()});
-      _flushDiagnostics();
-      state = state.copyWith(
-        status: VoiceStatus.error,
-        errorMessage: 'Could not start the microphone (${_displayVoiceError(e)}) — tap the mic to try again.',
-      );
-      return;
-    }
-    _diagEvent('recorder_started', {'ms': DateTime.now().difference(recorderStartBegin).inMilliseconds});
-    state = state.copyWith(isHandsFreeActive: true);
-    _micSubscription = stream.listen((chunk) {
+      final generation = _generation;
+      _speechGate = Pcm16ReArmableSpeechGate(sampleRate: _kInputSampleRate);
+      _speechStarted = false;
+      // isHandsFreeActive is only flipped on AFTER startStream() actually
+      // succeeds (previously it was set optimistically before the await —
+      // if startStream() throws, the UI showed "Listening" forever with a mic
+      // that was never actually capturing anything, and no error surfaced at
+      // all).
+      final recorderStartBegin = DateTime.now();
+      final Stream<Uint8List> stream;
+      try {
+        stream = await _recorder!.startStream(RecordConfig(
+          encoder: AudioEncoder.pcm16bits,
+          sampleRate: _captureSampleRate,
+          numChannels: 1,
+          echoCancel: true,
+          noiseSuppress: true,
+          autoGain: true,
+          // voiceCommunication (Android's telephony-tuned source, chosen for
+          // its OS-level AEC so the mic doesn't pick the assistant's own
+          // playback back up) turned out to over-suppress real speech on real
+          // devices outside of an active call — production traces showed mic
+          // chunks arriving but every one at an RMS too low to ever cross
+          // Pcm16SpeechGate's threshold, so zero audio ever reached Gemini.
+          // voiceRecognition applies far less aggressive processing at the
+          // cost of weaker echo rejection (echoCancel/noiseSuppress above are
+          // the plugin-level fallback for that) — trading barge-in robustness
+          // for audio actually going out at all.
+          androidConfig: const AndroidRecordConfig(audioSource: AndroidAudioSource.voiceRecognition),
+        ));
+      } catch (e) {
+        _diagRecorderError = e.toString();
+        _diagEvent('recorder_start_failed', {'error': e.toString()});
+        _flushDiagnostics();
+        state = state.copyWith(
+          status: VoiceStatus.error,
+          errorMessage: 'Could not start the microphone (${_displayVoiceError(e)}) — tap the mic to try again.',
+        );
+        return;
+      }
+      _diagEvent('recorder_started', {'ms': DateTime.now().difference(recorderStartBegin).inMilliseconds});
+      state = state.copyWith(isHandsFreeActive: true);
+      _micArmedSince = DateTime.now();
+      _micSubscription = stream.listen((chunk) {
       if (!_isCurrent(generation) || !state.isHandsFreeActive) return;
       final outbound = _micResampler?.convert(chunk) ?? chunk;
       if (outbound.isEmpty) return;
@@ -437,11 +457,26 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           // the user is genuinely interrupting. The very first assistant
           // turn on this player (the greeting) never gets the optimistic
           // local flush at all, regardless of grace period — see
-          // _hadFirstSpeakingTurn.
+          // _hadFirstSpeakingTurn. The same echo risk applies right after the
+          // mic is (re)armed by startHandsFree() while the assistant is
+          // already mid-speech (e.g. the user toggles hands-free off then
+          // straight back on) — _micArmedSince covers that case, since
+          // _speakingSince alone can already be well outside the grace
+          // window by then.
           _openTranscriptRole = null;
           final withinBargeInGrace = _speakingSince != null &&
               DateTime.now().difference(_speakingSince!) < const Duration(milliseconds: _bargeInGraceMs);
-          if (state.status == VoiceStatus.speaking && _hadFirstSpeakingTurn && !withinBargeInGrace) {
+          final withinMicArmGrace = _micArmedSince != null &&
+              DateTime.now().difference(_micArmedSince!) < const Duration(milliseconds: _micArmGraceMs);
+          if (state.status == VoiceStatus.speaking && (withinBargeInGrace || withinMicArmGrace)) {
+            // Treat as a false trigger entirely — previously only the local
+            // playback flush was suppressed here while the (likely-echo)
+            // audio was still forwarded to the server as a genuine user turn,
+            // which could confuse the model (hearing itself) into going
+            // silent instead of responding.
+            return;
+          }
+          if (state.status == VoiceStatus.speaking && _hadFirstSpeakingTurn) {
             unawaited(_flushPlayback());
             _speakingDebounce?.cancel();
             state = state.copyWith(status: VoiceStatus.listening);
@@ -483,7 +518,10 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
             }
           }
       }
-    });
+      });
+    } finally {
+      _handsFreeTransitionInFlight = false;
+    }
   }
 
   /// Ends the hands-free session — call when the toggle button is tapped
@@ -492,19 +530,25 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   /// same as before) — so the user can tap this to go quiet for a moment and
   /// tap startHandsFree() again later in the same conversation if they want.
   Future<void> stopHandsFree() async {
-    if (!state.isHandsFreeActive) return;
-    if (_speechStarted) _socket?.sendSpeechEnd();
-    await _micSubscription?.cancel();
-    _micSubscription = null;
+    if (!state.isHandsFreeActive || _handsFreeTransitionInFlight) return;
+    _handsFreeTransitionInFlight = true;
     try {
-      await _recorder?.stop();
-    } catch (_) {
-      // Best-effort — the activity_end marker above already told Gemini the
-      // turn ended even if the platform stop() call itself failed.
+      if (_speechStarted) _socket?.sendSpeechEnd();
+      await _micSubscription?.cancel();
+      _micSubscription = null;
+      try {
+        await _recorder?.stop();
+      } catch (_) {
+        // Best-effort — the activity_end marker above already told Gemini the
+        // turn ended even if the platform stop() call itself failed.
+      }
+      _speechStarted = false;
+      _speechGate = null;
+      _micArmedSince = null;
+      state = state.copyWith(isHandsFreeActive: false, isRecording: false);
+    } finally {
+      _handsFreeTransitionInFlight = false;
     }
-    _speechStarted = false;
-    _speechGate = null;
-    state = state.copyWith(isHandsFreeActive: false, isRecording: false);
   }
 
   /// Used by both the text input field and tapping a suggestion chip —
@@ -587,6 +631,29 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   /// searchResults survive and are still visible if the user returns to the
   /// overlay. No-op outside listening/speaking (e.g. mid-save, in review, or
   /// already torn down) so those flows aren't disturbed by backgrounding.
+  /// Instantly silences in-progress TTS playback the moment the app is
+  /// backgrounded (AppLifecycleState.paused) — called directly, not
+  /// debounced like pauseForBackground() below, since audio audibly
+  /// continuing after the user presses Home is jarring no matter how briefly
+  /// the app ends up backgrounded. Deliberately leaves the mic/socket/
+  /// session alone — if the user comes right back (e.g. a Buy-link browser
+  /// round trip), unmuteForBackground() resumes in place with nothing lost;
+  /// only pauseForBackground() (after its debounce) tears the session down.
+  void muteForBackground() {
+    if (state.status != VoiceStatus.listening && state.status != VoiceStatus.speaking) return;
+    unawaited(_player?.pausePlayback());
+  }
+
+  /// Undoes muteForBackground() when the app returns before
+  /// pauseForBackground()'s debounce elapsed — see
+  /// voice_assistant_overlay.dart's didChangeAppLifecycleState. No-op if the
+  /// session was already fully torn down by then (state.status has since
+  /// moved to error), or if it was never muted in the first place.
+  void unmuteForBackground() {
+    if (state.status != VoiceStatus.listening && state.status != VoiceStatus.speaking) return;
+    unawaited(_player?.resumePlayback());
+  }
+
   Future<void> pauseForBackground() async {
     if (state.status != VoiceStatus.listening && state.status != VoiceStatus.speaking) return;
     _speakingDebounce?.cancel();

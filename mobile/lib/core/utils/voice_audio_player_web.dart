@@ -59,6 +59,21 @@ class VoiceAudioPlayer {
     await open();
   }
 
+  // See voice_audio_player_native.dart's pausePlayback/resumePlayback — same
+  // "instantly silence, resumable later" contract, implemented here via
+  // AudioContext suspend/resume instead of stopping/restarting the stream.
+  Future<void> pausePlayback() async {
+    final context = _context;
+    if (!_ready || context == null || context.state == 'suspended') return;
+    await context.suspend().toDart;
+  }
+
+  Future<void> resumePlayback() async {
+    final context = _context;
+    if (!_ready || context == null || context.state != 'suspended') return;
+    await context.resume().toDart;
+  }
+
   Future<void> close() async {
     final context = _context;
     _context = null;

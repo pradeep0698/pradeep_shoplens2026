@@ -25,6 +25,15 @@ class VoiceSocketClient implements VoiceTransport {
   @override
   Stream<VoiceSocketFrame> get frames => _frames.stream;
 
+  // Always false: the backend already builds this transport's
+  // realtime_input_config per model (see live_session.py's
+  // _AUTO_ACTIVITY_DETECTION_ONLY_MODELS) and VoiceAssistantNotifier's
+  // client-driven speech_start/speech_end markers are the correct behavior
+  // for every model this transport is used with today — only the
+  // direct-connect transport currently opts out of that.
+  @override
+  bool get usesAutoActivityDetection => false;
+
   // existingProfile/mode/language/resumeTranscript are only meaningful to
   // the direct-connect transport (see voice_transport.dart's doc comment) —
   // the backend already builds this session's setup, so the proxy path

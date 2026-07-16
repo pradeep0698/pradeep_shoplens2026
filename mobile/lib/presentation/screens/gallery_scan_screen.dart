@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/services/vision_service.dart';
 import '../../core/utils/image_utils.dart';
 import '../providers/scan_review_provider.dart';
+import '../widgets/info_tooltip_icon.dart';
 import '../widgets/object_glow_overlay.dart';
 import 'scan_review_screen.dart' show ScanReviewArgs;
 
@@ -26,7 +27,6 @@ class GalleryScanScreen extends ConsumerStatefulWidget {
 
 class _GalleryScanScreenState extends ConsumerState<GalleryScanScreen> {
   Size? _imageSize;
-  bool _drawMode = false;
 
   @override
   void initState() {
@@ -50,7 +50,6 @@ class _GalleryScanScreenState extends ConsumerState<GalleryScanScreen> {
   Widget build(BuildContext context) {
     final state = ref.watch(scanReviewProvider);
     final imageSize = _imageSize;
-    final canDraw = state.phase == ScanReviewPhase.ready;
 
     return Scaffold(
       appBar: AppBar(
@@ -59,11 +58,13 @@ class _GalleryScanScreenState extends ConsumerState<GalleryScanScreen> {
           icon: const Icon(Icons.arrow_back_ios_new),
           onPressed: () => context.pop(),
         ),
-        actions: [
-          IconButton(
-            icon: Icon(_drawMode ? Icons.check_circle : Icons.add_location_alt_outlined),
-            tooltip: _drawMode ? 'Done adding areas' : 'Draw a custom area',
-            onPressed: canDraw ? () => setState(() => _drawMode = !_drawMode) : null,
+        actions: const [
+          Padding(
+            padding: EdgeInsets.only(right: 8),
+            child: InfoTooltipIcon(
+              message: 'Tap a glowing dot to select it. Missed an item? Tap or draw '
+                  'a circle around it anywhere on the photo to add your own point.',
+            ),
           ),
         ],
       ),
@@ -72,12 +73,7 @@ class _GalleryScanScreenState extends ConsumerState<GalleryScanScreen> {
         ScanReviewPhase.error => _ErrorBody(message: state.errorMessage ?? 'Detection failed'),
         ScanReviewPhase.ready => imageSize == null
             ? const _LoadingBody()
-            : _ReadyBody(
-                state:      state,
-                imageBytes: widget.args.imageBytes,
-                imageSize:  imageSize,
-                drawMode:   _drawMode,
-              ),
+            : _ReadyBody(state: state, imageBytes: widget.args.imageBytes, imageSize: imageSize),
       },
     );
   }
@@ -125,16 +121,10 @@ class _ErrorBody extends StatelessWidget {
 }
 
 class _ReadyBody extends ConsumerWidget {
-  const _ReadyBody({
-    required this.state,
-    required this.imageBytes,
-    required this.imageSize,
-    required this.drawMode,
-  });
+  const _ReadyBody({required this.state, required this.imageBytes, required this.imageSize});
   final ScanReviewState state;
   final Uint8List imageBytes;
   final Size imageSize;
-  final bool drawMode;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -149,26 +139,16 @@ class _ReadyBody extends ConsumerWidget {
 
     return Column(
       children: [
-        if (drawMode)
-          Container(
-            width: double.infinity,
-            color: const Color(0xFF34D399).withValues(alpha: 0.12),
-            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
-            child: const Text(
-              'Draw a circle or line around an item to add it as a new point',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Color(0xFF34D399), fontSize: 13, fontWeight: FontWeight.w600),
-            ),
-          )
-        else if (state.items.isEmpty)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 10, horizontal: 16),
-            child: Text(
-              'No objects detected — tap the add-area icon above to draw one',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Color(0xFF64748B), fontSize: 13),
-            ),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+          child: Text(
+            state.items.isEmpty
+                ? 'No objects detected — tap or draw around an item on the photo to add one'
+                : 'Tap a dot to select it, or tap/draw anywhere else to add a missed item',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Color(0xFF64748B), fontSize: 12),
           ),
+        ),
         Expanded(
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -182,22 +162,25 @@ class _ReadyBody extends ConsumerWidget {
                     children: [
                       Container(color: const Color(0xFF1E293B)),
                       Image.memory(imageBytes, fit: BoxFit.contain, width: double.infinity, height: double.infinity),
+                      // Below the dots in z-order (see hit-test note on
+                      // _ManualPointLayer) so an existing dot always wins a
+                      // tap over adding a new point on top of it.
+                      _ManualPointLayer(
+                        widgetSize: widgetSize,
+                        onPointAdded: (widgetRect) {
+                          final box = widgetRectToGeminiBox(widgetRect, imageSize, widgetSize, BoxFit.contain);
+                          ref.read(scanReviewProvider.notifier).addManualItem(box, imageBytes);
+                        },
+                      ),
                       ObjectGlowOverlay(
                         objects:         labels,
                         imageSize:       imageSize,
                         widgetSize:      widgetSize,
                         boxFit:          BoxFit.contain,
                         selectedIndices: state.selected,
-                        onObjectTap:     drawMode ? null : (i) => ref.read(scanReviewProvider.notifier).toggleSelect(i),
+                        onObjectTap:     (i) => ref.read(scanReviewProvider.notifier).toggleSelect(i),
                         showLabels:      false,
                       ),
-                      if (drawMode)
-                        _AreaDrawLayer(
-                          onAreaDrawn: (widgetRect) {
-                            final box = widgetRectToGeminiBox(widgetRect, imageSize, widgetSize, BoxFit.contain);
-                            ref.read(scanReviewProvider.notifier).addManualItem(box, imageBytes);
-                          },
-                        ),
                     ],
                   );
                 },
@@ -212,7 +195,7 @@ class _ReadyBody extends ConsumerWidget {
             child: SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: drawMode || state.selected.isEmpty
+                onPressed: state.selected.isEmpty
                     ? null
                     : () {
                         ref.read(scanReviewProvider.notifier).searchSelected();
@@ -240,23 +223,37 @@ class _ReadyBody extends ConsumerWidget {
   }
 }
 
-/// Captures a freehand drag (circle, lasso, or line) over the image and
-/// reports its bounding rect once the user lifts their finger — the rect
-/// becomes a new detected item's box, same as an auto-detected one.
-class _AreaDrawLayer extends StatefulWidget {
-  const _AreaDrawLayer({required this.onAreaDrawn});
-  final void Function(Rect widgetRect) onAreaDrawn;
+/// Always-on layer (no mode toggle) that turns a touch anywhere on the image
+/// into a new selectable point: a quick tap adds a fixed-size box centered on
+/// the tap; dragging a circle/lasso/line around an item adds its bounding
+/// box instead. Sits *below* [ObjectGlowOverlay] in the Stack — Flutter hit
+/// tests a Stack's children top-down and stops at the first one that claims
+/// the point, and ObjectGlowOverlay's dot targets only occupy small 44x44
+/// regions (so they return `false` everywhere else) — so an existing dot
+/// always intercepts its own taps first, and this layer only ever sees
+/// touches that missed every dot.
+class _ManualPointLayer extends StatefulWidget {
+  const _ManualPointLayer({required this.widgetSize, required this.onPointAdded});
+  final Size widgetSize;
+  final void Function(Rect widgetRect) onPointAdded;
 
   @override
-  State<_AreaDrawLayer> createState() => _AreaDrawLayerState();
+  State<_ManualPointLayer> createState() => _ManualPointLayerState();
 }
 
-class _AreaDrawLayerState extends State<_AreaDrawLayer> {
+class _ManualPointLayerState extends State<_ManualPointLayer> {
   final List<Offset> _points = [];
 
-  static const _minSize = 16.0;
+  // A drag shorter than this in either dimension is treated as a plain tap
+  // rather than a deliberately drawn area.
+  static const _dragThreshold = 20.0;
 
-  void _onPanStart(DragStartDetails d) => setState(() {
+  double get _tapBoxSize => (widget.widgetSize.shortestSide * 0.14).clamp(56.0, 130.0);
+
+  // onPanDown (not onPanStart) fires on every pointer-down inside these
+  // bounds, drag or not — it's the only callback guaranteed to fire for a
+  // plain tap that never moves past the pan gesture's touch-slop.
+  void _onPanDown(DragDownDetails d) => setState(() {
         _points
           ..clear()
           ..add(d.localPosition);
@@ -265,7 +262,7 @@ class _AreaDrawLayerState extends State<_AreaDrawLayer> {
   void _onPanUpdate(DragUpdateDetails d) => setState(() => _points.add(d.localPosition));
 
   void _onPanEnd(DragEndDetails d) {
-    if (_points.length >= 2) {
+    if (_points.isNotEmpty) {
       var minX = _points.first.dx, maxX = _points.first.dx;
       var minY = _points.first.dy, maxY = _points.first.dy;
       for (final p in _points) {
@@ -274,19 +271,25 @@ class _AreaDrawLayerState extends State<_AreaDrawLayer> {
         if (p.dy < minY) minY = p.dy;
         if (p.dy > maxY) maxY = p.dy;
       }
-      final rect = Rect.fromLTRB(minX, minY, maxX, maxY);
-      if (rect.width >= _minSize && rect.height >= _minSize) widget.onAreaDrawn(rect);
+      var rect = Rect.fromLTRB(minX, minY, maxX, maxY);
+      if (rect.width < _dragThreshold || rect.height < _dragThreshold) {
+        rect = Rect.fromCenter(center: rect.center, width: _tapBoxSize, height: _tapBoxSize);
+      }
+      widget.onPointAdded(rect);
     }
     setState(() => _points.clear());
   }
+
+  void _onPanCancel() => setState(() => _points.clear());
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onPanStart: _onPanStart,
+      onPanDown: _onPanDown,
       onPanUpdate: _onPanUpdate,
       onPanEnd: _onPanEnd,
+      onPanCancel: _onPanCancel,
       child: CustomPaint(
         size: Size.infinite,
         painter: _DrawPathPainter(points: _points),

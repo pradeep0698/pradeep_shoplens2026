@@ -352,10 +352,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
   /// while the assistant is talking (status == speaking) — the gate keeps
   /// running continuously so the user can barge in just by talking, same as
   /// ChatGPT's voice mode. That only works because echoCancel/noiseSuppress/
-  /// autoGain are turned on below (plus AndroidAudioSource.voiceCommunication
-  /// on Android) so the mic doesn't simply pick the assistant's own voice
-  /// back up — see the listener's `started` handling for how a detected
-  /// barge-in flushes playback immediately.
+  /// autoGain are turned on below so the mic doesn't simply pick the
+  /// assistant's own voice back up — see the listener's `started` handling
+  /// for how a detected barge-in flushes playback immediately.
   Future<void> startHandsFree() async {
     if (state.isHandsFreeActive || _recorder == null) return;
     final generation = _generation;
@@ -363,10 +362,9 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
     _speechStarted = false;
     // isHandsFreeActive is only flipped on AFTER startStream() actually
     // succeeds (previously it was set optimistically before the await —
-    // if startStream() throws, e.g. AndroidAudioSource.voiceCommunication
-    // failing to open on some Android OEM/emulator builds, the UI showed
-    // "Listening" forever with a mic that was never actually capturing
-    // anything, and no error surfaced at all).
+    // if startStream() throws, the UI showed "Listening" forever with a mic
+    // that was never actually capturing anything, and no error surfaced at
+    // all).
     final recorderStartBegin = DateTime.now();
     final Stream<Uint8List> stream;
     try {
@@ -377,7 +375,17 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
         echoCancel: true,
         noiseSuppress: true,
         autoGain: true,
-        androidConfig: const AndroidRecordConfig(audioSource: AndroidAudioSource.voiceCommunication),
+        // voiceCommunication (Android's telephony-tuned source, chosen for
+        // its OS-level AEC so the mic doesn't pick the assistant's own
+        // playback back up) turned out to over-suppress real speech on real
+        // devices outside of an active call — production traces showed mic
+        // chunks arriving but every one at an RMS too low to ever cross
+        // Pcm16SpeechGate's threshold, so zero audio ever reached Gemini.
+        // voiceRecognition applies far less aggressive processing at the
+        // cost of weaker echo rejection (echoCancel/noiseSuppress above are
+        // the plugin-level fallback for that) — trading barge-in robustness
+        // for audio actually going out at all.
+        androidConfig: const AndroidRecordConfig(audioSource: AndroidAudioSource.voiceRecognition),
       ));
     } catch (e) {
       _diagRecorderError = e.toString();

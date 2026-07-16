@@ -289,7 +289,7 @@ SEARCH_SYSTEM_PROMPT_TEMPLATE = (
 )
 
 
-def _profile_note(existing_profile: dict) -> str:
+def _profile_note(existing_profile: dict, mode: str = "preferences") -> str:
     """Summarizes the user's already-saved profile for the system prompt — fetched
     server-side before the Gemini Live session opens, rather than via a
     get_current_profile tool call. A tool call that exists only to fetch data
@@ -303,7 +303,15 @@ def _profile_note(existing_profile: dict) -> str:
     category-keyed dict shape (see profile_store._coerce_categorized), not
     the flat list of terms this function speaks — flatten first, or
     ", ".join(...) below silently joins the dict's category keys (e.g.
-    "_general") instead of the actual terms."""
+    "_general") instead of the actual terms.
+
+    The carve-out sentence appended after the summary is mode-specific: the
+    "GATHER FIRST" rule it refers to only exists in SEARCH_SYSTEM_PROMPT_TEMPLATE,
+    so referencing it for "preferences" mode used to leave the model reacting
+    to a dangling reference to a rule it was never given — a model that
+    doesn't know what to do with an unresolvable instruction tends to just
+    stop talking after reciting the profile summary instead of continuing the
+    conversation."""
     flat = _flatten_patch_for_client(existing_profile)
     categories = flat.get("shopping_categories") or []
     preferences = flat.get("preference_terms") or []
@@ -317,13 +325,24 @@ def _profile_note(existing_profile: dict) -> str:
         parts.append("likes " + ", ".join(preferences))
     if exclusions:
         parts.append("avoids " + ", ".join(exclusions))
+    summary = "The user's existing saved profile: " + "; ".join(parts) + "."
+    if mode == "search":
+        return (
+            summary + " Don't re-ask about these already-known static "
+            "preferences unless the user brings them up — but this does NOT "
+            "exempt you from the GATHER FIRST rule above: you must still ask "
+            "clarifying questions about THIS specific search (the item, the "
+            "use case, and a preference for it) before calling "
+            "search_products, even for a returning user."
+        )
     return (
-        "The user's existing saved profile: " + "; ".join(parts) + ". Don't "
-        "re-ask about these already-known static preferences unless the user "
-        "brings them up — but this does NOT exempt you from the GATHER FIRST "
-        "rule above: you must still ask clarifying questions about THIS "
-        "specific search (the item, the use case, and a preference for it) "
-        "before calling search_products, even for a returning user."
+        summary + " Don't re-ask about these already-known static "
+        "preferences unless the user brings them up. You can briefly "
+        "acknowledge them in your opening greeting, but always follow that "
+        "acknowledgment immediately with a spoken follow-up question — never "
+        "end a turn right after only restating what you already know. Keep "
+        "asking about new preferences for as long as the user keeps sharing, "
+        "exactly as the rest of these instructions already say."
     )
 
 
@@ -352,7 +371,7 @@ def _resume_note(transcript: list[dict]) -> str:
 
 def _system_prompt(existing_profile: dict, mode: str, language: str, resume_transcript: list[dict] | None = None) -> str:
     template = SEARCH_SYSTEM_PROMPT_TEMPLATE if mode == "search" else SYSTEM_PROMPT_TEMPLATE
-    prompt = template.format(profile_note=_profile_note(existing_profile))
+    prompt = template.format(profile_note=_profile_note(existing_profile, mode))
     prompt += _resume_note(resume_transcript or [])
     if language != "English":
         prompt += (

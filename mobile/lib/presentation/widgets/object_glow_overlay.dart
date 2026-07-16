@@ -228,6 +228,36 @@ Rect normalizedToWidget(Rect norm, Size imageSize, Size widgetSize, BoxFit boxFi
   );
 }
 
+/// Inverse of [normalizedToWidget] — converts a widget-space rect (e.g. a
+/// manually drawn selection) to Gemini's `[y_min,x_min,y_max,x_max]` 0-1000
+/// scale box, so hand-drawn areas flow through the same box format as
+/// ML Kit/Gemini detections.
+List<int> widgetRectToGeminiBox(Rect widgetRect, Size imageSize, Size widgetSize, BoxFit boxFit) {
+  final fitted  = applyBoxFit(boxFit, imageSize, widgetSize);
+  final scaleX  = fitted.destination.width  / fitted.source.width;
+  final scaleY  = fitted.destination.height / fitted.source.height;
+  final renderLeft = (widgetSize.width  - fitted.destination.width)  / 2;
+  final renderTop  = (widgetSize.height - fitted.destination.height) / 2;
+
+  final srcLeft = (imageSize.width  - fitted.source.width)  / 2;
+  final srcTop  = (imageSize.height - fitted.source.height) / 2;
+
+  double toNX(double wx) => ((wx - renderLeft) / scaleX + srcLeft) / imageSize.width;
+  double toNY(double wy) => ((wy - renderTop)  / scaleY + srcTop)  / imageSize.height;
+
+  final x1 = toNX(widgetRect.left).clamp(0.0, 1.0);
+  final y1 = toNY(widgetRect.top).clamp(0.0, 1.0);
+  final x2 = toNX(widgetRect.right).clamp(0.0, 1.0);
+  final y2 = toNY(widgetRect.bottom).clamp(0.0, 1.0);
+
+  return [
+    (y1 * 1000).round().clamp(0, 1000),
+    (x1 * 1000).round().clamp(0, 1000),
+    (y2 * 1000).round().clamp(0, 1000),
+    (x2 * 1000).round().clamp(0, 1000),
+  ];
+}
+
 // ── Live-feed glow overlay (ML Kit pixel-space bounding boxes) ────────────────
 
 class LiveObjectGlowOverlay extends StatefulWidget {

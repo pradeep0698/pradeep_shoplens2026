@@ -26,6 +26,7 @@ class GalleryScanScreen extends ConsumerStatefulWidget {
 
 class _GalleryScanScreenState extends ConsumerState<GalleryScanScreen> {
   Size? _imageSize;
+  bool _drawMode = false;
 
   @override
   void initState() {
@@ -49,6 +50,7 @@ class _GalleryScanScreenState extends ConsumerState<GalleryScanScreen> {
   Widget build(BuildContext context) {
     final state = ref.watch(scanReviewProvider);
     final imageSize = _imageSize;
+    final canDraw = state.phase == ScanReviewPhase.ready;
 
     return Scaffold(
       appBar: AppBar(
@@ -57,13 +59,25 @@ class _GalleryScanScreenState extends ConsumerState<GalleryScanScreen> {
           icon: const Icon(Icons.arrow_back_ios_new),
           onPressed: () => context.pop(),
         ),
+        actions: [
+          IconButton(
+            icon: Icon(_drawMode ? Icons.check_circle : Icons.add_location_alt_outlined),
+            tooltip: _drawMode ? 'Done adding areas' : 'Draw a custom area',
+            onPressed: canDraw ? () => setState(() => _drawMode = !_drawMode) : null,
+          ),
+        ],
       ),
       body: switch (state.phase) {
         ScanReviewPhase.detecting => const _LoadingBody(),
         ScanReviewPhase.error => _ErrorBody(message: state.errorMessage ?? 'Detection failed'),
         ScanReviewPhase.ready => imageSize == null
             ? const _LoadingBody()
-            : _ReadyBody(state: state, imageBytes: widget.args.imageBytes, imageSize: imageSize),
+            : _ReadyBody(
+                state:      state,
+                imageBytes: widget.args.imageBytes,
+                imageSize:  imageSize,
+                drawMode:   _drawMode,
+              ),
       },
     );
   }
@@ -111,19 +125,19 @@ class _ErrorBody extends StatelessWidget {
 }
 
 class _ReadyBody extends ConsumerWidget {
-  const _ReadyBody({required this.state, required this.imageBytes, required this.imageSize});
+  const _ReadyBody({
+    required this.state,
+    required this.imageBytes,
+    required this.imageSize,
+    required this.drawMode,
+  });
   final ScanReviewState state;
   final Uint8List imageBytes;
   final Size imageSize;
+  final bool drawMode;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (state.items.isEmpty) {
-      return const Center(
-        child: Text('No objects detected', style: TextStyle(color: Color(0xFF64748B))),
-      );
-    }
-
     final labels = [
       for (final item in state.items)
         VisionLabel(
@@ -135,6 +149,26 @@ class _ReadyBody extends ConsumerWidget {
 
     return Column(
       children: [
+        if (drawMode)
+          Container(
+            width: double.infinity,
+            color: const Color(0xFF34D399).withValues(alpha: 0.12),
+            padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+            child: const Text(
+              'Draw a circle or line around an item to add it as a new point',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Color(0xFF34D399), fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+          )
+        else if (state.items.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+            child: Text(
+              'No objects detected — tap the add-area icon above to draw one',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Color(0xFF64748B), fontSize: 13),
+            ),
+          ),
         Expanded(
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -154,9 +188,16 @@ class _ReadyBody extends ConsumerWidget {
                         widgetSize:      widgetSize,
                         boxFit:          BoxFit.contain,
                         selectedIndices: state.selected,
-                        onObjectTap:     (i) => ref.read(scanReviewProvider.notifier).toggleSelect(i),
+                        onObjectTap:     drawMode ? null : (i) => ref.read(scanReviewProvider.notifier).toggleSelect(i),
                         showLabels:      false,
                       ),
+                      if (drawMode)
+                        _AreaDrawLayer(
+                          onAreaDrawn: (widgetRect) {
+                            final box = widgetRectToGeminiBox(widgetRect, imageSize, widgetSize, BoxFit.contain);
+                            ref.read(scanReviewProvider.notifier).addManualItem(box, imageBytes);
+                          },
+                        ),
                     ],
                   );
                 },
@@ -171,7 +212,7 @@ class _ReadyBody extends ConsumerWidget {
             child: SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: state.selected.isEmpty
+                onPressed: drawMode || state.selected.isEmpty
                     ? null
                     : () {
                         ref.read(scanReviewProvider.notifier).searchSelected();
@@ -197,4 +238,104 @@ class _ReadyBody extends ConsumerWidget {
       ],
     );
   }
+}
+
+/// Captures a freehand drag (circle, lasso, or line) over the image and
+/// reports its bounding rect once the user lifts their finger — the rect
+/// becomes a new detected item's box, same as an auto-detected one.
+class _AreaDrawLayer extends StatefulWidget {
+  const _AreaDrawLayer({required this.onAreaDrawn});
+  final void Function(Rect widgetRect) onAreaDrawn;
+
+  @override
+  State<_AreaDrawLayer> createState() => _AreaDrawLayerState();
+}
+
+class _AreaDrawLayerState extends State<_AreaDrawLayer> {
+  final List<Offset> _points = [];
+
+  static const _minSize = 16.0;
+
+  void _onPanStart(DragStartDetails d) => setState(() {
+        _points
+          ..clear()
+          ..add(d.localPosition);
+      });
+
+  void _onPanUpdate(DragUpdateDetails d) => setState(() => _points.add(d.localPosition));
+
+  void _onPanEnd(DragEndDetails d) {
+    if (_points.length >= 2) {
+      var minX = _points.first.dx, maxX = _points.first.dx;
+      var minY = _points.first.dy, maxY = _points.first.dy;
+      for (final p in _points) {
+        if (p.dx < minX) minX = p.dx;
+        if (p.dx > maxX) maxX = p.dx;
+        if (p.dy < minY) minY = p.dy;
+        if (p.dy > maxY) maxY = p.dy;
+      }
+      final rect = Rect.fromLTRB(minX, minY, maxX, maxY);
+      if (rect.width >= _minSize && rect.height >= _minSize) widget.onAreaDrawn(rect);
+    }
+    setState(() => _points.clear());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onPanStart: _onPanStart,
+      onPanUpdate: _onPanUpdate,
+      onPanEnd: _onPanEnd,
+      child: CustomPaint(
+        size: Size.infinite,
+        painter: _DrawPathPainter(points: _points),
+      ),
+    );
+  }
+}
+
+class _DrawPathPainter extends CustomPainter {
+  const _DrawPathPainter({required this.points});
+  final List<Offset> points;
+
+  static const _kGreen = Color(0xFF34D399);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (points.length < 2) return;
+
+    final path = Path()..moveTo(points.first.dx, points.first.dy);
+    for (final p in points.skip(1)) {
+      path.lineTo(p.dx, p.dy);
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color       = _kGreen
+        ..style       = PaintingStyle.stroke
+        ..strokeWidth = 2.5
+        ..strokeCap   = StrokeCap.round
+        ..strokeJoin  = StrokeJoin.round,
+    );
+
+    var minX = points.first.dx, maxX = points.first.dx;
+    var minY = points.first.dy, maxY = points.first.dy;
+    for (final p in points) {
+      if (p.dx < minX) minX = p.dx;
+      if (p.dx > maxX) maxX = p.dx;
+      if (p.dy < minY) minY = p.dy;
+      if (p.dy > maxY) maxY = p.dy;
+    }
+    canvas.drawRect(
+      Rect.fromLTRB(minX, minY, maxX, maxY),
+      Paint()
+        ..color       = _kGreen.withValues(alpha: 0.5)
+        ..style       = PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_DrawPathPainter old) => old.points != points;
 }

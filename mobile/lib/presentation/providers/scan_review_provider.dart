@@ -172,6 +172,25 @@ class ScanReviewNotifier extends AutoDisposeNotifier<ScanReviewState> {
     }
   }
 
+  /// Adds a manually drawn area (circle/lasso/line the user drew around an
+  /// object the detector missed) as a new selectable dot, auto-selected
+  /// since drawing around it is itself the selection gesture. [box] is
+  /// Gemini's `[y_min,x_min,y_max,x_max]` 0-1000 scale, already converted
+  /// from the drawn widget-space rect via [widgetRectToGeminiBox].
+  Future<void> addManualItem(List<int> box, Uint8List imageBytes) async {
+    final crop = await cropToGeminiBox(imageBytes, box);
+    final items = [
+      ...state.items,
+      DetectedItem(
+        name: 'Item ${state.items.length + 1}',
+        box: box,
+        cropBytes: crop ?? imageBytes,
+        nameIsDescriptive: false,
+      ),
+    ];
+    state = state.copyWith(items: items, selected: {...state.selected, items.length - 1});
+  }
+
   void toggleSelect(int index) {
     final selected = {...state.selected};
     if (!selected.add(index)) selected.remove(index);

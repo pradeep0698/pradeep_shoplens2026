@@ -70,6 +70,18 @@ abstract class VoiceTransport {
     required List<VoiceTranscriptTurn> resumeTranscript,
   });
 
+  /// True once connected if the model handles turn-taking via its own
+  /// automatic voice-activity-detection (see live_session.py's
+  /// _AUTO_ACTIVITY_DETECTION_ONLY_MODELS) rather than this app's
+  /// client-driven speech_start/speech_end markers. VoiceAssistantNotifier
+  /// uses this to decide whether to gate outgoing mic audio on its local RMS
+  /// detector (manual-control models) or stream continuously so Gemini's own
+  /// detector has an unbroken signal to work from (auto-VAD models) — see
+  /// its _micSubscription listener. False by default; only the
+  /// direct-connect transport currently knows its model ahead of time (from
+  /// the ephemeral token response).
+  bool get usesAutoActivityDetection => false;
+
   void sendAudio(Uint8List chunk);
 
   void sendText(String text);

@@ -56,6 +56,17 @@ Map<String, dynamic> recordPreferenceArgsWithCategoryFallback(
 // the count.
 const _kMaxProductsForModel = 15;
 
+// Mirrors live_session.py's _AUTO_ACTIVITY_DETECTION_ONLY_MODELS exactly —
+// models where the backend leaves Gemini's own automatic-activity-detection
+// on instead of building a manual-control realtime_input_config. This
+// transport locks its LiveConnectConfig from that same backend logic (see
+// mint_ephemeral_token), so a model landing in this set here must match the
+// server's set or the two sides disagree about who owns turn-taking.
+const _kAutoActivityDetectionModels = {
+  'gemini-3.1-flash-live-preview',
+  'models/gemini-3.1-flash-live-preview',
+};
+
 /// Trimmed view of a search_products result for Gemini's function response —
 /// mirrors live_session.py's _search_result_for_model. Real scraped listing
 /// data (SerpAPI) can carry image_url as a large inline base64 data URI
@@ -136,6 +147,10 @@ class GeminiLiveSocketClient implements VoiceTransport {
 
   String? _sessionId;
   int _sampleRate = 16000;
+  bool _autoActivityDetection = false;
+
+  @override
+  bool get usesAutoActivityDetection => _autoActivityDetection;
 
   // Idle nudge/close-grace watchdog — moved client-side since the backend no
   // longer holds this session's live connection to run its own watchdog
@@ -188,6 +203,7 @@ class GeminiLiveSocketClient implements VoiceTransport {
       // Keep low-level handshake/HTTP details out of the user-visible error text.
       throw StateError('Could not obtain a Gemini Live session token.');
     }
+    _autoActivityDetection = _kAutoActivityDetectionModels.contains(tokenResponse.model);
 
     late final WebSocket socket;
     try {
@@ -494,14 +510,29 @@ class GeminiLiveSocketClient implements VoiceTransport {
   @override
   void sendAudioFormat(int sampleRate) => _sampleRate = sampleRate;
 
+  // Both no-op the wire message (but still reset the idle timer) when
+  // _autoActivityDetection is true — Gemini's own detector owns turn
+  // boundaries for these models, fed by the continuous audio stream
+  // VoiceAssistantNotifier switches to sending (see usesAutoActivityDetection
+  // above); redundant client-driven markers layered on top of that were
+  // never validated against real microphone audio (only text-simulated
+  // turns) and, on real audio, left sessions never producing a response at
+  // all despite audio genuinely reaching Gemini — see
+  // docs/explainer/voice-assistant-gemini-live-model-switch.md §4b/§7.
   @override
   void sendSpeechStart() {
-    _socket?.add(jsonEncode({'realtimeInput': {'activityStart': {}}}));
+    if (!_autoActivityDetection) {
+      _socket?.add(jsonEncode({'realtimeInput': {'activityStart': {}}}));
+    }
     _resetIdleTimer();
   }
 
   @override
-  void sendSpeechEnd() => _socket?.add(jsonEncode({'realtimeInput': {'activityEnd': {}}}));
+  void sendSpeechEnd() {
+    if (!_autoActivityDetection) {
+      _socket?.add(jsonEncode({'realtimeInput': {'activityEnd': {}}}));
+    }
+  }
 
   @override
   Future<void> close() async {

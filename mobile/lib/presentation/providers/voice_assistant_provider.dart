@@ -405,6 +405,21 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
       if (outbound.isEmpty) return;
       _diagMicChunks++;
       _diagMicBytesReceived += outbound.length;
+      // Auto-VAD models (see VoiceTransport.usesAutoActivityDetection) need
+      // an unbroken audio stream to detect turn boundaries themselves —
+      // gating on our own RMS detector, as manual-control models require
+      // below, starves them of the silence either side of speech they need
+      // and leaves the turn hanging with no response (confirmed on real
+      // device audio — see docs/explainer/voice-assistant-gemini-live-model
+      // -switch.md §7). The gate still runs unconditionally below purely to
+      // drive local UI feedback (isRecording, optimistic barge-in flush);
+      // its .chunks are just never used for sending in this branch, so nothing
+      // here gets double-sent.
+      final autoActivityDetection = _socket?.usesAutoActivityDetection ?? false;
+      if (autoActivityDetection) {
+        _socket?.sendAudio(outbound);
+        _diagAudioBytesSent += outbound.length;
+      }
       final result = _speechGate?.add(outbound) ??
           const Pcm16SpeechGateCycleResult(event: Pcm16SpeechGateEvent.none, chunks: []);
       switch (result.event) {
@@ -435,27 +450,31 @@ class VoiceAssistantNotifier extends AutoDisposeNotifier<VoiceAssistantState> {
           _diagEvent('gate_opened');
           _speechStarted = true;
           state = state.copyWith(isRecording: true);
-          _socket?.sendSpeechStart();
-          for (final c in result.chunks) {
-            if (c.isNotEmpty) {
-              _socket?.sendAudio(c);
-              _diagAudioBytesSent += c.length;
+          if (!autoActivityDetection) {
+            _socket?.sendSpeechStart();
+            for (final c in result.chunks) {
+              if (c.isNotEmpty) {
+                _socket?.sendAudio(c);
+                _diagAudioBytesSent += c.length;
+              }
             }
           }
         case Pcm16SpeechGateEvent.ended:
-          for (final c in result.chunks) {
-            if (c.isNotEmpty) {
-              _socket?.sendAudio(c);
-              _diagAudioBytesSent += c.length;
+          if (!autoActivityDetection) {
+            for (final c in result.chunks) {
+              if (c.isNotEmpty) {
+                _socket?.sendAudio(c);
+                _diagAudioBytesSent += c.length;
+              }
             }
+            _socket?.sendSpeechEnd();
           }
-          _socket?.sendSpeechEnd();
           _diagTurnRequestedAt = DateTime.now();
           _diagEvent('gate_closed');
           _speechStarted = false;
           state = state.copyWith(isRecording: false);
         case Pcm16SpeechGateEvent.none:
-          if (_speechStarted) {
+          if (!autoActivityDetection && _speechStarted) {
             for (final c in result.chunks) {
               if (c.isNotEmpty) {
                 _socket?.sendAudio(c);

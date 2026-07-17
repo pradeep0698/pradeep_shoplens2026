@@ -36,11 +36,13 @@ class GalleryScanResultsScreen extends ConsumerWidget {
               itemCount: selected.length,
               itemBuilder: (_, i) {
                 final index = selected[i];
+                final item = state.items[index];
                 return Padding(
+                  key: ValueKey(item.box),
                   padding: const EdgeInsets.only(bottom: 10),
                   child: DetectedItemSection(
                     index: index,
-                    item: state.items[index],
+                    item: item,
                     selected: true,
                     shoppingCategories: shoppingCategories,
                     showSelectionAffordance: false,

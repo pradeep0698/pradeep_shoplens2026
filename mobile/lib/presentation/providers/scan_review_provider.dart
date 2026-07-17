@@ -180,15 +180,17 @@ class ScanReviewNotifier extends AutoDisposeNotifier<ScanReviewState> {
   Future<void> addManualItem(List<int> box, Uint8List imageBytes) async {
     final crop = await cropToGeminiBox(imageBytes, box);
     final items = [
-      ...state.items,
       DetectedItem(
         name: 'Item ${state.items.length + 1}',
         box: box,
         cropBytes: crop ?? imageBytes,
         nameIsDescriptive: false,
       ),
+      ...state.items,
     ];
-    state = state.copyWith(items: items, selected: {...state.selected, items.length - 1});
+    // Existing items all shifted up by one to make room at index 0.
+    final selected = {0, ...state.selected.map((i) => i + 1)};
+    state = state.copyWith(items: items, selected: selected);
   }
 
   void toggleSelect(int index) {

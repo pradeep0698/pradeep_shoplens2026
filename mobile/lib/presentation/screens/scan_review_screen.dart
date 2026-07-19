@@ -137,6 +137,7 @@ class _ReadyBody extends ConsumerWidget {
               padding: const EdgeInsets.only(bottom: 10),
               child: DetectedItemSection(
                 index: index,
+                displayNumber: index + 1,
                 item: state.items[index],
                 selected: state.selected.contains(index),
                 shoppingCategories: shoppingCategories,

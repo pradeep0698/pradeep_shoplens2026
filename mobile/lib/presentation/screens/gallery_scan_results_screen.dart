@@ -42,6 +42,7 @@ class GalleryScanResultsScreen extends ConsumerWidget {
                   padding: const EdgeInsets.only(bottom: 10),
                   child: DetectedItemSection(
                     index: index,
+                    displayNumber: i + 1,
                     item: item,
                     selected: true,
                     shoppingCategories: shoppingCategories,

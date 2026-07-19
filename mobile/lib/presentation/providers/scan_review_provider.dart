@@ -154,10 +154,15 @@ class ScanReviewNotifier extends AutoDisposeNotifier<ScanReviewState> {
       ];
       final crops = await Future.wait(boxes.map((box) => cropToGeminiBox(imageBytes, box)));
 
+      // ML Kit's on-device labels are inconsistent run to run for the same
+      // object, so they're never used as [name] here — display is purely
+      // positional ("Item N" by list position, computed in the UI layer)
+      // and [nameIsDescriptive] is false, so this value is never sent to
+      // /identify as a search query either.
       final items = [
         for (var i = 0; i < objects.length; i++)
           DetectedItem(
-            name: objects[i].labels.isNotEmpty ? objects[i].labels.first.text : 'Item ${i + 1}',
+            name: 'Detected item',
             box: boxes[i],
             cropBytes: crops[i] ?? imageBytes,
             nameIsDescriptive: false,
@@ -180,8 +185,12 @@ class ScanReviewNotifier extends AutoDisposeNotifier<ScanReviewState> {
   Future<void> addManualItem(List<int> box, Uint8List imageBytes) async {
     final crop = await cropToGeminiBox(imageBytes, box);
     final items = [
+      // Not "Item N" here — this item is prepended to index 0, so a number
+      // baked in now would immediately be wrong; display numbering is
+      // purely positional (computed in the UI layer), and [nameIsDescriptive]
+      // is false so this value never reaches /identify as a search query.
       DetectedItem(
-        name: 'Item ${state.items.length + 1}',
+        name: 'Manually added item',
         box: box,
         cropBytes: crop ?? imageBytes,
         nameIsDescriptive: false,

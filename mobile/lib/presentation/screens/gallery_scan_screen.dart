@@ -129,11 +129,14 @@ class _ReadyBody extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final labels = [
-      for (final item in state.items)
+      for (var i = 0; i < state.items.length; i++)
         VisionLabel(
-          description: item.name,
+          // Always "Item N" by position — never the detector's own label,
+          // which is inconsistent across runs (ML Kit's on-device labels in
+          // particular vary run to run for the same object).
+          description: 'Item ${i + 1}',
           score: 1.0,
-          boundingBox: item.box != null ? geminiBoxToNormalizedRect(item.box!) : null,
+          boundingBox: state.items[i].box != null ? geminiBoxToNormalizedRect(state.items[i].box!) : null,
         ),
     ];
 

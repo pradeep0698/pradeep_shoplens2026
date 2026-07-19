@@ -17,6 +17,7 @@ class DetectedItemSection extends ConsumerStatefulWidget {
   const DetectedItemSection({
     super.key,
     required this.index,
+    required this.displayNumber,
     required this.item,
     required this.selected,
     required this.shoppingCategories,
@@ -24,6 +25,12 @@ class DetectedItemSection extends ConsumerStatefulWidget {
   });
 
   final int index;
+  /// 1-based position among the items currently shown on screen — always
+  /// "Item 1", "Item 2", ... in that order, regardless of what the detector
+  /// named the object. Distinct from [index] (the item's position in the
+  /// full underlying detection list, used to address it via the provider),
+  /// since a screen may only show a subset of detected items.
+  final int displayNumber;
   final DetectedItem item;
   final bool selected;
   final List<String> shoppingCategories;
@@ -84,7 +91,7 @@ class _DetectedItemSectionState extends ConsumerState<DetectedItemSection> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      widget.item.name,
+                      'Item ${widget.displayNumber}',
                       style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,

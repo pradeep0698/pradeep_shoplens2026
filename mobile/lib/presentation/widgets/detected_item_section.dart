@@ -9,8 +9,10 @@ import 'product_card.dart';
 /// screen (select-then-search — [showSelectionAffordance] true, tap toggles
 /// selection) and the gallery scan results screen (items are already
 /// selected and searching by the time this renders — [showSelectionAffordance]
-/// false, tap instead lets the user manually collapse/re-expand a
-/// finished/errored section to review results at their own pace).
+/// false, tap instead lets the user manually expand/collapse a
+/// finished/errored section to review results at their own pace — each
+/// section's expanded state is independent and starts collapsed, never
+/// auto-expanded by another item finishing its search).
 class DetectedItemSection extends ConsumerStatefulWidget {
   const DetectedItemSection({
     super.key,
@@ -32,13 +34,22 @@ class DetectedItemSection extends ConsumerStatefulWidget {
 }
 
 class _DetectedItemSectionState extends ConsumerState<DetectedItemSection> {
-  bool _userCollapsed = false;
+  bool _userExpanded = false;
 
   // Only done/error states have a body worth collapsing — while searching,
   // the body is empty anyway (the header's spinner is the only feedback).
   bool get _hasBody => widget.item.status == ItemSearchStatus.done ||
                         widget.item.status == ItemSearchStatus.error;
-  bool get _expanded => widget.item.status != ItemSearchStatus.idle && !_userCollapsed;
+
+  // Selection-affordance mode (live-scan review) has no manual toggle, so a
+  // section auto-expands once its own result is ready. The results-only mode
+  // (gallery Scan All) DOES have a manual toggle, so it must stay purely
+  // user-driven — auto-expanding there on search completion made parallel
+  // items that finished around the same time look like they shared state,
+  // since one item's completion could visually "expand" its neighbor too.
+  bool get _expanded => widget.showSelectionAffordance
+      ? widget.item.status != ItemSearchStatus.idle
+      : _userExpanded;
 
   @override
   Widget build(BuildContext context) {
@@ -59,7 +70,7 @@ class _DetectedItemSectionState extends ConsumerState<DetectedItemSection> {
             borderRadius: BorderRadius.circular(14),
             onTap: widget.showSelectionAffordance
                 ? () => ref.read(scanReviewProvider.notifier).toggleSelect(widget.index)
-                : (_hasBody ? () => setState(() => _userCollapsed = !_userCollapsed) : null),
+                : (_hasBody ? () => setState(() => _userExpanded = !_userExpanded) : null),
             child: Padding(
               padding: const EdgeInsets.all(10),
               child: Row(
@@ -82,7 +93,7 @@ class _DetectedItemSectionState extends ConsumerState<DetectedItemSection> {
                   const SizedBox(width: 8),
                   if (!widget.showSelectionAffordance && _hasBody)
                     Icon(
-                      _userCollapsed ? Icons.expand_more : Icons.expand_less,
+                      _userExpanded ? Icons.expand_less : Icons.expand_more,
                       color: const Color(0xFF64748B),
                       size: 20,
                     )

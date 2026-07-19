@@ -34,7 +34,7 @@ class AboutScreen extends StatelessWidget {
                 final info = snapshot.data;
                 final label = info == null
                     ? ' '
-                    : 'Version ${info.version} (${info.buildNumber})';
+                    : 'Version ${info.version}';
                 return Text(
                   label,
                   style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 15),

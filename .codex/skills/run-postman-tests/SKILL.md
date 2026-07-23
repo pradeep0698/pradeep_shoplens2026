@@ -1,3 +1,8 @@
+---
+name: run-postman-tests
+description: Run the ShopLens Postman/Newman test collections (AI Analyzer, Product Matcher, State Manager, Voice Assistant, Pub/Sub Worker, end-to-end flows) against shoplens-dev or cookshop-dev-rajan-prod, and generate an HTML test report. Use when asked to run Postman tests, Newman tests, or check ShopLens service health/regressions.
+---
+
 Run the ShopLens Postman collections with Newman and generate HTML test reports.
 
 Run `bash scripts/run-postman-tests.sh` from the repo root.

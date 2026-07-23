@@ -11,7 +11,7 @@ Deploy directly from `main` to cookshop-dev (Rajan prod). No separate release br
 | Branch | `main` | `main` (deploy directly) |
 | GCP Project | `shoplens-dev-499700` | `cookshop-dev-prj` |
 | Firebase Project | `shoplens-dev-499700` | `cookshop-dev-prj-bd7e2` |
-| Android App ID | `com.shoplens.app` | `com.cookshop.mvp` |
+| Android App ID | `com.shoplens.app` | `com.cookshop.cookshop` |
 | Project Number | `935092313069` | `82592393149` |
 
 ---

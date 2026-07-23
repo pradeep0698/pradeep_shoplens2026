@@ -31,9 +31,11 @@ fi
 cp "$GOOGLE_SERVICES" "$GOOGLE_SERVICES.bak"
 cp "$COOKSHOP_GOOGLE_SERVICES" "$GOOGLE_SERVICES"
 
-# Patch applicationId to com.cookshop.mvp (Firebase project registers this package name)
+# Patch applicationId to com.cookshop.cookshop (Firebase project registers this package
+# name for both Android and iOS; do not use com.cookshop.mvp, a second unused
+# Android registration on the same project)
 cp "$BUILD_GRADLE" "$BUILD_GRADLE.bak"
-sed -i 's/applicationId "com\.shoplens\.app"/applicationId "com.cookshop.mvp"/' "$BUILD_GRADLE"
+sed -i 's/applicationId "com\.shoplens\.app"/applicationId "com.cookshop.cookshop"/' "$BUILD_GRADLE"
 
 cleanup() {
   echo "Restoring original google-services.json and build.gradle..."

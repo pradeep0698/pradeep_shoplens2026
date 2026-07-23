@@ -43,9 +43,14 @@ bash scripts/deploy-cookshop-dev.sh --frontend              # frontend only
    ```
    cd mobile && bash scripts/build-cookshop-dev-apk.sh
    ```
-   And iOS: trigger Codemagic build manually from UI (firebase-cookshop var group)
+   And iOS: trigger the Codemagic `mobile-rajan-prod-build` workflow manually from the UI
+   (branch: `main`). It always uses the `rajan-prod` variable group and patches the app identity
+   to `com.cookshop.cookshop` (Android and iOS) at build time — no manual `codemagic.yaml`
+   editing needed. Never use `com.cookshop.mvp` — it's a second, unused Android registration
+   on the same Firebase project.
 
 ## Known issues to watch for
 
 - **Firebase deploy needs the right account**: `shoplens.ai@gmail.com` does NOT have access to `cookshop-dev-prj-bd7e2`. The user needs to run `firebase login:add` with the account that owns that project before frontend deploy works.
 - **FastAPI version**: All services use `fastapi==0.138.1`. If a service fails to start with `HealthCheckContainerError`, check `requirements.txt` — using `pydantic.Field()` for GET query params crashes on startup with newer FastAPI; use `fastapi.Query()` instead.
+- **Mobile CI is split by workflow, not by a shared `groups:` line**: `codemagic.yaml` has separate `mobile-shoplens-dev-build` (develop branch, `firebase-2026` group) and `mobile-rajan-prod-build` (main branch, `rajan-prod` group) workflows, so there's no manual group-flipping step anymore. If `rajan-prod`'s `GOOGLE_SERVICES_JSON`/`GOOGLE_SERVICE_INFO_PLIST` secrets ever get regenerated, confirm they still register `com.cookshop.mvp` (Android) and `com.cookshop.cookshop` (iOS) — those are the package/bundle IDs the workflow patches to at build time.

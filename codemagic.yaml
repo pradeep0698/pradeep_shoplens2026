@@ -1,6 +1,6 @@
 workflows:
-  mobile-dual-build:
-    name: Flutter Android & iOS Build
+  mobile-shoplens-dev-build:
+    name: Flutter Android & iOS Build (shoplens2026-dev)
     max_build_duration: 60
     environment:
       flutter: stable
@@ -39,6 +39,73 @@ workflows:
             ios/Runner.xcodeproj/project.pbxproj
       - name: Build iOS app (no codesign)
         script: flutter build ios --release --no-codesign --dart-define=VOICE_DIRECT_CONNECT_ENABLED=true
+      - name: Package IPA
+        script: |
+          mkdir -p build/ios/iphoneos/Payload
+          cp -r build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/
+          cd build/ios/iphoneos && zip -r ShopLens.ipa Payload
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+      - build/ios/iphoneos/ShopLens.ipa
+
+  mobile-rajan-prod-build:
+    name: Flutter Android & iOS Build (rajan-prod / cookshop-dev)
+    max_build_duration: 60
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      groups:
+        - rajan-prod
+      vars:
+        FLUTTER_XCODE_CODE_SIGNING_ALLOWED: "NO"
+        FLUTTER_XCODE_CODE_SIGNING_REQUIRED: "NO"
+    working_directory: mobile
+    scripts:
+      - name: Inject secrets
+        script: |
+          : "${VOICE_ASSISTANT_API_URL:?ERROR: Add VOICE_ASSISTANT_API_URL to the rajan-prod Codemagic variable group.}"
+          echo $GOOGLE_SERVICE_INFO_PLIST | base64 --decode > ios/Runner/GoogleService-Info.plist
+          echo $GOOGLE_SERVICES_JSON | base64 --decode > android/app/google-services.json
+          python3 -m json.tool android/app/google-services.json > /dev/null || {
+            echo "ERROR: android/app/google-services.json is not valid JSON after decoding GOOGLE_SERVICES_JSON.";
+            echo "Check that the GOOGLE_SERVICES_JSON env var in Codemagic is set and contains a clean base64 string (no surrounding quotes).";
+            exit 1;
+          }
+          printf "ANALYZER_API_URL=%s\nMATCHER_API_URL=%s\nSTATE_API_URL=%s\nVOICE_ASSISTANT_API_URL=%s\n" \
+            "$ANALYZER_API_URL" "$MATCHER_API_URL" "$STATE_API_URL" "$VOICE_ASSISTANT_API_URL" > .env
+      - name: Patch app identity for cookshop-dev
+        script: |
+          # Ephemeral, CI-checkout-only patch (never committed). The rajan-prod
+          # Firebase project (cookshop-dev-prj-bd7e2) has no app registered under
+          # com.shoplens.app — it registers com.cookshop.cookshop for both Android
+          # and iOS, matching mobile/scripts/build-cookshop-dev-apk.sh. Do not use
+          # com.cookshop.mvp — it's a second, unused Android registration on the
+          # same Firebase project.
+          sed -i 's/applicationId "com\.shoplens\.app"/applicationId "com.cookshop.cookshop"/' \
+            android/app/build.gradle
+          sed -i 's/PRODUCT_BUNDLE_IDENTIFIER = com\.shoplens\.app;/PRODUCT_BUNDLE_IDENTIFIER = com.cookshop.cookshop;/g; s/PRODUCT_BUNDLE_IDENTIFIER = com\.shoplens\.app\.RunnerTests;/PRODUCT_BUNDLE_IDENTIFIER = com.cookshop.cookshop.RunnerTests;/g' \
+            ios/Runner.xcodeproj/project.pbxproj
+      - name: Disable Swift Package Manager
+        script: flutter config --no-enable-swift-package-manager
+      - name: Flutter pub get
+        script: flutter pub get
+      - name: Build Android APK
+        script: |
+          flutter build apk --release \
+            --dart-define=VOICE_DIRECT_CONNECT_ENABLED=true \
+            --dart-define-from-file=.dart_define/cookshop-dev.json
+      - name: Install CocoaPods
+        script: cd ios && pod install
+      - name: Patch Xcode signing
+        script: |
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual;/g' \
+            ios/Runner.xcodeproj/project.pbxproj
+      - name: Build iOS app (no codesign)
+        script: |
+          flutter build ios --release --no-codesign \
+            --dart-define=VOICE_DIRECT_CONNECT_ENABLED=true \
+            --dart-define-from-file=.dart_define/cookshop-dev.json
       - name: Package IPA
         script: |
           mkdir -p build/ios/iphoneos/Payload

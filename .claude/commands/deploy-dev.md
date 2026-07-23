@@ -52,8 +52,13 @@ bash scripts/deploy-shoplens2026-dev.sh --frontend               # frontend only
    (Cloud Run URLs can be re-derived if they ever change: `gcloud run services list --project=project-b1a5dd5a-69e6-4db3-9d7 --region=us-central1 --format="table(metadata.name,status.url)"`.)
 3. Report a summary table: service name, HTTP status, health response body
 4. If any service returns non-200, show the body and flag it
+5. Remind the user about mobile if `mobile/` changed: trigger the Codemagic
+   `mobile-shoplens-dev-build` workflow manually from the UI (branch: `develop`). It always uses
+   the `firebase-2026` variable group — no manual `codemagic.yaml` editing needed.
 
 ## Known issues to watch for
+
+- **Mobile CI is split by workflow, not by a shared `groups:` line**: `codemagic.yaml` has separate `mobile-shoplens-dev-build` (develop branch, `firebase-2026` group, `com.shoplens.app`) and `mobile-rajan-prod-build` (main branch, `rajan-prod` group, patches app identity to `com.cookshop.cookshop` on both Android and iOS — never `com.cookshop.mvp`) workflows (see `deploy-cookshop-dev.md`). There's no manual group-flipping step anymore — just trigger the workflow that matches the target environment.
 
 - **Two separate deploy paths, two separate trust models.** This script deploys with whatever's in the local `.env.shoplens2026-dev` files using the operator's own `gcloud`/`firebase` credentials (owner-level access confirmed 2026-07-04). The GitHub Actions workflow instead deploys via Workload Identity Federation using secrets stored in GitHub (`SHOPLENS2026DEV_*_ENV`). If both paths are used interchangeably, the two env-var sources can drift — if you edit env vars, update both the local `.env.shoplens2026-dev` file and the matching GitHub Secret, or pick one path as the source of truth for this project.
 - **`gh` CLI currently has no access to `shoplens2026ai/shoplens2026`.** As of 2026-07-04, `gh api repos/shoplens2026ai/shoplens2026` 404s under the active `GITHUB_TOKEN`-based auth in this environment — the GitHub Actions workflow can't be triggered or inspected via `gh` until that's fixed (different token/account with repo access, or grant the existing token access). Not a blocker for this script, which never calls `gh`.
